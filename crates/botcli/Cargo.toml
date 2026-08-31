@@ -1,0 +1,13 @@
+[package]
+name = "botcli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Occupant publish tool; stamps prefix and completes the Kelpie ask"
+
+[dependencies]
+botserver-domain = { path = "../domain" }
+
+[lints]
+workspace = true

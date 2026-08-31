@@ -1,0 +1,13 @@
+[package]
+name = "botserver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Host occupant and per-bot actors"
+
+[dependencies]
+botserver-domain = { path = "../domain" }
+
+[lints]
+workspace = true
