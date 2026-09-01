@@ -426,6 +426,31 @@ mod tests {
     }
 
     #[test]
+    fn unnameable_channel_is_acknowledged_without_a_turn() {
+        let config = write_config("bot");
+        let database = temp_path("host").with_extension("sqlite");
+        let (registry, mut repository) = load_host(&config, &database).expect("load");
+        let event_id = botserver_domain::EventId::parse_hex(&"d".repeat(64)).expect("event");
+        let action = IngestAction::TurnCandidate {
+            event_id: event_id.clone(),
+            channel_id: "not-a-uuid".to_owned(),
+            reply_to_event_id: None,
+            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], "bot: hi")
+                .expect("trigger"),
+        };
+
+        assert_eq!(
+            dispatch_ingest(registry.bots(), &mut repository, &action).expect("dispatch"),
+            TriggerOutcome::Declined
+        );
+        assert!(repository.event_processed(&event_id).expect("processed"));
+        assert!(repository
+            .turns_for_session(registry.bots()[0].id(), "not-a-uuid")
+            .expect("turns")
+            .is_empty());
+    }
+
+    #[test]
     fn non_trigger_dispatch_does_not_create_a_turn() {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");

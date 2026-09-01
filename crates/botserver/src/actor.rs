@@ -709,7 +709,16 @@ pub fn persist_ingest<R: HostRepository>(
             } else {
                 channel_display
             };
-            ensure_bot_session(bot, repository, channel_id, display)?;
+            match ensure_bot_session(bot, repository, channel_id, display) {
+                Ok(_) => {}
+                Err(ActorError::UnnameableSession) => {
+                    repository
+                        .mark_event_processed(event_id)
+                        .map_err(ActorError::Repository)?;
+                    return Ok(TriggerOutcome::Declined);
+                }
+                Err(error) => return Err(error),
+            }
             let Some(_) = repository
                 .enqueue_unprocessed_turn(&NewTurn {
                     bot_id: bot.id().clone(),
@@ -1685,6 +1694,32 @@ mod tests {
         );
         assert!(repository
             .turns_for_session(bot.id(), channel)
+            .expect("turns")
+            .is_empty());
+        assert!(repository.event_processed(&event).expect("processed"));
+    }
+
+    #[test]
+    fn persist_ingest_declines_a_non_uuid_channel() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot = bot();
+        let event = event_id('a');
+        let action = crate::relay::IngestAction::TurnCandidate {
+            event_id: event.clone(),
+            channel_id: "not-a-uuid".to_owned(),
+            reply_to_event_id: None,
+            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], "bot: hi")
+                .expect("trigger"),
+        };
+
+        assert_eq!(
+            persist_ingest(&bot, &mut repository, &action, "").expect("persist"),
+            TriggerOutcome::Declined
+        );
+        assert!(repository
+            .turns_for_session(bot.id(), "not-a-uuid")
             .expect("turns")
             .is_empty());
         assert!(repository.event_processed(&event).expect("processed"));
