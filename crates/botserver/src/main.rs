@@ -328,6 +328,9 @@ async fn serve(
                         for event in events {
                             observe_event(&mut actor, &kelpie, &waiter, &mut ingest, &event)?;
                         }
+                        if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
+                            eprintln!("queued occupant resume failed: {error}");
+                        }
                     }
                     Err(error) => {
                         let message = error.to_string();
@@ -348,7 +351,16 @@ fn run(args: &Args) -> Result<(), HostError> {
         return Ok(());
     }
     let operator = OperatorEnv::from_env()?;
-    let bot = registry.bots().first().cloned().ok_or(HostError::NoBots)?;
+    let bots = registry.bots();
+    let bot = bots.first().cloned().ok_or(HostError::NoBots)?;
+    if bots.len() > 1 {
+        let extra = bots[1..]
+            .iter()
+            .map(|bot| bot.id().as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("using first bot {}; ignoring {extra}", bot.id().as_str());
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

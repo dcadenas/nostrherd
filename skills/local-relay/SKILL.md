@@ -76,5 +76,9 @@ EOF
 envchain botserver-proof botserver --config … --database …
 ```
 
+`botserver` must run in a Herdr pane (`HERDR_PANE_ID` set) so it can
+adopt that pane as waiter `botserver` (D2). A non-Herdr shell exits
+with `missing HERDR_PANE_ID`.
+
 `envchain NAMESPACE CMD` injects Buzz vars into CMD. The binaries only
 read the environment (D29). There is no `--envchain` flag.
