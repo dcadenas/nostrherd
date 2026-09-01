@@ -123,17 +123,21 @@ subset.
 8. **Busy.** Two `@daniel bot:` in `#foobar` before the first reply:
    one occupant, two turns in order.
 9. **Gone pane.** Occupant process died with an open ask: recover that
-   logical agent, do not start a namesake twin.
+   logical agent, do not start a namesake twin. The user still gets at
+   most one `[bot]:` for that call.
 10. **Edit / delete.** Edit of the triggering message before the bot
-    posts replaces what it sees. Delete before it posts: no post.
-    After it posted: leave `[bot]:` up.
+    posts: the one eventual `[bot]:` answers the **latest** text
+    (cancel the old ask, ask again). Delete before it posts: no post.
+    After it posted: leave `[bot]:` up. A late `botcli` on a cancelled
+    ask MUST NOT publish.
 11. **Long work.** One stamped reply when done. No working ping in v1.
 12. **Desktop.** Buzz desktop is still Daniel. The host does not mark
     him typing or rewrite his presence.
 
 ## Issue work
 
-An issue MUST list `Depends on:` issue numbers. Before starting work,
-the agent MUST `git pull`, re-read `SPEC.md` and `docs/decision-log.md`
-at HEAD, and comment on the issue if HEAD changed the contract, then
-adjust scope before writing code.
+An issue MUST list `Depends on:` and `Contract baseline:` (commit SHA
+plus D-numbers). Before starting: update from `origin/master`; re-read
+`SPEC.md` and `docs/decision-log.md` at that HEAD; if HEAD ≠ baseline,
+**edit the issue body** (scope, acceptance, deps, new baseline). A
+comment is not enough. Do not start while a listed dependency is open.

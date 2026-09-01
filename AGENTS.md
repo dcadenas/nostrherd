@@ -25,10 +25,11 @@ never `kelpie from=`.
 
 ## Issues
 
-Before starting an issue: `git pull`; re-read `SPEC.md` and
-`docs/decision-log.md` at HEAD; if the contract moved, comment on the
-issue and reshape the work. Honor `Depends on:` — do not start a
-blocked issue.
+Honor `Depends on:`. Before starting: `git fetch origin` and update to
+`origin/master`; re-read `SPEC.md` and `docs/decision-log.md` at that
+HEAD. If HEAD ≠ the issue's `Contract baseline:` SHA, **edit the issue
+body** (scope, acceptance, deps, new baseline). Comments are not a
+substitute.
 
 ## Quality gates
 

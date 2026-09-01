@@ -117,13 +117,21 @@ Status: accepted
 `@daniel bot:` inside a thread still addresses `bot-<channel>`. The
 thread id is `botcli --reply-to` on that Turn. No extra occupant.
 
-## D14. Edits replace an unposted turn only
+## D14. Edits collapse to one reply that matches the latest text
 
 Status: accepted
 
-If the triggering event is edited before `botcli` publishes, the host
-MUST replace the in-flight prompt body. After a successful post, an
-edit is ignored unless a new trigger arrives.
+User-visible: at most one `[bot]:` for that triggering event, and it
+answers the **latest** body.
+
+Turn transition, if `botcli` has not published: `kelpie cancel` the
+open ask (abandoned: the question changed), then open a **new** Turn /
+ask on the same `EventId` with the new body. `botcli` MUST NOT publish
+if its ask is already cancelled (so a late occupant cannot post the
+stale text).
+
+If a `[bot]:` already landed, later edits of the trigger are ignored
+unless a new `@daniel bot:` arrives.
 
 ## D15. Deletes abandon an unposted turn
 
@@ -170,3 +178,16 @@ Status: accepted
 If the pane is gone but the ask is open: Kelpie reminder, then
 `adopt --logical-id`. Do not `kelpie start` a new logical agent
 because the public name is free.
+
+User-visible: still at most one eventual `[bot]:` for that Turn
+(recovery MUST NOT double-post).
+
+## D21. Issue contract baseline is a SHA, not a comment
+
+Status: accepted
+
+Each implementation issue records `Contract baseline: <sha>` and the
+D-numbers it implements. Before coding, the agent MUST update from
+`origin/master` (not an arbitrary topic-branch pull). If HEAD differs
+from the baseline, it MUST edit the issue body (scope, acceptance,
+deps) and the baseline SHA. A comment alone is not enough.
