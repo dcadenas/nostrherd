@@ -200,6 +200,7 @@ ok=any(
     for m in items
 )
 print("body_ok" if ok else "body_bad")
+raise SystemExit(0 if ok else 1)
 ' "$event_id"
 }
 
