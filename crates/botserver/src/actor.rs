@@ -483,13 +483,7 @@ where
             }),
             Err(KelpieError::TargetUnavailable) => {
                 let snapshot_relpath = self.refresh_snapshot(session)?;
-                self.start_occupant(
-                    kelpie,
-                    waiter,
-                    session,
-                    &snapshot_relpath,
-                    Some(logical_id),
-                )?;
+                self.start_occupant(kelpie, waiter, session, &snapshot_relpath, Some(logical_id))?;
                 Ok(true)
             }
             Err(error) => Err(ActorError::Kelpie(error)),
@@ -1142,6 +1136,7 @@ mod tests {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
             start(),
+            renewed(),
             whoami(),
             asked("ask-1"),
             failure("conflict", "no ready agent for alias bot-foobar"),
@@ -1189,7 +1184,14 @@ mod tests {
     #[test]
     fn ready_open_occupant_is_left_bound_without_asking() {
         let (mut actor, kelpie, runner, panes) =
-            actor([adopt(), start(), whoami(), asked("ask-1"), whoami()]);
+            actor([
+                adopt(),
+                start(),
+                renewed(),
+                whoami(),
+                asked("ask-1"),
+                whoami(),
+            ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
@@ -1210,7 +1212,14 @@ mod tests {
     #[test]
     fn recovery_refuses_a_namesake_twin() {
         let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), start(), whoami(), asked("ask-1"), whoami_other()]);
+            actor([
+                adopt(),
+                start(),
+                renewed(),
+                whoami(),
+                asked("ask-1"),
+                whoami_other(),
+            ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
@@ -1230,6 +1239,7 @@ mod tests {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
             start(),
+            renewed(),
             whoami(),
             asked("ask-1"),
             failure("conflict", "no ready agent for alias bot-foobar"),
@@ -1251,6 +1261,7 @@ mod tests {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
             start(),
+            renewed(),
             whoami(),
             asked("ask-1"),
             success(&serde_json::json!({ "incarnation_id": "broken" })),
@@ -1273,6 +1284,7 @@ mod tests {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
             start(),
+            renewed(),
             whoami(),
             asked("ask-1"),
             failure("rejected", "kelpie daemon unavailable"),
@@ -1295,7 +1307,14 @@ mod tests {
         let first_channel = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
         let second_channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
         let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), whoami_other(), whoami(), asked("ask-2")]);
+            actor([
+                adopt(),
+                whoami_other(),
+                whoami(),
+                renewed(),
+                whoami(),
+                asked("ask-2"),
+            ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         actor
             .repository
