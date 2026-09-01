@@ -145,6 +145,7 @@ If the triggering event is deleted before publish, the host MUST
 
 Status: accepted
 
+Kind 9 and Buzz stream-message-v2 kind 40002 are channel/DM text.
 Reactions, huddles, canvas, kind:0, and file-only events without a
 `bot:` text body MUST NOT open a Turn.
 

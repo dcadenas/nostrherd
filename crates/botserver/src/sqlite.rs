@@ -583,9 +583,17 @@ mod tests {
         assert!(repository.event_processed(&event.event_id).unwrap());
         assert_eq!(repository.relay_replay_since().unwrap(), Some(1_100));
 
+        let mut declined = event.clone();
+        declined.event_id = event_id('d');
+        declined.created_at = 1_500;
+        assert!(repository.index_event(&declined, true).unwrap());
+        assert_eq!(repository.relay_replay_since().unwrap(), Some(1_500));
+        assert!(repository.mark_event_processed(&declined.event_id).unwrap());
+        assert_eq!(repository.relay_replay_since().unwrap(), Some(1_100));
+
         assert_eq!(
             repository.indexed_events_for_channel("channel").unwrap(),
-            vec![event, newer_ordinary]
+            vec![event, declined, newer_ordinary]
         );
         assert!(repository
             .indexed_events_for_channel("different-channel")

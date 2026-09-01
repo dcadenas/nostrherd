@@ -11,6 +11,7 @@ use nostr_sdk::prelude::{
 use crate::{HostRepository, IndexedRelayEvent};
 
 const CHANNEL_MESSAGE_KIND: u16 = 9;
+const STREAM_MESSAGE_V2_KIND: u16 = 40_002;
 const MESSAGE_EDIT_KIND: u16 = 40_003;
 const NIP09_DELETE_KIND: u16 = 5;
 const BUZZ_DELETE_KIND: u16 = 9_005;
@@ -148,7 +149,11 @@ impl<R: HostRepository> RelayIngest<R> {
     pub fn ingest(&mut self, event: &Event) -> Result<Option<IngestAction>, IngestError<R::Error>> {
         if !matches!(
             event.kind.as_u16(),
-            CHANNEL_MESSAGE_KIND | MESSAGE_EDIT_KIND | NIP09_DELETE_KIND | BUZZ_DELETE_KIND
+            CHANNEL_MESSAGE_KIND
+                | STREAM_MESSAGE_V2_KIND
+                | MESSAGE_EDIT_KIND
+                | NIP09_DELETE_KIND
+                | BUZZ_DELETE_KIND
         ) {
             return Ok(None);
         }
@@ -164,7 +169,7 @@ impl<R: HostRepository> RelayIngest<R> {
         let target_event_id = target_event_id(&tags);
         let author = effective_author(&event.pubkey.to_hex(), &self.relay_pubkey, &tags);
         let action = match event.kind.as_u16() {
-            CHANNEL_MESSAGE_KIND => Ok(self.message_action(
+            CHANNEL_MESSAGE_KIND | STREAM_MESSAGE_V2_KIND => Ok(self.message_action(
                 event_id.clone(),
                 channel_id.clone(),
                 &tags,
@@ -480,7 +485,10 @@ fn reply_target(tags: &[Vec<String>]) -> Option<EventId> {
 
 fn message_filter(operator_pubkey: &str, since: Timestamp) -> Filter {
     Filter::new()
-        .kind(Kind::Custom(CHANNEL_MESSAGE_KIND))
+        .kinds([
+            Kind::Custom(CHANNEL_MESSAGE_KIND),
+            Kind::Custom(STREAM_MESSAGE_V2_KIND),
+        ])
         .custom_tag(SingleLetterTag::lowercase(Alphabet::P), operator_pubkey)
         .since(since)
 }
@@ -491,7 +499,10 @@ fn channel_filter(channel_ids: &[String], since: Timestamp) -> Option<Filter> {
     }
     Some(
         Filter::new()
-            .kind(Kind::Custom(CHANNEL_MESSAGE_KIND))
+            .kinds([
+                Kind::Custom(CHANNEL_MESSAGE_KIND),
+                Kind::Custom(STREAM_MESSAGE_V2_KIND),
+            ])
             .custom_tags(
                 SingleLetterTag::lowercase(Alphabet::H),
                 channel_ids.iter().map(String::as_str),
@@ -720,6 +731,23 @@ mod tests {
         assert_eq!(ingest.ingest(&message).unwrap(), None);
         assert_eq!(ingest.repository.indexed.len(), 1);
         assert_eq!(ingest.repository.indexed[0].content, "ordinary");
+    }
+
+    #[test]
+    fn stream_message_v2_can_emit_a_trigger() {
+        let operator = "a".repeat(64);
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), FakeRepository::default());
+        let message = event_with_keys(
+            &Keys::generate(),
+            STREAM_MESSAGE_V2_KIND,
+            "bot: rich message",
+            [tag(&["h", "channel"]), tag(&["p", &operator])],
+        );
+
+        assert!(matches!(
+            ingest.ingest(&message).unwrap(),
+            Some(IngestAction::TurnCandidate { .. })
+        ));
     }
 
     #[test]
@@ -985,7 +1013,7 @@ mod tests {
         let since = Timestamp::from(42_u64);
 
         let message_json = serde_json::to_value(message_filter(&operator, since)).unwrap();
-        assert_eq!(message_json["kinds"], serde_json::json!([9]));
+        assert_eq!(message_json["kinds"], serde_json::json!([9, 40002]));
         assert_eq!(message_json["#p"], serde_json::json!([operator]));
         assert_eq!(message_json["since"], 42);
 
@@ -994,7 +1022,7 @@ mod tests {
                 .expect("filter"),
         )
         .unwrap();
-        assert_eq!(channel_json["kinds"], serde_json::json!([9]));
+        assert_eq!(channel_json["kinds"], serde_json::json!([9, 40002]));
         assert_eq!(
             channel_json["#h"],
             serde_json::json!(["channel-a", "channel-b"])
