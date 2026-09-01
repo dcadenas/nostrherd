@@ -321,6 +321,26 @@ impl HostRepository for SqliteRepository {
             .optional()
     }
 
+    fn session_by_name(&self, session_name: &str) -> Result<Option<SessionRecord>, Self::Error> {
+        self.connection
+            .query_row(
+                "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id
+                 FROM sessions WHERE session_name = ?1",
+                [session_name],
+                |row| {
+                    let stored_bot_id: String = row.get(0)?;
+                    Ok(SessionRecord {
+                        bot_id: parse_bot_id(&stored_bot_id, 0)?,
+                        channel_id: row.get(1)?,
+                        session_name: row.get(2)?,
+                        occupant_logical_id: row.get(3)?,
+                        renew_id: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
     fn open_next_turn(
         &mut self,
         bot_id: &BotId,
@@ -616,8 +636,13 @@ mod tests {
 
         assert_eq!(
             repository.session(&bot_id, channel_id).unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            repository.session_by_name(&expected.session_name).unwrap(),
             Some(expected)
         );
+        assert_eq!(repository.session_by_name("missing").unwrap(), None);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! No I/O. SQLite, Kelpie, Herdr, and the relay live in adapters.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// Stable configured bot slug, e.g. `bot`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,6 +37,65 @@ impl BotId {
 impl fmt::Display for BotId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Inbound trigger token required by D9.
+pub const INBOUND_TRIGGER: &str = "bot:";
+
+/// Outbound stamp applied by `botcli`.
+pub const OUTBOUND_PREFIX: &str = "[bot]:";
+
+/// Configured personality mapped to one in-process actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bot {
+    id: BotId,
+    corpus_path: PathBuf,
+    inbound_trigger: String,
+    outbound_prefix: String,
+    occupant_kind: String,
+}
+
+impl Bot {
+    /// Construct a bot with the D9 trigger and stamp protocol.
+    #[must_use]
+    pub fn new(id: BotId, corpus_path: PathBuf, occupant_kind: impl Into<String>) -> Option<Self> {
+        let occupant_kind = occupant_kind.into();
+        if occupant_kind.is_empty() || occupant_kind.chars().any(char::is_whitespace) {
+            return None;
+        }
+        Some(Self {
+            id,
+            corpus_path,
+            inbound_trigger: INBOUND_TRIGGER.to_owned(),
+            outbound_prefix: OUTBOUND_PREFIX.to_owned(),
+            occupant_kind,
+        })
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &BotId {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn corpus_path(&self) -> &Path {
+        &self.corpus_path
+    }
+
+    #[must_use]
+    pub fn inbound_trigger(&self) -> &str {
+        &self.inbound_trigger
+    }
+
+    #[must_use]
+    pub fn outbound_prefix(&self) -> &str {
+        &self.outbound_prefix
+    }
+
+    #[must_use]
+    pub fn occupant_kind(&self) -> &str {
+        &self.occupant_kind
     }
 }
 
@@ -243,6 +303,18 @@ mod tests {
         assert!(BotId::new("").is_none());
         assert!(BotId::new("Bot").is_none());
         assert_eq!(BotId::new("bot").map(|b| b.to_string()), Some("bot".into()));
+    }
+
+    #[test]
+    fn bot_uses_fixed_trigger_protocol_and_rejects_empty_kind() {
+        let id = BotId::new("bot").expect("bot");
+        assert!(Bot::new(id.clone(), PathBuf::from("/corpus"), "").is_none());
+        assert!(Bot::new(id.clone(), PathBuf::from("/corpus"), "open code").is_none());
+        let bot = Bot::new(id, PathBuf::from("/corpus"), "opencode").expect("bot");
+        assert_eq!(bot.inbound_trigger(), INBOUND_TRIGGER);
+        assert_eq!(bot.outbound_prefix(), OUTBOUND_PREFIX);
+        assert_eq!(bot.occupant_kind(), "opencode");
+        assert_eq!(bot.corpus_path(), Path::new("/corpus"));
     }
 
     #[test]

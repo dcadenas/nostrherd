@@ -231,3 +231,13 @@ an empty set closes its corresponding subscription rather than widening
 it. The consumer MUST acknowledge every emitted ingest action, including
 actions it intentionally declines, so declined work cannot pin the replay
 cursor indefinitely.
+
+## D25. Occupant start is a bootstrap tell; triggers are always asks
+
+Status: accepted
+
+A new channel occupant is created with `kelpie start --tell` and a short
+trusted bootstrap body. The triggering Nostr text is always a `kelpie
+ask` owned by waiter `botserver` (D5), including on the first trigger.
+Start and ask keep separate receipts so an accepted runtime does not
+imply the trigger obligation exists.

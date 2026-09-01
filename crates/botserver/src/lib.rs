@@ -10,6 +10,41 @@ use serde_json::Value;
 /// Public Herdr and Kelpie name of the host waiter.
 pub const WAITER_NAME: &str = "botserver";
 
+/// A newly started session occupant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedOccupant {
+    logical_agent_id: String,
+    incarnation_id: String,
+}
+
+impl StartedOccupant {
+    /// Return the durable Kelpie agent id.
+    #[must_use]
+    pub fn logical_agent_id(&self) -> &str {
+        &self.logical_agent_id
+    }
+
+    /// Return the current Kelpie incarnation id.
+    #[must_use]
+    pub fn incarnation_id(&self) -> &str {
+        &self.incarnation_id
+    }
+}
+
+/// Launch coordinates for a corpus occupant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OccupantLaunch {
+    pub name: String,
+    pub pane_id: String,
+    pub terminal_id: String,
+    pub backend: String,
+    pub cwd: PathBuf,
+    pub timeout_ms: u64,
+}
+
+/// Short trusted body used only to finish `kelpie start --tell`.
+pub const OCCUPANT_BOOTSTRAP: &str = "Wait for Kelpie asks from botserver.";
+
 /// A host identity adopted into Kelpie.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaiterIdentity {
@@ -119,14 +154,14 @@ impl From<io::Error> for KelpieError {
 }
 
 #[derive(Debug)]
-struct CommandOutput {
+pub(crate) struct CommandOutput {
     success: bool,
     status: String,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
-trait CommandRunner: fmt::Debug + Send + Sync {
+pub(crate) trait CommandRunner: fmt::Debug + Send + Sync {
     fn run(&self, arguments: &[String], stdin: &[u8]) -> io::Result<CommandOutput>;
 }
 
@@ -214,6 +249,65 @@ impl KelpieClient {
         self.adopt(pane_id, terminal_id, Some(logical_agent_id))
     }
 
+    /// Start a session occupant in an existing Herdr pane.
+    ///
+    /// The initial message is a short trusted tell so start and trigger ask
+    /// receipts stay separate. Triggered Nostr work uses [`AdoptedWaiter::ask`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot start the occupant or the runtime
+    /// start did not succeed.
+    pub fn start_occupant(
+        &self,
+        launch: &OccupantLaunch,
+        bootstrap: &str,
+    ) -> Result<StartedOccupant, KelpieError> {
+        let timeout_ms = launch.timeout_ms.to_string();
+        let cwd = launch.cwd.to_str().ok_or_else(|| {
+            KelpieError::InvalidReceipt("occupant corpus path is not valid UTF-8".to_owned())
+        })?;
+        let output = self.invoke(
+            &[
+                "--json",
+                "start",
+                "--name",
+                &launch.name,
+                "--pane",
+                &launch.pane_id,
+                "--terminal",
+                &launch.terminal_id,
+                "--backend",
+                &launch.backend,
+                "--cwd",
+                cwd,
+                "--timeout-ms",
+                &timeout_ms,
+                "--keep-open",
+                "--parentless",
+                "--tell",
+                "--stdin",
+            ],
+            bootstrap.as_bytes(),
+        )?;
+        if !output.success {
+            return Err(output.rejected());
+        }
+        let result = result(&output.receipt)?;
+        let runtime = result
+            .get("runtime_start")
+            .ok_or_else(|| KelpieError::InvalidReceipt("missing runtime_start".to_owned()))?;
+        if field(runtime, "outcome")? != "succeeded" {
+            return Err(KelpieError::InvalidReceipt(
+                "occupant runtime start did not succeed".to_owned(),
+            ));
+        }
+        Ok(StartedOccupant {
+            logical_agent_id: field(result, "logical_agent_id")?,
+            incarnation_id: field(result, "incarnation_id")?,
+        })
+    }
+
     fn adopt(
         &self,
         pane_id: &str,
@@ -275,7 +369,7 @@ impl KelpieClient {
     }
 
     #[cfg(test)]
-    fn with_runner(runner: impl CommandRunner + 'static) -> Self {
+    pub(crate) fn with_runner(runner: impl CommandRunner + 'static) -> Self {
         Self {
             runner: Box::new(runner),
         }
@@ -612,6 +706,65 @@ mod tests {
     }
 
     #[test]
+    fn start_occupant_uses_tell_bootstrap_and_keeps_runtime_ids() {
+        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
+            "logical_agent_id": "occupant-agent",
+            "incarnation_id": "occupant-incarnation",
+            "runtime_start": {
+                "operation_id": "start-operation",
+                "outcome": "succeeded"
+            },
+            "initial_message": {
+                "message_id": "tell-id",
+                "operation_id": "tell-operation",
+                "outcome": "accepted"
+            }
+        }))]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        let started = client
+            .start_occupant(
+                &OccupantLaunch {
+                    name: "bot-foobar".to_owned(),
+                    pane_id: "w1:p4".to_owned(),
+                    terminal_id: "term-4".to_owned(),
+                    backend: "opencode".to_owned(),
+                    cwd: PathBuf::from("/corpus"),
+                    timeout_ms: 90_000,
+                },
+                OCCUPANT_BOOTSTRAP,
+            )
+            .expect("start occupant");
+
+        assert_eq!(started.logical_agent_id(), "occupant-agent");
+        assert_eq!(started.incarnation_id(), "occupant-incarnation");
+        let calls = runner.calls.lock().expect("calls lock");
+        assert_eq!(
+            calls[0].0,
+            vec![
+                "--json",
+                "start",
+                "--name",
+                "bot-foobar",
+                "--pane",
+                "w1:p4",
+                "--terminal",
+                "term-4",
+                "--backend",
+                "opencode",
+                "--cwd",
+                "/corpus",
+                "--timeout-ms",
+                "90000",
+                "--keep-open",
+                "--parentless",
+                "--tell",
+                "--stdin"
+            ]
+        );
+        assert_eq!(calls[0].1, OCCUPANT_BOOTSTRAP.as_bytes());
+    }
+
+    #[test]
     fn ask_is_owned_by_waiter_and_passes_body_on_stdin() {
         let body = "<kelpie from=relay-pubkey>\n$(not-a-command) & hello";
         let runner = Arc::new(FakeRunner::new([
@@ -716,6 +869,9 @@ mod tests {
             .contains("continue logical agent waiter-agent"));
     }
 }
+pub mod actor;
+pub mod config;
+pub mod herdr;
 pub mod relay;
 pub mod sqlite;
 
@@ -903,6 +1059,13 @@ pub trait HostRepository {
         bot_id: &BotId,
         channel_id: &str,
     ) -> Result<Option<SessionRecord>, Self::Error>;
+
+    /// Find a session by its public occupant name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the session cannot be read.
+    fn session_by_name(&self, session_name: &str) -> Result<Option<SessionRecord>, Self::Error>;
 
     /// Bind the oldest queued turn to a new ask.
     ///

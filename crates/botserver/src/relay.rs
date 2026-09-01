@@ -643,6 +643,13 @@ mod tests {
             unreachable!()
         }
 
+        fn session_by_name(
+            &self,
+            _session_name: &str,
+        ) -> Result<Option<SessionRecord>, Self::Error> {
+            unreachable!()
+        }
+
         fn open_next_turn(
             &mut self,
             _bot_id: &BotId,
