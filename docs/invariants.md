@@ -14,7 +14,7 @@ this file and SPEC disagree.
 | I7 | Turn states are parsed tokens; there is no `publishing` state | `turn_state_parses_known_tokens_only` |
 | I8 | Only queued→open/cancelled and open→posted/failed/cancelled are legal | `turn_transition_parses_legal_changes_only`, `turns_queue_in_order_and_state_changes_are_terminal` |
 | I9 | A claimed open turn MUST NOT be cancelled | `claimed_open_turn_cannot_be_cancelled`, `flow_10_claimed_turn_keeps_the_landing_reply` |
-| I10 | A late `botcli` on a cancelled ask MUST NOT publish | `spec_flow_10_cancelled_turn_never_reaches_envchain` |
+| I10 | A late `botcli` on a cancelled ask MUST NOT publish | `spec_flow_10_cancelled_turn_never_reaches_buzz` |
 
 SPEC user-visible flows are the product matrix in `docs/testing.md`.
 
