@@ -599,11 +599,19 @@ mod tests {
         );
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls[1].0[1], "start");
-        assert!(calls[1].0.windows(2).any(|pair| pair == ["--sender-id", "waiter-agent"]));
+        assert!(calls[1]
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--sender-id", "waiter-agent"]));
         assert_eq!(calls[1].1, OCCUPANT_BOOTSTRAP.as_bytes());
         assert_eq!(calls[3].0[1], "ask");
         assert_eq!(
-            calls[3].0[calls[3].0.iter().position(|arg| arg == "--idempotency-key").expect("key") + 1],
+            calls[3].0[calls[3]
+                .0
+                .iter()
+                .position(|arg| arg == "--idempotency-key")
+                .expect("key")
+                + 1],
             format!("{}:1", trigger.event_id.as_str())
         );
         assert_eq!(calls[3].1, trigger.nostr_body.as_bytes());
@@ -742,7 +750,8 @@ mod tests {
 
     #[test]
     fn ingest_turn_candidate_uses_the_actor_path() {
-        let (mut actor, kelpie, _runner, _panes) = actor([adopt(), start(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), whoami(), asked("ask-1")]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
         let action = crate::relay::IngestAction::TurnCandidate {
