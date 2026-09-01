@@ -51,12 +51,16 @@ impl SqliteRepository {
                  sequence INTEGER PRIMARY KEY,
                  session_id INTEGER NOT NULL REFERENCES sessions(id),
                  event_id TEXT NOT NULL CHECK(length(event_id) = 64),
-                 ask_id TEXT NOT NULL UNIQUE,
+                 ask_id TEXT UNIQUE,
                  reply_to_event_id TEXT CHECK(
                      reply_to_event_id IS NULL OR length(reply_to_event_id) = 64
                  ),
                  state TEXT NOT NULL CHECK(
-                     state IN ('open', 'posted', 'failed', 'cancelled')
+                     state IN ('queued', 'open', 'posted', 'failed', 'cancelled')
+                 ),
+                 CHECK(
+                     (state = 'queued' AND ask_id IS NULL)
+                     OR (state != 'queued' AND ask_id IS NOT NULL)
                  )
              ) STRICT;
 
@@ -103,6 +107,30 @@ impl HostRepository for SqliteRepository {
         Ok(changed == 1)
     }
 
+    fn enqueue_unprocessed_turn(
+        &mut self,
+        turn: &NewTurn,
+    ) -> Result<Option<TurnRecord>, Self::Error> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "INSERT INTO processed_events(event_id) VALUES (?1)
+             ON CONFLICT(event_id) DO NOTHING",
+            [turn.event_id.as_str()],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+
+        let record = insert_queued_turn(&transaction, turn)?;
+        transaction.commit()?;
+        Ok(Some(record))
+    }
+
+    fn enqueue_turn(&mut self, turn: &NewTurn) -> Result<TurnRecord, Self::Error> {
+        insert_queued_turn(&self.connection, turn)
+    }
+
     fn save_session(&mut self, session: &SessionRecord) -> Result<(), Self::Error> {
         self.connection.execute(
             "INSERT INTO sessions(
@@ -147,42 +175,76 @@ impl HostRepository for SqliteRepository {
             .optional()
     }
 
-    fn insert_turn(&mut self, turn: &NewTurn) -> Result<TurnRecord, Self::Error> {
-        let session_id: i64 = self.connection.query_row(
-            "SELECT id FROM sessions WHERE bot_id = ?1 AND channel_id = ?2",
-            params![turn.bot_id.as_str(), turn.channel_id],
-            |row| row.get(0),
+    fn open_next_turn(
+        &mut self,
+        bot_id: &BotId,
+        channel_id: &str,
+        ask_id: &str,
+    ) -> Result<Option<TurnRecord>, Self::Error> {
+        let transaction = self.connection.transaction()?;
+        let sequence = transaction
+            .query_row(
+                "SELECT t.sequence
+                 FROM turns AS t
+                 JOIN sessions AS s ON s.id = t.session_id
+                 WHERE s.bot_id = ?1 AND s.channel_id = ?2
+                   AND t.state = 'queued'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM turns AS active
+                       WHERE active.session_id = s.id AND active.state = 'open'
+                   )
+                 ORDER BY t.sequence
+                 LIMIT 1",
+                params![bot_id.as_str(), channel_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(sequence) = sequence else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        transaction.execute(
+            "UPDATE turns SET ask_id = ?1, state = 'open'
+             WHERE sequence = ?2 AND state = 'queued'",
+            params![ask_id, sequence],
         )?;
-        self.connection.execute(
-            "INSERT INTO turns(
-                 session_id, event_id, ask_id, reply_to_event_id, state
-             ) VALUES (?1, ?2, ?3, ?4, 'open')",
-            params![
-                session_id,
-                turn.event_id.as_str(),
-                turn.ask_id,
-                turn.reply_to_event_id.as_ref().map(EventId::as_str),
-            ],
+        let record = transaction.query_row(
+            "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
+                    t.reply_to_event_id, t.state
+             FROM turns AS t
+             JOIN sessions AS s ON s.id = t.session_id
+             WHERE t.sequence = ?1",
+            [sequence],
+            Self::read_turn,
         )?;
-        let sequence = self.connection.last_insert_rowid();
-
-        Ok(TurnRecord {
-            sequence,
-            bot_id: turn.bot_id.clone(),
-            channel_id: turn.channel_id.clone(),
-            event_id: turn.event_id.clone(),
-            ask_id: turn.ask_id.clone(),
-            reply_to_event_id: turn.reply_to_event_id.clone(),
-            state: TurnState::Open,
-        })
+        transaction.commit()?;
+        Ok(Some(record))
     }
 
     fn set_turn_state(&mut self, ask_id: &str, state: TurnState) -> Result<bool, Self::Error> {
+        if matches!(state, TurnState::Queued | TurnState::Open) {
+            return Ok(false);
+        }
         let changed = self.connection.execute(
-            "UPDATE turns SET state = ?1 WHERE ask_id = ?2",
+            "UPDATE turns SET state = ?1
+             WHERE ask_id = ?2 AND state = 'open'",
             params![state.as_str(), ask_id],
         )?;
         Ok(changed == 1)
+    }
+
+    fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<TurnRecord>, Self::Error> {
+        self.connection
+            .query_row(
+                "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
+                        t.reply_to_event_id, t.state
+                 FROM turns AS t
+                 JOIN sessions AS s ON s.id = t.session_id
+                 WHERE t.ask_id = ?1",
+                [ask_id],
+                Self::read_turn,
+            )
+            .optional()
     }
 
     fn turns_for_session(
@@ -203,6 +265,57 @@ impl HostRepository for SqliteRepository {
             .collect();
         turns
     }
+
+    fn sessions_with_open_turns(&self) -> Result<Vec<SessionRecord>, Self::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT s.bot_id, s.channel_id, s.session_name,
+                    s.occupant_logical_id, s.renew_id
+             FROM sessions AS s
+             JOIN turns AS t ON t.session_id = s.id
+             WHERE t.state = 'open'
+             ORDER BY s.bot_id, s.channel_id",
+        )?;
+        let sessions = statement
+            .query_map([], |row| {
+                let bot_id: String = row.get(0)?;
+                Ok(SessionRecord {
+                    bot_id: parse_bot_id(&bot_id, 0)?,
+                    channel_id: row.get(1)?,
+                    session_name: row.get(2)?,
+                    occupant_logical_id: row.get(3)?,
+                    renew_id: row.get(4)?,
+                })
+            })?
+            .collect();
+        sessions
+    }
+}
+
+fn insert_queued_turn(connection: &Connection, turn: &NewTurn) -> rusqlite::Result<TurnRecord> {
+    let session_id: i64 = connection.query_row(
+        "SELECT id FROM sessions WHERE bot_id = ?1 AND channel_id = ?2",
+        params![turn.bot_id.as_str(), turn.channel_id],
+        |row| row.get(0),
+    )?;
+    connection.execute(
+        "INSERT INTO turns(session_id, event_id, reply_to_event_id, state)
+         VALUES (?1, ?2, ?3, 'queued')",
+        params![
+            session_id,
+            turn.event_id.as_str(),
+            turn.reply_to_event_id.as_ref().map(EventId::as_str),
+        ],
+    )?;
+
+    Ok(TurnRecord {
+        sequence: connection.last_insert_rowid(),
+        bot_id: turn.bot_id.clone(),
+        channel_id: turn.channel_id.clone(),
+        event_id: turn.event_id.clone(),
+        ask_id: None,
+        reply_to_event_id: turn.reply_to_event_id.clone(),
+        state: TurnState::Queued,
+    })
 }
 
 fn parse_bot_id(value: &str, column: usize) -> rusqlite::Result<BotId> {
@@ -235,12 +348,11 @@ mod tests {
         }
     }
 
-    fn turn(bot_id: &BotId, channel_id: &str, ask_id: &str, value: char) -> NewTurn {
+    fn turn(bot_id: &BotId, channel_id: &str, value: char) -> NewTurn {
         NewTurn {
             bot_id: bot_id.clone(),
             channel_id: channel_id.to_owned(),
             event_id: event_id(value),
-            ask_id: ask_id.to_owned(),
             reply_to_event_id: Some(event_id('f')),
         }
     }
@@ -276,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn turns_are_ordered_and_state_changes_persist() {
+    fn turns_queue_in_order_and_state_changes_are_terminal() {
         let mut repository =
             SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
                 .expect("repository");
@@ -287,38 +399,93 @@ mod tests {
             .unwrap();
 
         let first = repository
-            .insert_turn(&turn(&bot_id, channel_id, "ask-1", 'a'))
+            .enqueue_unprocessed_turn(&turn(&bot_id, channel_id, 'a'))
             .unwrap();
+        let first = first.expect("new event");
+        let second = repository
+            .enqueue_unprocessed_turn(&turn(&bot_id, channel_id, 'b'))
+            .unwrap();
+        let second = second.expect("new event");
+        assert_eq!(first.state, TurnState::Queued);
+        assert_eq!(second.state, TurnState::Queued);
+
+        let opened = repository
+            .open_next_turn(&bot_id, channel_id, "ask-1")
+            .unwrap()
+            .expect("first queued turn");
+        assert_eq!(opened.sequence, first.sequence);
+        assert_eq!(opened.ask_id.as_deref(), Some("ask-1"));
+        assert!(repository
+            .open_next_turn(&bot_id, channel_id, "ask-2")
+            .unwrap()
+            .is_none());
         assert!(repository
             .set_turn_state("ask-1", TurnState::Posted)
             .unwrap());
-        let second = repository
-            .insert_turn(&turn(&bot_id, channel_id, "ask-2", 'b'))
-            .unwrap();
+        assert!(!repository.set_turn_state("ask-1", TurnState::Open).unwrap());
+        assert_eq!(
+            repository
+                .turn_by_ask_id("ask-1")
+                .unwrap()
+                .expect("turn")
+                .state,
+            TurnState::Posted
+        );
+        let opened = repository
+            .open_next_turn(&bot_id, channel_id, "ask-2")
+            .unwrap()
+            .expect("second queued turn");
+        assert_eq!(opened.sequence, second.sequence);
 
         let turns = repository.turns_for_session(&bot_id, channel_id).unwrap();
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].sequence, first.sequence);
         assert_eq!(turns[0].state, TurnState::Posted);
-        assert_eq!(turns[1], second);
+        assert_eq!(turns[1].state, TurnState::Open);
     }
 
     #[test]
-    fn a_session_cannot_have_two_open_turns() {
+    fn enqueue_and_processed_marker_are_atomic() {
         let mut repository =
             SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
                 .expect("repository");
         let bot_id = BotId::new("bot").expect("bot id");
         let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let turn = turn(&bot_id, channel_id, 'a');
+
+        assert!(repository.enqueue_unprocessed_turn(&turn).is_err());
         repository
             .save_session(&session(&bot_id, channel_id))
             .unwrap();
+        assert!(repository
+            .enqueue_unprocessed_turn(&turn)
+            .unwrap()
+            .is_some());
+        assert!(repository
+            .enqueue_unprocessed_turn(&turn)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn open_sessions_can_be_enumerated_for_recovery() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let expected = session(&bot_id, channel_id);
+        repository.save_session(&expected).unwrap();
         repository
-            .insert_turn(&turn(&bot_id, channel_id, "ask-1", 'a'))
+            .enqueue_turn(&turn(&bot_id, channel_id, 'a'))
+            .unwrap();
+        repository
+            .open_next_turn(&bot_id, channel_id, "ask-1")
             .unwrap();
 
-        assert!(repository
-            .insert_turn(&turn(&bot_id, channel_id, "ask-2", 'b'))
-            .is_err());
+        assert_eq!(
+            repository.sessions_with_open_turns().unwrap(),
+            vec![expected]
+        );
     }
 }

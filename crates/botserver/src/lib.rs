@@ -733,6 +733,7 @@ pub struct SessionRecord {
 /// Lifecycle state of one triggered turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnState {
+    Queued,
     Open,
     Posted,
     Failed,
@@ -742,6 +743,7 @@ pub enum TurnState {
 impl TurnState {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Queued => "queued",
             Self::Open => "open",
             Self::Posted => "posted",
             Self::Failed => "failed",
@@ -751,6 +753,7 @@ impl TurnState {
 
     fn from_str(value: &str) -> Option<Self> {
         match value {
+            "queued" => Some(Self::Queued),
             "open" => Some(Self::Open),
             "posted" => Some(Self::Posted),
             "failed" => Some(Self::Failed),
@@ -760,13 +763,12 @@ impl TurnState {
     }
 }
 
-/// Coordinates needed to persist a newly opened turn.
+/// Coordinates needed to persist a queued turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTurn {
     pub bot_id: BotId,
     pub channel_id: String,
     pub event_id: EventId,
-    pub ask_id: String,
     pub reply_to_event_id: Option<EventId>,
 }
 
@@ -777,7 +779,7 @@ pub struct TurnRecord {
     pub bot_id: BotId,
     pub channel_id: String,
     pub event_id: EventId,
-    pub ask_id: String,
+    pub ask_id: Option<String>,
     pub reply_to_event_id: Option<EventId>,
     pub state: TurnState,
 }
@@ -792,6 +794,27 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the operation cannot be persisted.
     fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error>;
+
+    /// Atomically mark a trigger event processed and enqueue its turn.
+    ///
+    /// Returns `None` when the event was already processed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when either operation cannot be persisted.
+    fn enqueue_unprocessed_turn(
+        &mut self,
+        turn: &NewTurn,
+    ) -> Result<Option<TurnRecord>, Self::Error>;
+
+    /// Enqueue another turn for an event already known to the host.
+    ///
+    /// This supports replacement work after an edit cancels an earlier ask.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the turn cannot be persisted.
+    fn enqueue_turn(&mut self, turn: &NewTurn) -> Result<TurnRecord, Self::Error>;
 
     /// Store or replace a session binding.
     ///
@@ -811,12 +834,17 @@ pub trait HostRepository {
         channel_id: &str,
     ) -> Result<Option<SessionRecord>, Self::Error>;
 
-    /// Append an open turn to its session.
+    /// Bind the oldest queued turn to a new ask.
     ///
     /// # Errors
     ///
     /// Returns an adapter error when the turn cannot be persisted.
-    fn insert_turn(&mut self, turn: &NewTurn) -> Result<TurnRecord, Self::Error>;
+    fn open_next_turn(
+        &mut self,
+        bot_id: &BotId,
+        channel_id: &str,
+        ask_id: &str,
+    ) -> Result<Option<TurnRecord>, Self::Error>;
 
     /// Change the state of the turn identified by its ask id.
     ///
@@ -824,6 +852,13 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the state cannot be persisted.
     fn set_turn_state(&mut self, ask_id: &str, state: TurnState) -> Result<bool, Self::Error>;
+
+    /// Find a turn by the Kelpie ask id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the turn cannot be read.
+    fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<TurnRecord>, Self::Error>;
 
     /// Read a session's turns in insertion order.
     ///
@@ -835,4 +870,11 @@ pub trait HostRepository {
         bot_id: &BotId,
         channel_id: &str,
     ) -> Result<Vec<TurnRecord>, Self::Error>;
+
+    /// List sessions that have an open ask for restart recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the sessions cannot be read.
+    fn sessions_with_open_turns(&self) -> Result<Vec<SessionRecord>, Self::Error>;
 }
