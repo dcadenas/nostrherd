@@ -6,13 +6,14 @@ use std::pin::pin;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use botserver::actor::{persist_ingest, ActorError, TriggerOutcome};
 use botserver::config::{BotRegistry, ConfigError};
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
 use botserver::sqlite::SqliteRepository;
 use botserver::HostRepository;
-use botserver_domain::EventId;
+use botserver_domain::{Bot, EventId};
 use clap::Parser;
 use futures::StreamExt;
 use nostr_sdk::prelude::{Client, ClientNotification, Event, Keys, SignerAuthenticator, Timestamp};
@@ -69,6 +70,7 @@ enum HostError {
     Relay(nostr_sdk::error::Error),
     Subscribe(RelaySubscribeError),
     Ingest(IngestError<rusqlite::Error>),
+    Actor(ActorError<rusqlite::Error>),
     NotificationClosed,
 }
 
@@ -83,6 +85,7 @@ impl fmt::Display for HostError {
             Self::Relay(error) => write!(formatter, "relay client failed: {error}"),
             Self::Subscribe(error) => write!(formatter, "{error}"),
             Self::Ingest(error) => write!(formatter, "{error}"),
+            Self::Actor(error) => write!(formatter, "{error}"),
             Self::NotificationClosed => formatter.write_str("relay notification channel closed"),
         }
     }
@@ -97,6 +100,7 @@ impl std::error::Error for HostError {
             Self::Relay(error) => Some(error),
             Self::Subscribe(error) => Some(error),
             Self::Ingest(error) => Some(error),
+            Self::Actor(error) => Some(error),
             Self::MissingEnv(_) | Self::InvalidOperatorKey | Self::NotificationClosed => None,
         }
     }
@@ -132,6 +136,12 @@ impl From<IngestError<rusqlite::Error>> for HostError {
     }
 }
 
+impl From<ActorError<rusqlite::Error>> for HostError {
+    fn from(error: ActorError<rusqlite::Error>) -> Self {
+        Self::Actor(error)
+    }
+}
+
 fn load_host(config: &Path, database: &Path) -> Result<(BotRegistry, SqliteRepository), HostError> {
     Ok((
         BotRegistry::load(config)?,
@@ -154,21 +164,35 @@ fn ingest_event_id(action: &IngestAction) -> &EventId {
     }
 }
 
+fn dispatch_ingest(
+    bots: &[Bot],
+    repository: &mut SqliteRepository,
+    action: &IngestAction,
+) -> Result<TriggerOutcome, HostError> {
+    if let (IngestAction::TurnCandidate { .. }, Some(bot)) = (action, bots.first()) {
+        Ok(persist_ingest(bot, repository, action, "")?)
+    } else {
+        repository.mark_event_processed(ingest_event_id(action))?;
+        Ok(TriggerOutcome::Declined)
+    }
+}
+
 fn observe_event(
+    bots: &[Bot],
     ingest: &mut RelayIngest<SqliteRepository>,
     event: &Event,
 ) -> Result<(), HostError> {
     if let Some(action) = ingest.ingest(event)? {
         let event_id = ingest_event_id(&action).clone();
+        let outcome = dispatch_ingest(bots, ingest.repository_mut(), &action)?;
         match action {
             IngestAction::TurnCandidate { .. } => {
-                eprintln!("observed trigger {}", event_id.as_str());
+                eprintln!("observed trigger {} {outcome:?}", event_id.as_str());
             }
             IngestAction::Edit { .. } | IngestAction::Delete { .. } => {
-                eprintln!("observed ingest {}", event_id.as_str());
+                eprintln!("observed ingest {} {outcome:?}", event_id.as_str());
             }
         }
-        ingest.repository_mut().mark_event_processed(&event_id)?;
     }
     Ok(())
 }
@@ -184,7 +208,11 @@ async fn refresh_subscription(
     Ok(())
 }
 
-async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<(), HostError> {
+async fn serve(
+    operator: OperatorEnv,
+    bots: Vec<Bot>,
+    repository: SqliteRepository,
+) -> Result<(), HostError> {
     let operator_pubkey = operator.keys.public_key().to_hex();
     let client = Client::builder()
         .authenticator(SignerAuthenticator::new(operator.keys))
@@ -202,7 +230,7 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
         tokio::select! {
             notification = notifications.next() => match notification {
                 Some(ClientNotification::Event { event, .. }) => {
-                    observe_event(&mut ingest, &event)?;
+                    observe_event(&bots, &mut ingest, &event)?;
                 }
                 Some(ClientNotification::Shutdown) => return Ok(()),
                 Some(ClientNotification::Message { .. }) => {}
@@ -249,7 +277,7 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
                     Ok(events) => {
                         last_retry_error = None;
                         for event in events {
-                            observe_event(&mut ingest, &event)?;
+                            observe_event(&bots, &mut ingest, &event)?;
                         }
                     }
                     Err(error) => {
@@ -266,7 +294,7 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
 }
 
 fn run(args: &Args) -> Result<(), HostError> {
-    let (_registry, repository) = load_host(&args.config, &args.database)?;
+    let (registry, repository) = load_host(&args.config, &args.database)?;
     if args.check {
         return Ok(());
     }
@@ -275,7 +303,7 @@ fn run(args: &Args) -> Result<(), HostError> {
         .enable_all()
         .build()
         .map_err(HostError::Runtime)?
-        .block_on(serve(operator, repository))
+        .block_on(serve(operator, registry.bots().to_vec(), repository))
 }
 
 fn main() -> ExitCode {
@@ -364,6 +392,62 @@ mod tests {
             Some(value) => std::env::set_var(name, value),
             None => std::env::remove_var(name),
         }
+    }
+
+    fn trigger_action(content: &str) -> IngestAction {
+        IngestAction::TurnCandidate {
+            event_id: botserver_domain::EventId::parse_hex(&"a".repeat(64)).expect("event"),
+            channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
+            reply_to_event_id: None,
+            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], content)
+                .expect("trigger"),
+        }
+    }
+
+    #[test]
+    fn trigger_dispatch_queues_one_turn_for_the_first_bot() {
+        let config = write_config("bot");
+        let database = temp_path("host").with_extension("sqlite");
+        let (registry, mut repository) = load_host(&config, &database).expect("load");
+        let action = trigger_action("bot: hello");
+
+        assert_eq!(
+            dispatch_ingest(registry.bots(), &mut repository, &action).expect("dispatch"),
+            TriggerOutcome::Queued
+        );
+
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let turns = repository
+            .turns_for_session(registry.bots()[0].id(), channel)
+            .expect("turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state, botserver::TurnState::Queued);
+        assert_eq!(turns[0].ask_id, None);
+    }
+
+    #[test]
+    fn non_trigger_dispatch_does_not_create_a_turn() {
+        let config = write_config("bot");
+        let database = temp_path("host").with_extension("sqlite");
+        let (registry, mut repository) = load_host(&config, &database).expect("load");
+        let event_id = botserver_domain::EventId::parse_hex(&"b".repeat(64)).expect("event");
+        let action = IngestAction::Delete {
+            event_id: event_id.clone(),
+            target_event_id: botserver_domain::EventId::parse_hex(&"c".repeat(64)).expect("target"),
+        };
+
+        assert_eq!(
+            dispatch_ingest(registry.bots(), &mut repository, &action).expect("dispatch"),
+            TriggerOutcome::Declined
+        );
+        assert!(repository.event_processed(&event_id).expect("processed"));
+        assert!(repository
+            .turns_for_session(
+                registry.bots()[0].id(),
+                "ab12cd34-5678-90ab-cdef-0123456789ab"
+            )
+            .expect("turns")
+            .is_empty());
     }
 
     #[test]

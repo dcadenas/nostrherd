@@ -676,42 +676,101 @@ where
         channel_id: &str,
         channel_display: &str,
     ) -> Result<SessionRecord, ActorError<R::Error>> {
-        if let Some(session) = self
-            .repository
-            .session(self.bot.id(), channel_id)
-            .map_err(ActorError::Repository)?
-        {
-            return Ok(session);
-        }
-        let mut name_error = None;
-        let name = SessionName::from_bot_and_channel(
-            self.bot.id(),
+        ensure_bot_session(&self.bot, &mut self.repository, channel_id, channel_display)
+    }
+}
+
+/// Persist one ingest action without starting an occupant or sending an ask.
+///
+/// # Errors
+///
+/// Returns an error when session naming or host persistence fails.
+pub fn persist_ingest<R: HostRepository>(
+    bot: &Bot,
+    repository: &mut R,
+    action: &crate::relay::IngestAction,
+    channel_display: &str,
+) -> Result<TriggerOutcome, ActorError<R::Error>> {
+    match action {
+        crate::relay::IngestAction::TurnCandidate {
+            event_id,
             channel_id,
-            channel_display,
-            |candidate| match self.repository.session_by_name(candidate) {
+            reply_to_event_id,
+            trigger,
+        } => {
+            if trigger.request().is_empty() {
+                repository
+                    .mark_event_processed(event_id)
+                    .map_err(ActorError::Repository)?;
+                return Ok(TriggerOutcome::Declined);
+            }
+            let display = if channel_display.is_empty() {
+                channel_id.as_str()
+            } else {
+                channel_display
+            };
+            ensure_bot_session(bot, repository, channel_id, display)?;
+            let Some(_) = repository
+                .enqueue_unprocessed_turn(&NewTurn {
+                    bot_id: bot.id().clone(),
+                    channel_id: channel_id.clone(),
+                    event_id: event_id.clone(),
+                    reply_to_event_id: reply_to_event_id.clone(),
+                })
+                .map_err(ActorError::Repository)?
+            else {
+                return Ok(TriggerOutcome::Duplicate);
+            };
+            Ok(TriggerOutcome::Queued)
+        }
+        crate::relay::IngestAction::Edit { event_id, .. }
+        | crate::relay::IngestAction::Delete { event_id, .. } => {
+            repository
+                .mark_event_processed(event_id)
+                .map_err(ActorError::Repository)?;
+            Ok(TriggerOutcome::Declined)
+        }
+    }
+}
+
+fn ensure_bot_session<R: HostRepository>(
+    bot: &Bot,
+    repository: &mut R,
+    channel_id: &str,
+    channel_display: &str,
+) -> Result<SessionRecord, ActorError<R::Error>> {
+    if let Some(session) = repository
+        .session(bot.id(), channel_id)
+        .map_err(ActorError::Repository)?
+    {
+        return Ok(session);
+    }
+    let mut name_error = None;
+    let name =
+        SessionName::from_bot_and_channel(bot.id(), channel_id, channel_display, |candidate| {
+            match repository.session_by_name(candidate) {
                 Ok(existing) => existing.is_some(),
                 Err(error) => {
                     name_error = Some(error);
                     true
                 }
-            },
-        );
-        if let Some(error) = name_error {
-            return Err(ActorError::Repository(error));
-        }
-        let name = name.ok_or(ActorError::UnnameableSession)?;
-        let session = SessionRecord {
-            bot_id: self.bot.id().clone(),
-            channel_id: channel_id.to_owned(),
-            session_name: name.as_str().to_owned(),
-            occupant_logical_id: None,
-            renew_id: None,
-        };
-        self.repository
-            .save_session(&session)
-            .map_err(ActorError::Repository)?;
-        Ok(session)
+            }
+        });
+    if let Some(error) = name_error {
+        return Err(ActorError::Repository(error));
     }
+    let name = name.ok_or(ActorError::UnnameableSession)?;
+    let session = SessionRecord {
+        bot_id: bot.id().clone(),
+        channel_id: channel_id.to_owned(),
+        session_name: name.as_str().to_owned(),
+        occupant_logical_id: None,
+        renew_id: None,
+    };
+    repository
+        .save_session(&session)
+        .map_err(ActorError::Repository)?;
+    Ok(session)
 }
 
 fn unix_now() -> io::Result<i64> {
@@ -1561,6 +1620,74 @@ mod tests {
                 .expect("ingest"),
             TriggerOutcome::Asked
         );
+    }
+
+    #[test]
+    fn persist_ingest_queues_a_trigger_without_kelpie() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot = bot();
+        let trigger = work('a', "@daniel bot: hello", Some('c'));
+        let action = crate::relay::IngestAction::TurnCandidate {
+            event_id: trigger.event_id.clone(),
+            channel_id: trigger.channel_id.clone(),
+            reply_to_event_id: trigger.reply_to_event_id.clone(),
+            trigger: botserver_domain::TriggerMatch::parse(
+                "operator",
+                ["operator"],
+                "@daniel bot: hello",
+            )
+            .expect("trigger"),
+        };
+
+        assert_eq!(
+            persist_ingest(&bot, &mut repository, &action, &trigger.channel_display)
+                .expect("persist"),
+            TriggerOutcome::Queued
+        );
+        assert_eq!(
+            persist_ingest(&bot, &mut repository, &action, &trigger.channel_display)
+                .expect("replay"),
+            TriggerOutcome::Duplicate
+        );
+        let turns = repository
+            .turns_for_session(bot.id(), &trigger.channel_id)
+            .expect("turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state, TurnState::Queued);
+        assert_eq!(turns[0].ask_id, None);
+        assert_eq!(turns[0].reply_to_event_id, trigger.reply_to_event_id);
+        assert!(repository
+            .event_processed(&trigger.event_id)
+            .expect("processed"));
+    }
+
+    #[test]
+    fn persist_ingest_does_not_queue_an_empty_request() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot = bot();
+        let event = event_id('a');
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let action = crate::relay::IngestAction::TurnCandidate {
+            event_id: event.clone(),
+            channel_id: channel.to_owned(),
+            reply_to_event_id: None,
+            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], "bot:")
+                .expect("trigger"),
+        };
+
+        assert_eq!(
+            persist_ingest(&bot, &mut repository, &action, "Foobar").expect("persist"),
+            TriggerOutcome::Declined
+        );
+        assert!(repository
+            .turns_for_session(bot.id(), channel)
+            .expect("turns")
+            .is_empty());
+        assert!(repository.event_processed(&event).expect("processed"));
     }
 
     #[test]
