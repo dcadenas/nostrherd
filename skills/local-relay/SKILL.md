@@ -62,7 +62,8 @@ channel body starts with `[bot]:`.
 ```
 
 That posts `@<operator> bot: hello from peer` with a `p` tag. Use this
-to exercise ingest once `botserver` is running.
+to exercise ingest once `botserver` is running. Issue 18 live proof of
+SPEC flows 1–2 is recorded in `docs/testing.md`.
 
 ## Secrets in commands
 
