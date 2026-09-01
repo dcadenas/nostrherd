@@ -77,5 +77,4 @@ envchain botserver-proof botserver --config … --database …
 ```
 
 `envchain NAMESPACE CMD` injects Buzz vars into CMD. The binaries only
-read the environment (D29). Until #24, `botcli` still accepts a leftover
-`--envchain` flag; do not add new call sites that use it.
+read the environment (D29). There is no `--envchain` flag.

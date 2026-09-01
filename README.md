@@ -32,9 +32,6 @@ EOF
 a JSON receipt. When `--ask-id` is omitted, `--database` is omitted too
 and no Kelpie obligation is closed.
 
-Until issue #24 lands, the current binary still has a leftover
-`--envchain` flag from #6.
-
 ## Read order
 
 `AGENTS.md` → `SPEC.md` → `docs/domain-model.md` → `docs/decision-log.md`

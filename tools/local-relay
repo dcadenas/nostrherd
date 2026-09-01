@@ -185,7 +185,7 @@ cmd_smoke() {
     cargo build -q -p botcli --manifest-path "$ROOT/Cargo.toml"
   fi
   local receipt
-  receipt=$(printf 'local-relay smoke\n' | env -u BUZZ_AUTH_TAG "$botcli" send --stdin --channel "$channel" --envchain "$NS_OP")
+  receipt=$(printf 'local-relay smoke\n' | env -u BUZZ_AUTH_TAG envchain "$NS_OP" "$botcli" send --stdin --channel "$channel")
   echo "$receipt"
   env -u BUZZ_AUTH_TAG envchain "$NS_OP" buzz messages get --channel "$channel" --limit 3 \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d[0] if isinstance(d,list) else d; c=(m.get("content") if isinstance(m,dict) else "") or "";

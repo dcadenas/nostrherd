@@ -62,10 +62,6 @@ struct SendArgs {
     /// Pubkey to mention in the outbound event; may be repeated.
     #[arg(long)]
     mention: Vec<String>,
-
-    /// Envchain namespace containing the Buzz credentials.
-    #[arg(long)]
-    envchain: String,
 }
 
 #[derive(Debug)]
@@ -420,8 +416,6 @@ fn run_publish(
     body: &[u8],
 ) -> Result<String, BotcliError> {
     let mut command_arguments = vec![
-        arguments.envchain.clone(),
-        "buzz".to_owned(),
         "messages".to_owned(),
         "send".to_owned(),
         "--channel".to_owned(),
@@ -435,8 +429,8 @@ fn run_publish(
     for mention in &arguments.mention {
         command_arguments.extend(["--mention".to_owned(), mention.clone()]);
     }
-    let output = runner.run("envchain", &command_arguments, body)?;
-    ensure_success("envchain", &output)?;
+    let output = runner.run("buzz", &command_arguments, body)?;
+    ensure_success("buzz", &output)?;
     let receipt: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| BotcliError::InvalidPublishReceipt(error.to_string()))?;
     if receipt.get("accepted").and_then(Value::as_bool) != Some(true) {
@@ -561,7 +555,6 @@ mod tests {
             channel: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
             reply_to: Some("a".repeat(64)),
             mention: vec!["b".repeat(64)],
-            envchain: "botserver".to_owned(),
         }
     }
 
@@ -641,12 +634,10 @@ mod tests {
         assert!(repository.marked_posted);
         assert!(!repository.claimed);
         assert_eq!(runner.calls.len(), 2);
-        assert_eq!(runner.calls[0].0, "envchain");
+        assert_eq!(runner.calls[0].0, "buzz");
         assert_eq!(
             runner.calls[0].1,
             vec![
-                "botserver",
-                "buzz",
                 "messages",
                 "send",
                 "--channel",
@@ -676,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_flow_10_cancelled_turn_never_reaches_envchain() {
+    fn spec_flow_10_cancelled_turn_never_reaches_buzz() {
         let mut repository = repository("cancelled");
         let mut runner = FakeRunner {
             outputs: VecDeque::new(),
@@ -711,7 +702,7 @@ mod tests {
         assert!(matches!(
             error,
             BotcliError::CommandFailed {
-                program: "envchain",
+                program: "buzz",
                 ..
             }
         ));
@@ -841,7 +832,7 @@ mod tests {
 
         assert_eq!(receipt, serde_json::json!({"event_id": "published"}));
         assert_eq!(runner.calls.len(), 1);
-        assert_eq!(runner.calls[0].0, "envchain");
+        assert_eq!(runner.calls[0].0, "buzz");
     }
 
     #[test]
@@ -852,8 +843,6 @@ mod tests {
             "--stdin",
             "--channel",
             "ab12cd34-5678-90ab-cdef-0123456789ab",
-            "--envchain",
-            "botserver",
         ])
         .is_ok());
         assert!(Cli::try_parse_from([
@@ -861,8 +850,6 @@ mod tests {
             "send",
             "--channel",
             "ab12cd34-5678-90ab-cdef-0123456789ab",
-            "--envchain",
-            "botserver",
         ])
         .is_err());
         assert!(Cli::try_parse_from([
@@ -873,8 +860,6 @@ mod tests {
             "message.md",
             "--channel",
             "ab12cd34-5678-90ab-cdef-0123456789ab",
-            "--envchain",
-            "botserver",
         ])
         .is_err());
         assert!(Cli::try_parse_from([
@@ -883,6 +868,14 @@ mod tests {
             "--stdin",
             "--ask-id",
             "ask-id",
+            "--channel",
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "botcli",
+            "send",
+            "--stdin",
             "--channel",
             "ab12cd34-5678-90ab-cdef-0123456789ab",
             "--envchain",
