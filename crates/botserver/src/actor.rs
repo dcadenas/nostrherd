@@ -460,7 +460,7 @@ where
     }
 
     fn recover_open_session(
-        &self,
+        &mut self,
         kelpie: &KelpieClient,
         waiter: &AdoptedWaiter<'_>,
         session: &SessionRecord,
@@ -483,7 +483,25 @@ where
             }),
             Err(KelpieError::TargetUnavailable) => {
                 let snapshot_relpath = self.refresh_snapshot(session)?;
-                self.start_occupant(kelpie, waiter, session, &snapshot_relpath, Some(logical_id))?;
+                let occupant = self.start_occupant(
+                    kelpie,
+                    waiter,
+                    session,
+                    &snapshot_relpath,
+                    Some(logical_id),
+                )?;
+                let mut session = session.clone();
+                session.renew_id = None;
+                self.repository
+                    .save_session(&session)
+                    .map_err(ActorError::Repository)?;
+                self.try_arm_renew(
+                    kelpie,
+                    occupant.logical_agent_id(),
+                    occupant.incarnation_id(),
+                    &snapshot_relpath,
+                    &mut session,
+                )?;
                 Ok(true)
             }
             Err(error) => Err(ActorError::Kelpie(error)),
@@ -1141,6 +1159,7 @@ mod tests {
             asked("ask-1"),
             failure("conflict", "no ready agent for alias bot-foobar"),
             start(),
+            renewed(),
         ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         let trigger = work('a', "bot: hello", None);
@@ -1164,6 +1183,7 @@ mod tests {
             session.occupant_logical_id.as_deref(),
             Some("occupant-agent")
         );
+        assert_eq!(session.renew_id.as_deref(), Some("renew-id"));
         let turns = actor
             .repository
             .turns_for_session(actor.bot.id(), &trigger.channel_id)
@@ -1242,6 +1262,7 @@ mod tests {
             asked("ask-1"),
             failure("conflict", "no ready agent for alias bot-foobar"),
             start(),
+            renewed(),
         ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         actor
