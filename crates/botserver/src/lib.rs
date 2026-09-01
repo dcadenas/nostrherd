@@ -31,12 +31,26 @@ impl WaiterIdentity {
     }
 }
 
-/// Receipt for one accepted Kelpie ask.
+/// Final delivery state reported for a Kelpie ask attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskDelivery {
+    /// Herdr accepted the prompt delivery.
+    Accepted,
+    /// Kelpie cannot prove whether Herdr accepted the prompt.
+    Unknown,
+    /// Herdr rejected the prompt delivery.
+    Rejected,
+    /// No ready recipient was available.
+    TargetUnavailable,
+}
+
+/// Receipt for one correlated Kelpie ask attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskReceipt {
     message_id: String,
     operation_id: String,
     recipient: String,
+    delivery: AskDelivery,
 }
 
 impl AskReceipt {
@@ -56,6 +70,12 @@ impl AskReceipt {
     #[must_use]
     pub fn recipient(&self) -> &str {
         &self.recipient
+    }
+
+    /// Return the final delivery state observed by Kelpie.
+    #[must_use]
+    pub const fn delivery(&self) -> AskDelivery {
+        self.delivery
     }
 }
 
@@ -129,7 +149,9 @@ impl CommandRunner for ProcessRunner {
             .expect("piped stdin is available")
             .write_all(stdin);
         let output = child.wait_with_output()?;
-        write_result?;
+        if output.status.success() {
+            write_result?;
+        }
 
         Ok(CommandOutput {
             success: output.status.success(),
@@ -173,20 +195,48 @@ impl KelpieClient {
         pane_id: &str,
         terminal_id: &str,
     ) -> Result<AdoptedWaiter<'_>, KelpieError> {
-        let receipt = self.invoke(
-            &[
-                "--json",
-                "adopt",
-                "--pane",
-                pane_id,
-                "--terminal",
-                terminal_id,
-                "--name",
-                WAITER_NAME,
-            ],
-            &[],
-        )?;
-        let result = result(&receipt)?;
+        self.adopt(pane_id, terminal_id, None)
+    }
+
+    /// Continue the durable waiter identity in a replacement Herdr pane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot bind the exact pane and terminal to
+    /// the existing logical agent.
+    pub fn continue_waiter(
+        &self,
+        pane_id: &str,
+        terminal_id: &str,
+        logical_agent_id: &str,
+    ) -> Result<AdoptedWaiter<'_>, KelpieError> {
+        self.adopt(pane_id, terminal_id, Some(logical_agent_id))
+    }
+
+    fn adopt(
+        &self,
+        pane_id: &str,
+        terminal_id: &str,
+        logical_agent_id: Option<&str>,
+    ) -> Result<AdoptedWaiter<'_>, KelpieError> {
+        let mut arguments = vec![
+            "--json",
+            "adopt",
+            "--pane",
+            pane_id,
+            "--terminal",
+            terminal_id,
+            "--name",
+            WAITER_NAME,
+        ];
+        if let Some(logical_agent_id) = logical_agent_id {
+            arguments.extend(["--logical-id", logical_agent_id]);
+        }
+        let output = self.invoke(&arguments, &[])?;
+        if !output.success {
+            return Err(output.rejected());
+        }
+        let result = result(&output.receipt)?;
         if field(result, "outcome")? != "succeeded" {
             return Err(KelpieError::InvalidReceipt(
                 "waiter adoption did not succeed".to_owned(),
@@ -202,26 +252,48 @@ impl KelpieClient {
         })
     }
 
-    fn invoke(&self, arguments: &[&str], stdin: &[u8]) -> Result<Value, KelpieError> {
+    fn invoke(&self, arguments: &[&str], stdin: &[u8]) -> Result<InvocationOutput, KelpieError> {
         let arguments = arguments
             .iter()
             .map(|argument| (*argument).to_owned())
             .collect::<Vec<_>>();
         let output = self.runner.run(&arguments, stdin)?;
-        if !output.success {
-            return Err(KelpieError::Rejected {
+        match serde_json::from_slice(&output.stdout) {
+            Ok(receipt) => Ok(InvocationOutput {
+                success: output.success,
+                status: output.status,
+                stderr: output.stderr,
+                receipt,
+            }),
+            Err(error) if output.success => Err(KelpieError::InvalidReceipt(error.to_string())),
+            Err(_) => Err(KelpieError::Rejected {
                 status: output.status,
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
+            }),
         }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|error| KelpieError::InvalidReceipt(error.to_string()))
     }
 
     #[cfg(test)]
     fn with_runner(runner: impl CommandRunner + 'static) -> Self {
         Self {
             runner: Box::new(runner),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InvocationOutput {
+    success: bool,
+    status: String,
+    stderr: Vec<u8>,
+    receipt: Value,
+}
+
+impl InvocationOutput {
+    fn rejected(self) -> KelpieError {
+        KelpieError::Rejected {
+            status: self.status,
+            stderr: String::from_utf8_lossy(&self.stderr).trim().to_owned(),
         }
     }
 }
@@ -248,9 +320,11 @@ impl AdoptedWaiter<'_> {
     ///
     /// # Errors
     ///
-    /// Returns an error unless Kelpie accepts the ask and returns its ids.
+    /// Returns an error unless Kelpie returns the durable ids needed to
+    /// reconcile the attempt. A receipt with [`AskDelivery::Unknown`] must not
+    /// be retried blindly.
     pub fn ask(&self, recipient: &str, nostr_body: &str) -> Result<AskReceipt, KelpieError> {
-        let receipt = self.client.invoke(
+        let output = self.client.invoke(
             &[
                 "--json",
                 "ask",
@@ -261,17 +335,29 @@ impl AdoptedWaiter<'_> {
             ],
             nostr_body.as_bytes(),
         )?;
-        let result = result(&receipt)?;
-        if field(result, "delivery_outcome")? != "accepted" {
-            return Err(KelpieError::InvalidReceipt(
-                "ask delivery was not accepted".to_owned(),
-            ));
-        }
+        let result = match result(&output.receipt) {
+            Ok(result) => result,
+            Err(_) if !output.success => return Err(output.rejected()),
+            Err(error) => return Err(error),
+        };
         Ok(AskReceipt {
             message_id: field(result, "message_id")?,
             operation_id: field(result, "operation_id")?,
             recipient: field(result, "recipient")?,
+            delivery: ask_delivery(result)?,
         })
+    }
+}
+
+fn ask_delivery(result: &Value) -> Result<AskDelivery, KelpieError> {
+    match field(result, "delivery_outcome")?.as_str() {
+        "accepted" => Ok(AskDelivery::Accepted),
+        "unknown" => Ok(AskDelivery::Unknown),
+        "rejected" => Ok(AskDelivery::Rejected),
+        "target_unavailable" => Ok(AskDelivery::TargetUnavailable),
+        outcome => Err(KelpieError::InvalidReceipt(format!(
+            "unsupported ask delivery outcome {outcome}"
+        ))),
     }
 }
 
@@ -386,6 +472,38 @@ mod tests {
     }
 
     #[test]
+    fn continues_existing_waiter_identity() {
+        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
+            "logical_agent_id": "waiter-agent",
+            "incarnation_id": "replacement-incarnation",
+            "operation_id": "adopt-operation",
+            "outcome": "succeeded"
+        }))]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+
+        let waiter = client
+            .continue_waiter("w1:p3", "term-3", "waiter-agent")
+            .expect("continue waiter");
+
+        assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
+        assert_eq!(
+            runner.calls.lock().expect("calls lock")[0].0,
+            vec![
+                "--json",
+                "adopt",
+                "--pane",
+                "w1:p3",
+                "--terminal",
+                "term-3",
+                "--name",
+                "botserver",
+                "--logical-id",
+                "waiter-agent"
+            ]
+        );
+    }
+
+    #[test]
     fn ask_is_owned_by_waiter_and_passes_body_on_stdin() {
         let body = "<kelpie from=relay-pubkey>\n$(not-a-command) & hello";
         let runner = Arc::new(FakeRunner::new([
@@ -412,6 +530,7 @@ mod tests {
         assert_eq!(receipt.message_id(), "ask-id");
         assert_eq!(receipt.operation_id(), "ask-operation");
         assert_eq!(receipt.recipient(), "occupant-agent");
+        assert_eq!(receipt.delivery(), AskDelivery::Accepted);
         let calls = runner.calls.lock().expect("calls lock");
         assert_eq!(calls[1].0[1], "ask");
         assert_eq!(
@@ -429,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn unaccepted_ask_is_not_returned_as_a_turn_receipt() {
+    fn unknown_ask_keeps_the_id_needed_for_reconciliation() {
         let runner = Arc::new(FakeRunner::new([
             success(&serde_json::json!({
                 "logical_agent_id": "waiter-agent",
@@ -437,20 +556,30 @@ mod tests {
                 "operation_id": "adopt-operation",
                 "outcome": "succeeded"
             })),
-            success(&serde_json::json!({
-                "message_id": "ask-id",
-                "operation_id": "ask-operation",
-                "recipient": "occupant-agent",
-                "delivery_outcome": "unknown"
-            })),
+            CommandOutput {
+                success: false,
+                status: "exit status: 1".to_owned(),
+                stdout: serde_json::to_vec(&serde_json::json!({
+                    "id": "request-id",
+                    "result": {
+                        "message_id": "ask-id",
+                        "operation_id": "ask-operation",
+                        "recipient": "occupant-agent",
+                        "delivery_outcome": "unknown"
+                    }
+                }))
+                .expect("json"),
+                stderr: b"kelpie: delivery unknown".to_vec(),
+            },
         ]));
         let client = KelpieClient::with_runner(Arc::clone(&runner));
         let waiter = client
             .adopt_waiter("w1:p2", "term-2")
             .expect("adopt waiter");
 
-        let error = waiter.ask("bot-foobar", "hello").expect_err("reject ask");
+        let receipt = waiter.ask("bot-foobar", "hello").expect("ask receipt");
 
-        assert!(error.to_string().contains("not accepted"));
+        assert_eq!(receipt.message_id(), "ask-id");
+        assert_eq!(receipt.delivery(), AskDelivery::Unknown);
     }
 }
