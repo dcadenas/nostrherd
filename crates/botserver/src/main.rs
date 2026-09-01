@@ -13,7 +13,7 @@ use botserver::sqlite::SqliteRepository;
 use botserver::HostRepository;
 use botserver_domain::EventId;
 use clap::Parser;
-use nostr_sdk::prelude::{Client, Event, Keys, RelayMessage, RelayPoolNotification, Timestamp};
+use nostr_sdk::prelude::{Client, Event, Keys, RelayPoolNotification, Timestamp};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const EMPTY_REPLAY_OVERLAP_SECS: u64 = 900;
@@ -38,23 +38,14 @@ struct Args {
 struct OperatorEnv {
     keys: Keys,
     relay_url: String,
-    relay_pubkey: String,
 }
 
 impl OperatorEnv {
     fn from_env() -> Result<Self, HostError> {
         let private_key = required_env("BUZZ_PRIVATE_KEY")?;
         let relay_url = required_env("BUZZ_RELAY_URL")?;
-        let relay_pubkey = std::env::var("BUZZ_RELAY_PUBKEY")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
         let keys = Keys::parse(&private_key).map_err(|_| HostError::InvalidOperatorKey)?;
-        Ok(Self {
-            keys,
-            relay_url,
-            relay_pubkey,
-        })
+        Ok(Self { keys, relay_url })
     }
 }
 
@@ -184,11 +175,17 @@ async fn refresh_subscription(
     subscriber: &RelaySubscriber,
     operator_pubkey: &str,
     repository: &SqliteRepository,
-) -> Result<(), HostError> {
-    subscriber
-        .subscribe(operator_pubkey, &[], &[], replay_since(repository)?)
-        .await?;
-    Ok(())
+) {
+    let since = match replay_since(repository) {
+        Ok(since) => since,
+        Err(error) => {
+            eprintln!("relay subscribe retry failed: {error}");
+            return;
+        }
+    };
+    if let Err(error) = subscriber.subscribe(operator_pubkey, &[], &[], since).await {
+        eprintln!("relay subscribe retry failed: {error}");
+    }
 }
 
 async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<(), HostError> {
@@ -199,9 +196,8 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
     client.wait_for_connection(CONNECT_TIMEOUT).await;
     let subscriber = RelaySubscriber::new(client);
     let mut notifications = subscriber.notifications();
-    refresh_subscription(&subscriber, &operator_pubkey, &repository).await?;
     eprintln!("botserver connected");
-    let mut ingest = RelayIngest::new(operator_pubkey.clone(), operator.relay_pubkey, repository);
+    let mut ingest = RelayIngest::new(operator_pubkey.clone(), String::new(), repository);
     let mut refresh = tokio::time::interval(SUBSCRIPTION_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -209,17 +205,6 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
             notification = notifications.recv() => match notification {
                 Ok(RelayPoolNotification::Event { event, .. }) => {
                     observe_event(&mut ingest, &event)?;
-                }
-                Ok(RelayPoolNotification::Message {
-                    message: RelayMessage::Closed { message, .. },
-                    ..
-                }) if message.contains("auth-required") => {
-                    refresh_subscription(
-                        &subscriber,
-                        &operator_pubkey,
-                        ingest.repository_mut(),
-                    )
-                    .await?;
                 }
                 Ok(RelayPoolNotification::Shutdown) => return Ok(()),
                 Ok(RelayPoolNotification::Message { .. })
@@ -236,7 +221,7 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
                     &operator_pubkey,
                     ingest.repository_mut(),
                 )
-                .await?;
+                .await;
             }
         }
     }
@@ -318,7 +303,6 @@ mod tests {
     struct EnvRestore {
         key: Option<String>,
         url: Option<String>,
-        relay_pubkey: Option<String>,
     }
 
     impl EnvRestore {
@@ -326,7 +310,6 @@ mod tests {
             Self {
                 key: std::env::var("BUZZ_PRIVATE_KEY").ok(),
                 url: std::env::var("BUZZ_RELAY_URL").ok(),
-                relay_pubkey: std::env::var("BUZZ_RELAY_PUBKEY").ok(),
             }
         }
     }
@@ -335,7 +318,6 @@ mod tests {
         fn drop(&mut self) {
             restore_var("BUZZ_PRIVATE_KEY", self.key.as_deref());
             restore_var("BUZZ_RELAY_URL", self.url.as_deref());
-            restore_var("BUZZ_RELAY_PUBKEY", self.relay_pubkey.as_deref());
         }
     }
 
