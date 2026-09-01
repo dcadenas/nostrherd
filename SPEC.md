@@ -96,3 +96,44 @@ git is the store of bot personality. SQLite MUST NOT store nsecs.
 
 Operator keys enter `botcli` via envchain (or equivalent exec). They
 MUST NOT appear in process titles, sqlite, or logs.
+
+## User-visible flows (v1)
+
+These are the product. Implementation MUST match this, not a clever
+subset.
+
+1. **Silence.** Nobody writes `@daniel bot:` in a channel. No occupant
+   exists there. The host may index events. Nothing is posted.
+2. **First call.** Sebastian in `#foobar` writes `@daniel bot: hello`.
+   Occupant `bot-foobar` is created from the bot corpus. It replies in
+   that thread: `[bot]: …`.
+3. **Follow-up without prefix.** Sebastian's next line is `and the PR?`
+   with no `bot:`. The occupant is not poked. Daniel may answer as
+   himself.
+4. **Second call.** Later, anyone (including Daniel) writes
+   `@daniel bot: …` in the same channel. Same occupant gets a new ask,
+   reply-to that event. If the previous turn is still open, this one
+   waits.
+5. **Another channel.** `@daniel bot:` in `#eng` is `bot-eng`,
+   independent of `#foobar`.
+6. **DM.** Same as a channel: first trigger creates `bot-<dm-slug>`,
+   further unprefixed DM lines do not poke it.
+7. **Thread.** `@daniel bot:` in a foobar thread still uses
+   `bot-foobar` and replies into that thread.
+8. **Busy.** Two `@daniel bot:` in `#foobar` before the first reply:
+   one occupant, two turns in order.
+9. **Gone pane.** Occupant process died with an open ask: recover that
+   logical agent, do not start a namesake twin.
+10. **Edit / delete.** Edit of the triggering message before the bot
+    posts replaces what it sees. Delete before it posts: no post.
+    After it posted: leave `[bot]:` up.
+11. **Long work.** One stamped reply when done. No working ping in v1.
+12. **Desktop.** Buzz desktop is still Daniel. The host does not mark
+    him typing or rewrite his presence.
+
+## Issue work
+
+An issue MUST list `Depends on:` issue numbers. Before starting work,
+the agent MUST `git pull`, re-read `SPEC.md` and `docs/decision-log.md`
+at HEAD, and comment on the issue if HEAD changed the contract, then
+adjust scope before writing code.

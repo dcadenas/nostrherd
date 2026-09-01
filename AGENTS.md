@@ -23,6 +23,13 @@ never `kelpie from=`.
 - Do not implement a `blocks-v1` open question by guessing.
 - Record accepted choices in `docs/decision-log.md`.
 
+## Issues
+
+Before starting an issue: `git pull`; re-read `SPEC.md` and
+`docs/decision-log.md` at HEAD; if the contract moved, comment on the
+issue and reshape the work. Honor `Depends on:` — do not start a
+blocked issue.
+
 ## Quality gates
 
 ```bash

@@ -94,3 +94,79 @@ are channels with their own UUID.
 Session name is `<botid>-<channel-slug>` (slug from channel display +
 stable id as needed to stay unique and ≤32 chars). Reply-to event id
 travels on the Turn for `botcli`, not in the session name.
+
+## D11. The operator may trigger their own bot
+
+Status: accepted
+
+`@daniel bot:` from the operator pubkey is a trigger. That is how you
+talk to the bot without a second identity.
+
+## D12. One in-flight turn per session; channels are independent
+
+Status: accepted
+
+A second trigger in the same channel while a Turn is open MUST queue
+and become the next ask after that turn's final. A trigger in another
+channel is another session and MUST NOT wait on the first.
+
+## D13. Thread triggers stay on the channel session
+
+Status: accepted
+
+`@daniel bot:` inside a thread still addresses `bot-<channel>`. The
+thread id is `botcli --reply-to` on that Turn. No extra occupant.
+
+## D14. Edits replace an unposted turn only
+
+Status: accepted
+
+If the triggering event is edited before `botcli` publishes, the host
+MUST replace the in-flight prompt body. After a successful post, an
+edit is ignored unless a new trigger arrives.
+
+## D15. Deletes abandon an unposted turn
+
+Status: accepted
+
+If the triggering event is deleted before publish, the host MUST
+`kelpie cancel` that ask (work abandoned). After publish, leave the
+`[bot]:` post up.
+
+## D16. Only kind:9-style channel/DM text can trigger
+
+Status: accepted
+
+Reactions, huddles, canvas, kind:0, and file-only events without a
+`bot:` text body MUST NOT open a Turn.
+
+## D17. One outbound post per turn in v1
+
+Status: accepted
+
+Closes Q5. No `[bot]: working…` protocol. The occupant may take time;
+people see one stamped reply when `botcli` runs.
+
+## D18. Silent subscriber
+
+Status: accepted
+
+Closes the presence half of Q4. `botserver` MUST NOT publish presence
+or typing as the operator. Buzz desktop remains the human session.
+Unread badges on the desktop are later (rest of Q4).
+
+## D19. Snapshots are per-channel files, refreshed on turn open
+
+Status: accepted
+
+The host writes last-N-days (and any extra sources) to a file for that
+session. Occupant start and each new Turn point at that file. A channel
+snapshot MUST NOT include other channels' DMs.
+
+## D20. Recover the logical occupant; do not mint a twin
+
+Status: accepted
+
+If the pane is gone but the ask is open: Kelpie reminder, then
+`adopt --logical-id`. Do not `kelpie start` a new logical agent
+because the public name is free.
