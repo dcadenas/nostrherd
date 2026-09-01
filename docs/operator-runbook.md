@@ -2,7 +2,7 @@
 
 Personal `botserver` / `botcli` use envchain namespace `botserver`.
 That is not the throwaway live-test namespaces `botserver-proof` and
-`botserver-proof-peer` (D23, `skills/local-relay`).
+`botserver-proof-peer` (D23 live-test relay, `skills/local-relay`).
 
 `envchain` injects `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` into the
 wrapped process (D29, D30). The binaries only read those names from
@@ -46,15 +46,19 @@ corpus = "/path/to/corpus-repo"
 kind = "opencode"
 ```
 
-`--check` loads config and database, then exits. It still needs the
-same envchain wrap.
+`--check` loads config and database, then exits. It needs neither the
+envchain wrap nor a Herdr pane.
 
 ## Wrap botcli
 
 Occupants publish with the same namespace:
 
+`botcli` execs `buzz`. Strip `BUZZ_AUTH_TAG` if the shell exported it
+(same as live Buzz calls in `docs/testing.md`). `botserver` does not
+read that name.
+
 ```bash
-envchain botserver botcli send --stdin \
+env -u BUZZ_AUTH_TAG envchain botserver botcli send --stdin \
   --database /path/to/botserver.sqlite \
   --ask-id <kelpie-ask-id> \
   --channel <channel-uuid> \

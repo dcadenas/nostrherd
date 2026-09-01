@@ -322,5 +322,6 @@ Status: accepted
 Personal host and occupant wraps use envchain namespace `botserver`
 with `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL`. That namespace is
 distinct from throwaway `botserver-proof` / `botserver-proof-peer`
-(D23). Do not point `BUZZ_RELAY_URL` at a production relay. Commands:
+(D23 live-test relay). Do not point `BUZZ_RELAY_URL` at a production
+relay. Commands:
 `docs/operator-runbook.md`.
