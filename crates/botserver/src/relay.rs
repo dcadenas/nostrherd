@@ -3,9 +3,9 @@
 use std::fmt;
 
 use botserver_domain::{EventId, TriggerMatch};
+use futures::Stream;
 use nostr_sdk::prelude::{
-    Alphabet, Client, Event, Filter, Kind, RelayPoolNotification, SingleLetterTag, SubscriptionId,
-    Timestamp,
+    Client, ClientNotification, Event, Filter, Kind, SingleLetterTag, SubscriptionId, Timestamp,
 };
 
 use crate::{HostRepository, IndexedRelayEvent};
@@ -56,7 +56,7 @@ pub enum IngestError<E> {
 #[derive(Debug)]
 pub enum RelaySubscribeError {
     /// The Nostr client rejected the subscription request.
-    Client(nostr_sdk::client::Error),
+    Client(nostr_sdk::error::Error),
     /// No configured relay accepted the subscription.
     NoRelayAccepted,
 }
@@ -79,8 +79,8 @@ impl std::error::Error for RelaySubscribeError {
     }
 }
 
-impl From<nostr_sdk::client::Error> for RelaySubscribeError {
-    fn from(error: nostr_sdk::client::Error) -> Self {
+impl From<nostr_sdk::error::Error> for RelaySubscribeError {
+    fn from(error: nostr_sdk::error::Error) -> Self {
         Self::Client(error)
     }
 }
@@ -392,7 +392,7 @@ impl RelaySubscriber {
         if let Some(filter) = filter {
             self.subscribe_filter(id, filter).await
         } else {
-            self.client.unsubscribe(&SubscriptionId::new(id)).await;
+            self.client.unsubscribe(&SubscriptionId::new(id)).await?;
             Ok(())
         }
     }
@@ -400,7 +400,8 @@ impl RelaySubscriber {
     async fn subscribe_filter(&self, id: &str, filter: Filter) -> Result<(), RelaySubscribeError> {
         let output = self
             .client
-            .subscribe_with_id(SubscriptionId::new(id), filter, None)
+            .subscribe(filter)
+            .with_id(SubscriptionId::new(id))
             .await?;
         if output.success.is_empty() {
             return Err(RelaySubscribeError::NoRelayAccepted);
@@ -408,9 +409,8 @@ impl RelaySubscriber {
         Ok(())
     }
 
-    /// Receive relay-pool notifications for the ingest loop.
-    #[must_use]
-    pub fn notifications(&self) -> tokio::sync::broadcast::Receiver<RelayPoolNotification> {
+    /// Receive client notifications for the ingest loop.
+    pub fn notifications(&self) -> impl Stream<Item = ClientNotification> + Send {
         self.client.notifications()
     }
 }
@@ -489,7 +489,7 @@ fn message_filter(operator_pubkey: &str, since: Timestamp) -> Filter {
             Kind::Custom(CHANNEL_MESSAGE_KIND),
             Kind::Custom(STREAM_MESSAGE_V2_KIND),
         ])
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), operator_pubkey)
+        .custom_tag(SingleLetterTag::LOWERCASE_P, operator_pubkey)
         .since(since)
 }
 
@@ -504,7 +504,7 @@ fn channel_filter(channel_ids: &[String], since: Timestamp) -> Option<Filter> {
                 Kind::Custom(STREAM_MESSAGE_V2_KIND),
             ])
             .custom_tags(
-                SingleLetterTag::lowercase(Alphabet::H),
+                SingleLetterTag::LOWERCASE_H,
                 channel_ids.iter().map(String::as_str),
             )
             .since(since),
@@ -523,7 +523,7 @@ fn mutation_filter(active_event_ids: &[EventId], since: Timestamp) -> Option<Fil
                 Kind::Custom(BUZZ_DELETE_KIND),
             ])
             .custom_tags(
-                SingleLetterTag::lowercase(Alphabet::E),
+                SingleLetterTag::LOWERCASE_E,
                 active_event_ids.iter().map(EventId::as_str),
             )
             .since(since),
@@ -535,7 +535,7 @@ mod tests {
     use std::collections::HashSet;
 
     use botserver_domain::BotId;
-    use nostr_sdk::prelude::{EventBuilder, Keys, Tag};
+    use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Keys, Tag};
 
     use super::*;
     use crate::{NewTurn, SessionRecord, TurnRecord, TurnState};
@@ -758,7 +758,7 @@ mod tests {
     ) -> Event {
         EventBuilder::new(Kind::Custom(kind), content)
             .tags(tags)
-            .sign_with_keys(keys)
+            .finalize(keys)
             .expect("event")
     }
 

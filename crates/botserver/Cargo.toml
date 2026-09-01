@@ -9,7 +9,8 @@ description = "Host occupant and per-bot actors"
 [dependencies]
 botserver-domain = { path = "../domain" }
 clap = { version = "4", features = ["derive"] }
-nostr-sdk = "0.44"
+futures = "0.3"
+nostr-sdk = "0.45"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

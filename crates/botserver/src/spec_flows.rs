@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use botserver_domain::{Bot, BotId, EventId};
-use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, Tag};
+use nostr_sdk::prelude::{Client, Event, EventBuilder, FinalizeEvent, Keys, Kind, Tag};
 use serde_json::Value;
 
 use crate::actor::{BotActor, OccupantPane, OccupantPaneAllocator, TriggerOutcome};
@@ -171,7 +171,7 @@ fn event_with_keys(
 ) -> Event {
     EventBuilder::new(Kind::Custom(kind), content)
         .tags(tags)
-        .sign_with_keys(keys)
+        .finalize(keys)
         .expect("event")
 }
 
@@ -800,7 +800,7 @@ fn flow_11_one_ask_while_the_occupant_works() {
 
 #[test]
 fn flow_12_host_does_not_publish_presence_or_typing() {
-    let subscriber = RelaySubscriber::new(nostr_sdk::Client::default());
+    let subscriber = RelaySubscriber::new(Client::default());
     let _notifications = subscriber.notifications();
     let harness = Harness::new([]);
     for kind in [0_u16, 7, 30_315] {
