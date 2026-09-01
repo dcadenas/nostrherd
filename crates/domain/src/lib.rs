@@ -488,6 +488,26 @@ mod tests {
     }
 
     #[test]
+    fn session_names_disambiguate_when_bot_and_display_collide() {
+        let first = BotId::new("a").expect("bot");
+        let second = BotId::new("a-b").expect("bot");
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let mut taken = std::collections::HashSet::new();
+        let first_name = SessionName::from_bot_and_channel(&first, channel, "b-c", |candidate| {
+            taken.contains(candidate)
+        })
+        .expect("first");
+        taken.insert(first_name.as_str().to_owned());
+        let second_name = SessionName::from_bot_and_channel(&second, channel, "c", |candidate| {
+            taken.contains(candidate)
+        })
+        .expect("second");
+        assert_eq!(first_name.as_str(), "a-b-c");
+        assert_ne!(first_name.as_str(), second_name.as_str());
+        assert!(second_name.as_str().starts_with("a-b-c-"));
+    }
+
+    #[test]
     fn trigger_requires_operator_p_tag() {
         assert!(TriggerMatch::parse("operator", ["someone-else"], "bot: hello").is_none());
         assert_eq!(

@@ -414,10 +414,18 @@ impl HostRepository for SqliteRepository {
             transaction.commit()?;
             return Ok(None);
         };
+        let Some(transition) = TurnTransition::parse(TurnState::Queued, TurnState::Open) else {
+            return Ok(None);
+        };
         transaction.execute(
-            "UPDATE turns SET ask_id = ?1, state = 'open'
-             WHERE sequence = ?2 AND state = 'queued'",
-            params![ask_id, sequence],
+            "UPDATE turns SET ask_id = ?1, state = ?2
+             WHERE sequence = ?3 AND state = ?4",
+            params![
+                ask_id,
+                transition.to_state().as_str(),
+                sequence,
+                transition.from_state().as_str()
+            ],
         )?;
         let record = transaction.query_row(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
@@ -433,19 +441,27 @@ impl HostRepository for SqliteRepository {
     }
 
     fn set_turn_state(&mut self, ask_id: &str, state: TurnState) -> Result<bool, Self::Error> {
-        let Some(transition) = TurnTransition::parse(TurnState::Open, state) else {
+        let Some(current) = self.turn_by_ask_id(ask_id)? else {
+            return Ok(false);
+        };
+        let Some(transition) = TurnTransition::parse(current.state, state) else {
             return Ok(false);
         };
         let sql = if transition.to_state() == TurnState::Cancelled {
             "UPDATE turns SET state = ?1, publish_claimed = 0
-             WHERE ask_id = ?2 AND state = 'open' AND publish_claimed = 0"
+             WHERE ask_id = ?2 AND state = ?3 AND publish_claimed = 0"
         } else {
             "UPDATE turns SET state = ?1, publish_claimed = 0
-             WHERE ask_id = ?2 AND state = 'open'"
+             WHERE ask_id = ?2 AND state = ?3"
         };
-        let changed = self
-            .connection
-            .execute(sql, params![transition.to_state().as_str(), ask_id])?;
+        let changed = self.connection.execute(
+            sql,
+            params![
+                transition.to_state().as_str(),
+                ask_id,
+                transition.from_state().as_str()
+            ],
+        )?;
         Ok(changed == 1)
     }
 
@@ -468,10 +484,18 @@ impl HostRepository for SqliteRepository {
     }
 
     fn cancel_queued_turn(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
+        let Some(transition) = TurnTransition::parse(TurnState::Queued, TurnState::Cancelled)
+        else {
+            return Ok(false);
+        };
         let changed = self.connection.execute(
-            "UPDATE turns SET state = 'cancelled'
-             WHERE event_id = ?1 AND state = 'queued'",
-            [event_id.as_str()],
+            "UPDATE turns SET state = ?1
+             WHERE event_id = ?2 AND state = ?3",
+            params![
+                transition.to_state().as_str(),
+                event_id.as_str(),
+                transition.from_state().as_str()
+            ],
         )?;
         Ok(changed == 1)
     }
@@ -480,15 +504,27 @@ impl HostRepository for SqliteRepository {
         &mut self,
         event_id: &EventId,
     ) -> Result<Option<TurnRecord>, Self::Error> {
+        let Some(queued_cancel) = TurnTransition::parse(TurnState::Queued, TurnState::Cancelled)
+        else {
+            return Ok(None);
+        };
+        let Some(open_cancel) = TurnTransition::parse(TurnState::Open, TurnState::Cancelled) else {
+            return Ok(None);
+        };
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
-            "UPDATE turns SET state = 'cancelled', publish_claimed = 0
-             WHERE event_id = ?1
+            "UPDATE turns SET state = ?1, publish_claimed = 0
+             WHERE event_id = ?2
                AND (
-                   state = 'queued'
-                   OR (state = 'open' AND publish_claimed = 0)
+                   state = ?3
+                   OR (state = ?4 AND publish_claimed = 0)
                )",
-            [event_id.as_str()],
+            params![
+                queued_cancel.to_state().as_str(),
+                event_id.as_str(),
+                queued_cancel.from_state().as_str(),
+                open_cancel.from_state().as_str()
+            ],
         )?;
         if changed == 0 {
             transaction.commit()?;
@@ -499,10 +535,10 @@ impl HostRepository for SqliteRepository {
                     t.reply_to_event_id, t.state
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
-             WHERE t.event_id = ?1 AND t.state = 'cancelled'
+             WHERE t.event_id = ?1 AND t.state = ?2
              ORDER BY t.sequence DESC
              LIMIT 1",
-            [event_id.as_str()],
+            params![event_id.as_str(), queued_cancel.to_state().as_str()],
             Self::read_turn,
         )?;
         transaction.commit()?;
@@ -513,15 +549,27 @@ impl HostRepository for SqliteRepository {
         &mut self,
         turn: &NewTurn,
     ) -> Result<Option<TurnReplacement>, Self::Error> {
+        let Some(queued_cancel) = TurnTransition::parse(TurnState::Queued, TurnState::Cancelled)
+        else {
+            return Ok(None);
+        };
+        let Some(open_cancel) = TurnTransition::parse(TurnState::Open, TurnState::Cancelled) else {
+            return Ok(None);
+        };
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
-            "UPDATE turns SET state = 'cancelled', publish_claimed = 0
-             WHERE event_id = ?1
+            "UPDATE turns SET state = ?1, publish_claimed = 0
+             WHERE event_id = ?2
                AND (
-                   state = 'queued'
-                   OR (state = 'open' AND publish_claimed = 0)
+                   state = ?3
+                   OR (state = ?4 AND publish_claimed = 0)
                )",
-            [turn.event_id.as_str()],
+            params![
+                queued_cancel.to_state().as_str(),
+                turn.event_id.as_str(),
+                queued_cancel.from_state().as_str(),
+                open_cancel.from_state().as_str()
+            ],
         )?;
         if changed == 0 {
             transaction.commit()?;
@@ -532,10 +580,10 @@ impl HostRepository for SqliteRepository {
                     t.reply_to_event_id, t.state
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
-             WHERE t.event_id = ?1 AND t.state = 'cancelled'
+             WHERE t.event_id = ?1 AND t.state = ?2
              ORDER BY t.sequence DESC
              LIMIT 1",
-            [turn.event_id.as_str()],
+            params![turn.event_id.as_str(), queued_cancel.to_state().as_str()],
             Self::read_turn,
         )?;
         let queued = insert_queued_turn(&transaction, turn)?;
@@ -623,11 +671,12 @@ fn insert_queued_turn(connection: &Connection, turn: &NewTurn) -> rusqlite::Resu
     )?;
     connection.execute(
         "INSERT INTO turns(session_id, event_id, reply_to_event_id, state)
-         VALUES (?1, ?2, ?3, 'queued')",
+         VALUES (?1, ?2, ?3, ?4)",
         params![
             session_id,
             turn.event_id.as_str(),
             turn.reply_to_event_id.as_ref().map(EventId::as_str),
+            TurnState::Queued.as_str(),
         ],
     )?;
 
