@@ -72,7 +72,8 @@ EOF
 marker. `--database` and `--ask-id` are omitted together when no Kelpie
 ask should close.
 
-A PATH wrapper that execs `envchain botserver botcli "$@"` is allowed
+A PATH wrapper that execs
+`env -u BUZZ_AUTH_TAG envchain botserver botcli "$@"` is allowed
 (SPEC). The namespace name is not a secret.
 
 ## Do not
