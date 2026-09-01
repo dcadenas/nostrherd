@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use botserver::actor::persist_ingest;
@@ -26,6 +26,7 @@ use nostr_sdk::prelude::{Client, ClientNotification, Event, Keys, SignerAuthenti
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const EMPTY_REPLAY_OVERLAP_SECS: u64 = 900;
 const SUBSCRIPTION_REFRESH: Duration = Duration::from_secs(1);
+const RESUME_QUEUED_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
 #[command(about = "Host occupant and per-bot actors")]
@@ -275,6 +276,7 @@ async fn serve(
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut announced = false;
     let mut last_retry_error = None;
+    let mut last_queued_resume = Instant::now();
     loop {
         tokio::select! {
             notification = notifications.next() => match notification {
@@ -328,8 +330,11 @@ async fn serve(
                         for event in events {
                             observe_event(&mut actor, &kelpie, &waiter, &mut ingest, &event)?;
                         }
-                        if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
-                            eprintln!("queued occupant resume failed: {error}");
+                        if last_queued_resume.elapsed() >= RESUME_QUEUED_EVERY {
+                            if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
+                                eprintln!("queued occupant resume failed: {error}");
+                            }
+                            last_queued_resume = Instant::now();
                         }
                     }
                     Err(error) => {
