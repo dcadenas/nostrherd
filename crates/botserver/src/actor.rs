@@ -481,7 +481,7 @@ where
                 recorded: logical_id.to_owned(),
                 live: live.logical_agent_id().to_owned(),
             }),
-            Err(KelpieError::Rejected { .. }) => {
+            Err(KelpieError::TargetUnavailable) => {
                 let snapshot_relpath = self.refresh_snapshot(session)?;
                 self.start_occupant(
                     kelpie,
@@ -1263,6 +1263,28 @@ mod tests {
         actor
             .recover_open_occupants(&kelpie, &waiter)
             .expect_err("invalid whoami");
+        assert_eq!(start_count(&runner), 1);
+        assert_eq!(panes.calls.lock().expect("pane calls").len(), 1);
+        assert!(continued_starts(&runner).is_empty());
+    }
+
+    #[test]
+    fn whoami_rejection_does_not_start_a_replacement() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            start(),
+            whoami(),
+            asked("ask-1"),
+            failure("rejected", "kelpie daemon unavailable"),
+        ]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        actor
+            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
+            .expect("asked");
+
+        actor
+            .recover_open_occupants(&kelpie, &waiter)
+            .expect_err("rejected whoami");
         assert_eq!(start_count(&runner), 1);
         assert_eq!(panes.calls.lock().expect("pane calls").len(), 1);
         assert!(continued_starts(&runner).is_empty());

@@ -143,6 +143,8 @@ pub enum KelpieError {
     Io(io::Error),
     /// Kelpie rejected the operation.
     Rejected { status: String, stderr: String },
+    /// No Ready occupant was bound to the requested alias.
+    TargetUnavailable,
     /// Kelpie returned a response outside its JSON receipt contract.
     InvalidReceipt(String),
 }
@@ -154,6 +156,9 @@ impl fmt::Display for KelpieError {
             Self::Rejected { status, stderr } => {
                 write!(formatter, "Kelpie exited with {status}: {stderr}")
             }
+            Self::TargetUnavailable => {
+                formatter.write_str("no ready occupant is bound to that name")
+            }
             Self::InvalidReceipt(reason) => write!(formatter, "invalid Kelpie receipt: {reason}"),
         }
     }
@@ -163,7 +168,7 @@ impl std::error::Error for KelpieError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::Rejected { .. } | Self::InvalidReceipt(_) => None,
+            Self::Rejected { .. } | Self::TargetUnavailable | Self::InvalidReceipt(_) => None,
         }
     }
 }
@@ -302,6 +307,9 @@ impl KelpieClient {
     pub fn occupant_whoami(&self, alias: &str) -> Result<StartedOccupant, KelpieError> {
         let output = self.invoke(&["--json", "whoami", alias], &[])?;
         if !output.success {
+            if error_class(&output.receipt) == Some("target_unavailable") {
+                return Err(KelpieError::TargetUnavailable);
+            }
             return Err(output.rejected());
         }
         let result = result(&output.receipt)?;
