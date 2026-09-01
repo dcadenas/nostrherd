@@ -109,10 +109,20 @@ impl SqliteRepository {
               CREATE INDEX IF NOT EXISTS turns_session_order
                   ON turns(session_id, sequence);",
         )?;
-        let _ = connection.execute(
+        if let Err(error) = connection.execute(
             "ALTER TABLE turns ADD COLUMN publish_claimed INTEGER NOT NULL DEFAULT 0",
             [],
-        );
+        ) {
+            let duplicate_column = match &error {
+                rusqlite::Error::SqliteFailure(_, Some(message)) => {
+                    message.contains("duplicate column name")
+                }
+                _ => false,
+            };
+            if !duplicate_column {
+                return Err(error);
+            }
+        }
         Ok(Self { connection })
     }
 
