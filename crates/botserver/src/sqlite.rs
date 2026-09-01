@@ -106,9 +106,13 @@ impl SqliteRepository {
              CREATE UNIQUE INDEX IF NOT EXISTS turns_one_live_per_event
                  ON turns(event_id) WHERE state IN ('queued', 'open');
 
-             CREATE INDEX IF NOT EXISTS turns_session_order
-                 ON turns(session_id, sequence);",
+              CREATE INDEX IF NOT EXISTS turns_session_order
+                  ON turns(session_id, sequence);",
         )?;
+        let _ = connection.execute(
+            "ALTER TABLE turns ADD COLUMN publish_claimed INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(Self { connection })
     }
 
@@ -230,7 +234,13 @@ impl HostRepository for SqliteRepository {
             .query_row(
                 "SELECT content FROM relay_events
                  WHERE event_id = ?1
-                    OR (target_event_id = ?1 AND kind = 40003)
+                    OR (
+                        target_event_id = ?1
+                        AND kind = 40003
+                        AND author_pubkey = (
+                            SELECT author_pubkey FROM relay_events WHERE event_id = ?1
+                        )
+                    )
                  ORDER BY created_at DESC, event_id DESC
                  LIMIT 1",
                 [event_id.as_str()],
@@ -988,5 +998,59 @@ mod tests {
             repository.latest_body_for_event(&event_id('a')).unwrap(),
             Some("bot: replacement".to_owned())
         );
+        let foreign = IndexedRelayEvent {
+            event_id: event_id('d'),
+            author_pubkey: "9".repeat(64),
+            created_at: 9_999,
+            kind: 40_003,
+            content: "bot: attacker body".to_owned(),
+            tags_json: "[]".to_owned(),
+            channel_id: Some("channel".to_owned()),
+            target_event_id: Some(event_id('a')),
+        };
+        repository.index_event(&foreign, false).unwrap();
+        assert_eq!(
+            repository.latest_body_for_event(&event_id('a')).unwrap(),
+            Some("bot: replacement".to_owned())
+        );
+    }
+
+    #[test]
+    fn existing_turns_table_gains_publish_claimed() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                     id INTEGER PRIMARY KEY,
+                     bot_id TEXT NOT NULL,
+                     channel_id TEXT NOT NULL,
+                     session_name TEXT NOT NULL UNIQUE,
+                     occupant_logical_id TEXT,
+                     renew_id TEXT,
+                     UNIQUE(bot_id, channel_id)
+                 ) STRICT;
+                 CREATE TABLE turns (
+                     sequence INTEGER PRIMARY KEY,
+                     session_id INTEGER NOT NULL REFERENCES sessions(id),
+                     event_id TEXT NOT NULL,
+                     ask_id TEXT UNIQUE,
+                     reply_to_event_id TEXT,
+                     state TEXT NOT NULL
+                 ) STRICT;",
+            )
+            .unwrap();
+        let mut repository = SqliteRepository::from_connection(connection).expect("migrated");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        repository
+            .enqueue_turn(&turn(&bot_id, channel_id, 'a'))
+            .unwrap();
+        repository
+            .open_next_turn(&bot_id, channel_id, "ask-1")
+            .unwrap();
+        assert!(repository.claim_turn_for_publish("ask-1").unwrap());
     }
 }

@@ -594,8 +594,15 @@ mod tests {
                 .indexed
                 .iter()
                 .filter(|event| {
-                    event.event_id == *event_id
-                        || (event.target_event_id.as_ref() == Some(event_id) && event.kind == 40003)
+                    if event.event_id == *event_id {
+                        return true;
+                    }
+                    event.target_event_id.as_ref() == Some(event_id)
+                        && event.kind == 40003
+                        && self.indexed.iter().any(|original| {
+                            original.event_id == *event_id
+                                && original.author_pubkey == event.author_pubkey
+                        })
                 })
                 .max_by_key(|event| (event.created_at, event.event_id.as_str().to_owned()))
                 .map(|event| event.content.clone()))
