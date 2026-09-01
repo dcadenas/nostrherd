@@ -5,7 +5,7 @@ use std::path::Path;
 use botserver_domain::{BotId, EventId};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{HostRepository, NewTurn, SessionRecord, TurnRecord, TurnState};
+use crate::{HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord, TurnState};
 
 /// SQLite-backed host repository.
 #[derive(Debug)]
@@ -36,6 +36,26 @@ impl SqliteRepository {
                  event_id TEXT PRIMARY KEY NOT NULL
                      CHECK(length(event_id) = 64)
              ) STRICT;
+
+             CREATE TABLE IF NOT EXISTS relay_events (
+                 event_id TEXT PRIMARY KEY NOT NULL
+                     REFERENCES processed_events(event_id),
+                 author_pubkey TEXT NOT NULL CHECK(length(author_pubkey) = 64),
+                 created_at INTEGER NOT NULL,
+                 kind INTEGER NOT NULL,
+                 content TEXT NOT NULL,
+                 tags_json TEXT NOT NULL,
+                 channel_id TEXT,
+                 target_event_id TEXT CHECK(
+                     target_event_id IS NULL OR length(target_event_id) = 64
+                 )
+             ) STRICT;
+
+             CREATE INDEX IF NOT EXISTS relay_events_channel_time
+                 ON relay_events(channel_id, created_at);
+
+             CREATE INDEX IF NOT EXISTS relay_events_target
+                 ON relay_events(target_event_id);
 
              CREATE TABLE IF NOT EXISTS sessions (
                  id INTEGER PRIMARY KEY,
@@ -97,6 +117,24 @@ impl SqliteRepository {
                 .ok_or_else(|| invalid_value(6, "invalid turn state"))?,
         })
     }
+
+    fn read_indexed_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedRelayEvent> {
+        let event_id: String = row.get(0)?;
+        let target_event_id: Option<String> = row.get(7)?;
+        Ok(IndexedRelayEvent {
+            event_id: parse_event_id(&event_id, 0)?,
+            author_pubkey: row.get(1)?,
+            created_at: row.get(2)?,
+            kind: row.get(3)?,
+            content: row.get(4)?,
+            tags_json: row.get(5)?,
+            channel_id: row.get(6)?,
+            target_event_id: target_event_id
+                .as_deref()
+                .map(|value| parse_event_id(value, 7))
+                .transpose()?,
+        })
+    }
 }
 
 impl HostRepository for SqliteRepository {
@@ -109,6 +147,54 @@ impl HostRepository for SqliteRepository {
             [event_id.as_str()],
         )?;
         Ok(changed == 1)
+    }
+
+    fn index_unprocessed_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "INSERT INTO processed_events(event_id) VALUES (?1)
+             ON CONFLICT(event_id) DO NOTHING",
+            [event.event_id.as_str()],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO relay_events(
+                 event_id, author_pubkey, created_at, kind, content, tags_json,
+                 channel_id, target_event_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                event.event_id.as_str(),
+                event.author_pubkey,
+                event.created_at,
+                event.kind,
+                event.content,
+                event.tags_json,
+                event.channel_id,
+                event.target_event_id.as_ref().map(EventId::as_str),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    fn indexed_events_for_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<IndexedRelayEvent>, Self::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT event_id, author_pubkey, created_at, kind, content, tags_json,
+                    channel_id, target_event_id
+             FROM relay_events
+             WHERE channel_id = ?1
+             ORDER BY created_at, event_id",
+        )?;
+        let events = statement
+            .query_map([channel_id], Self::read_indexed_event)?
+            .collect();
+        events
     }
 
     fn enqueue_unprocessed_turn(
@@ -393,6 +479,35 @@ mod tests {
 
         assert!(repository.mark_event_processed(&event_id).unwrap());
         assert!(!repository.mark_event_processed(&event_id).unwrap());
+    }
+
+    #[test]
+    fn relay_events_are_indexed_atomically_and_idempotently() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let event = IndexedRelayEvent {
+            event_id: event_id('a'),
+            author_pubkey: "b".repeat(64),
+            created_at: 42,
+            kind: 9,
+            content: "hello".to_owned(),
+            tags_json: r#"[["h","channel"]]"#.to_owned(),
+            channel_id: Some("channel".to_owned()),
+            target_event_id: None,
+        };
+
+        assert!(repository.index_unprocessed_event(&event).unwrap());
+        assert!(!repository.index_unprocessed_event(&event).unwrap());
+
+        assert_eq!(
+            repository.indexed_events_for_channel("channel").unwrap(),
+            vec![event]
+        );
+        assert!(repository
+            .indexed_events_for_channel("different-channel")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

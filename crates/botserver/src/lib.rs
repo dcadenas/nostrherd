@@ -716,9 +716,26 @@ mod tests {
             .contains("continue logical agent waiter-agent"));
     }
 }
+pub mod relay;
 pub mod sqlite;
 
 use botserver_domain::{BotId, EventId};
+
+/// Immutable relay event cached for channel snapshots.
+///
+/// The relay remains the canonical message store; this record is a rebuildable
+/// local index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedRelayEvent {
+    pub event_id: EventId,
+    pub author_pubkey: String,
+    pub created_at: i64,
+    pub kind: u16,
+    pub content: String,
+    pub tags_json: String,
+    pub channel_id: Option<String>,
+    pub target_event_id: Option<EventId>,
+}
 
 /// Persisted binding between one bot and one Buzz channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -794,6 +811,25 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the operation cannot be persisted.
     fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error>;
+
+    /// Atomically mark and index a previously unseen relay event.
+    ///
+    /// Returns false when the event id was already processed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the event cannot be persisted.
+    fn index_unprocessed_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error>;
+
+    /// Read indexed relay events for exactly one channel in chronological order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when indexed events cannot be read.
+    fn indexed_events_for_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<IndexedRelayEvent>, Self::Error>;
 
     /// Atomically mark a trigger event processed and enqueue its turn.
     ///
