@@ -271,9 +271,11 @@ where
             let Some(body) = body else {
                 continue;
             };
-            match self.ask_oldest_queued(kelpie, waiter, &session.channel_id, &body) {
-                Ok(()) => return Ok(Some(TriggerOutcome::Asked)),
-                Err(_) => continue,
+            if self
+                .ask_oldest_queued(kelpie, waiter, &session.channel_id, &body)
+                .is_ok()
+            {
+                return Ok(Some(TriggerOutcome::Asked));
             }
         }
         Ok(None)
