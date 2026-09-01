@@ -237,12 +237,17 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
                 let since = match replay_since(ingest.repository_mut()) {
                     Ok(since) => since,
                     Err(error) => {
-                        eprintln!("relay subscribe retry failed: {error}");
+                        let message = format!("relay replay cursor failed: {error}");
+                        if last_retry_error.as_ref() != Some(&message) {
+                            eprintln!("{message}");
+                            last_retry_error = Some(message);
+                        }
                         continue;
                     }
                 };
                 match subscriber.fetch_messages(&operator_pubkey, since).await {
                     Ok(events) => {
+                        last_retry_error = None;
                         for event in events {
                             observe_event(&mut ingest, &event)?;
                         }
