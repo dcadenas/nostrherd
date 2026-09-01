@@ -65,8 +65,11 @@ impl SessionName {
         let compact_id = compact_uuid(channel_id)?;
         let maximum_suffix_len = 32_usize.checked_sub(bot.as_str().len() + 1)?;
         let maximum_suffix_len = compact_id.len().min(maximum_suffix_len);
-        let mut suffix_len = 8;
+        let mut suffix_len = 8.min(maximum_suffix_len);
         while suffix_len <= maximum_suffix_len {
+            if suffix_len == 0 {
+                break;
+            }
             let candidate =
                 session_candidate(bot.as_str(), &display_slug, Some(&compact_id[..suffix_len]))?;
             if !is_taken(&candidate) {
@@ -129,17 +132,26 @@ fn compact_uuid(raw: &str) -> Option<String> {
 }
 
 fn session_candidate(bot: &str, display: &str, suffix: Option<&str>) -> Option<String> {
-    let fixed_len = bot.len() + 1 + suffix.map_or(0, |value| value.len() + 1);
-    let display_len = 32_usize.checked_sub(fixed_len)?;
-    let display = display
-        .get(..display.len().min(display_len))?
-        .trim_end_matches('-');
-
-    let candidate = match (display.is_empty(), suffix) {
-        (true, Some(suffix)) => format!("{bot}-{suffix}"),
-        (true, None) => return None,
-        (false, Some(suffix)) => format!("{bot}-{display}-{suffix}"),
-        (false, None) => format!("{bot}-{display}"),
+    let candidate = if let Some(suffix) = suffix {
+        let fixed_len = bot.len() + 1 + suffix.len();
+        let display_len = 32_usize.saturating_sub(fixed_len.saturating_add(1));
+        let display = display
+            .get(..display.len().min(display_len))?
+            .trim_end_matches('-');
+        if display.is_empty() {
+            format!("{bot}-{suffix}")
+        } else {
+            format!("{bot}-{display}-{suffix}")
+        }
+    } else {
+        let display_len = 32_usize.checked_sub(bot.len() + 1)?;
+        let display = display
+            .get(..display.len().min(display_len))?
+            .trim_end_matches('-');
+        if display.is_empty() {
+            return None;
+        }
+        format!("{bot}-{display}")
     };
     (candidate.len() <= 32).then_some(candidate)
 }
@@ -274,6 +286,23 @@ mod tests {
         .expect("name");
 
         assert_eq!(name.as_str(), "bot-foobar-ab12cd345678");
+    }
+
+    #[test]
+    fn session_name_shortens_uuid_suffix_for_a_long_bot_id() {
+        let bot_id = "a".repeat(28);
+        let bot = BotId::new(&bot_id).expect("bot");
+        let mut first_candidate = true;
+        let name = SessionName::from_bot_and_channel(
+            &bot,
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+            "foo",
+            |_| std::mem::replace(&mut first_candidate, false),
+        )
+        .expect("name");
+
+        assert_eq!(name.as_str(), format!("{bot_id}-ab1"));
+        assert_eq!(name.as_str().len(), 32);
     }
 
     #[test]
