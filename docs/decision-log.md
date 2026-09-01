@@ -257,11 +257,15 @@ it is a classified trigger with nothing to answer.
 Status: accepted
 
 Closes the unspecified window and interval in D6/D19 for v1. The host
-writes one last-7-days file per channel session at
+writes one file per channel session at
 `<corpus>/.botserver/places/<session-name>.md` from indexed events with
-that channel UUID only. Corpus `startup.md` points at
-`.botserver/places/<your public Kelpie name>.md`. Occupant start and
-each new Turn refresh that file. After start, the host arms
-`kelpie renew --every 45m --on-timeout abort` on the occupant's exact
-incarnation. Prepare writes `progress.md`. Resume reads `startup.md`
-and the snapshot. Token-count renew remains later (Q6).
+that channel UUID only, in the window `[now - 7 days, now + 900s]` (the
+upper slack is Buzz's accepted clock drift from D24). Corpus
+`startup.md` points at `.botserver/places/<your public Kelpie name>.md`.
+Occupant start and each new Turn refresh that file. After start, the
+host tries to arm `kelpie renew --every 45m --on-timeout abort` on the
+occupant's exact incarnation. Prepare writes `progress.md`. Resume reads
+`startup.md` and the snapshot. A Kelpie failure leaving `renew_id` unset
+does not block the ask; the next turn retries the arm. D19's MUST is the
+file contents, not occupant filesystem isolation: occupants share the
+corpus cwd (D7). Token-count renew remains later (Q6).
