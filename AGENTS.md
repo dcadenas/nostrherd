@@ -23,6 +23,8 @@ never `kelpie from=`.
 - Domain crate has no SQLite, Kelpie, Herdr, or relay I/O.
 - Do not put nsecs in SQLite, logs, or pane env. Wrap binaries with
   `envchain NAMESPACE cmd` (D29). Do not add `--envchain` flags.
+  Before running the host as the operator (not local-relay proofs),
+  read `docs/operator-runbook.md`.
 - Do not implement a `blocks-v1` open question by guessing.
 - Record accepted choices in `docs/decision-log.md`.
 

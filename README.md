@@ -32,6 +32,10 @@ EOF
 a JSON receipt. When `--ask-id` is omitted, `--database` is omitted too
 and no Kelpie obligation is closed.
 
+The command above uses throwaway live-test namespace `botserver-proof`.
+Personal operator keys use namespace `botserver`. Before running the
+host as yourself, read `docs/operator-runbook.md`.
+
 ## Read order
 
 `AGENTS.md` → `SPEC.md` → `docs/domain-model.md` → `docs/decision-log.md`
