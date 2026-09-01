@@ -53,31 +53,60 @@ Follow `skills/local-relay/SKILL.md`. Issues 17–18 require it.
 ### Flows 1–2 (issue 18)
 
 Use throwaway envchain `botserver-proof` / `botserver-proof-peer`. Do not
-print nsecs, pubkeys, or event ids.
+print nsecs, pubkeys, or event ids. Wrap live Buzz calls with
+`env -u BUZZ_AUTH_TAG`. A first-call trigger has no inbound reply marker,
+so `botcli` is invoked without `--reply-to` (thread replies are flow 7).
 
 ```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is18
+mkdir -p "$PROOF"
 ./tools/local-relay up
 cargo build -p botserver -p botcli
 
-# Fresh host sqlite and a bots.toml whose corpus is corpus/example-bot.
-# Start a Herdr pane, then:
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$ROOT/corpus/example-bot"
+kind = "opencode"
+EOF
 
+# Fresh channel and sqlite. Do not print the channel id.
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
+  --name botserver-is18 --type stream --visibility open > "$PROOF/channel.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
+  "$PROOF/channel.json" "$PROOF/channel.id"
+CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
+
+# Waiter pane: a live Herdr agent named botserver, then the host binary.
+PANE=$(herdr tab create --cwd "$ROOT" --label botserver-host --no-focus \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
 herdr agent start botserver --kind opencode --pane "$PANE" -- --auto
-HERDR_PANE_ID="$PANE" envchain botserver-proof target/debug/botserver \
+HERDR_PANE_ID="$PANE" envchain botserver-proof "$ROOT/target/debug/botserver" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 
 # Flow 1: ordinary channel text (no bot: prefix, no operator mention).
-# Expect: sessions=0, turns=0, no channel body starting with [bot]:
-
-envchain botserver-proof-peer buzz messages send \
+# Expect: no session/turn for this channel, no body starting with [bot]:
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL" --content 'ordinary hello from the channel'
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT count(*) FROM sessions WHERE channel_id='$CHANNEL';"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL';"
 
-# Flow 2: peer trigger on the same channel, then botcli send for the open turn.
-# Expect: one session occupant, one [bot]: body.
-
-envchain botserver-proof-peer buzz messages send \
+# Flow 2: peer trigger, then botcli as the occupant pane so kelpie reply --final
+# closes the ask. Expect: one open turn, JSON receipt, turn posted, ask resolved,
+# one [bot]: body.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
-envchain botserver-proof target/debug/botcli send --stdin \
+ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
+# OCCUPANT_PANE is observed_pane_id for that session occupant in:
+# kelpie --json report --live
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
+  "$ROOT/target/debug/botcli" send --stdin \
   --database "$PROOF/host.sqlite" \
   --ask-id "$ASK_ID" \
   --channel "$CHANNEL" <<'EOF'

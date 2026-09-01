@@ -466,6 +466,9 @@ impl KelpieClient {
         }
         let output = self.invoke(&arguments, &[])?;
         if !output.success {
+            if already_adopted(&output.receipt) {
+                return self.identity_from_whoami(name);
+            }
             return Err(output.rejected());
         }
         let result = result(&output.receipt)?;
@@ -474,6 +477,18 @@ impl KelpieClient {
                 "adoption did not succeed".to_owned(),
             ));
         }
+        Ok(WaiterIdentity {
+            logical_agent_id: field(result, "logical_agent_id")?,
+            incarnation_id: field(result, "incarnation_id")?,
+        })
+    }
+
+    fn identity_from_whoami(&self, name: &str) -> Result<WaiterIdentity, KelpieError> {
+        let output = self.invoke(&["--json", "whoami", name], &[])?;
+        if !output.success {
+            return Err(output.rejected());
+        }
+        let result = result(&output.receipt)?;
         Ok(WaiterIdentity {
             logical_agent_id: field(result, "logical_agent_id")?,
             incarnation_id: field(result, "incarnation_id")?,
@@ -736,6 +751,14 @@ fn occupant_alias_unbound(receipt: &Value) -> bool {
             .is_some_and(|message| message.contains("no ready agent for alias"))
 }
 
+fn already_adopted(receipt: &Value) -> bool {
+    error_class(receipt) == Some("conflict")
+        && receipt
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("already adopted by ready incarnation"))
+}
+
 fn result(receipt: &Value) -> Result<&Value, KelpieError> {
     if let Some(error) = receipt.get("error").filter(|error| !error.is_null()) {
         return Err(KelpieError::InvalidReceipt(format!(
@@ -864,6 +887,56 @@ mod tests {
                 ],
                 Vec::new(),
             )]
+        );
+    }
+
+    #[test]
+    fn adopt_waiter_reuses_an_already_bound_pane() {
+        let runner = Arc::new(FakeRunner::new([
+            failure(
+                "conflict",
+                "exact live binding is already adopted by ready incarnation waiter-incarnation",
+            ),
+            success(&serde_json::json!({
+                "logical_agent_id": "waiter-agent",
+                "incarnation_id": "waiter-incarnation",
+                "public_name": "botserver"
+            })),
+        ]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+
+        let waiter = client
+            .adopt_waiter("w1:p2", "term-2")
+            .expect("reuse waiter");
+
+        assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
+        assert_eq!(waiter.identity().incarnation_id(), "waiter-incarnation");
+        let calls = runner.calls.lock().expect("calls lock");
+        assert_eq!(
+            calls.as_slice(),
+            &[
+                (
+                    vec![
+                        "--json".to_owned(),
+                        "adopt".to_owned(),
+                        "--pane".to_owned(),
+                        "w1:p2".to_owned(),
+                        "--terminal".to_owned(),
+                        "term-2".to_owned(),
+                        "--name".to_owned(),
+                        "botserver".to_owned(),
+                    ],
+                    Vec::new(),
+                ),
+                (
+                    vec![
+                        "--json".to_owned(),
+                        "whoami".to_owned(),
+                        "botserver".to_owned(),
+                    ],
+                    Vec::new(),
+                ),
+            ]
         );
     }
 
