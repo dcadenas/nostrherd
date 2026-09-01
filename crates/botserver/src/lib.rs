@@ -716,3 +716,123 @@ mod tests {
             .contains("continue logical agent waiter-agent"));
     }
 }
+pub mod sqlite;
+
+use botserver_domain::{BotId, EventId};
+
+/// Persisted binding between one bot and one Buzz channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub bot_id: BotId,
+    pub channel_id: String,
+    pub session_name: String,
+    pub occupant_logical_id: Option<String>,
+    pub renew_id: Option<String>,
+}
+
+/// Lifecycle state of one triggered turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnState {
+    Open,
+    Posted,
+    Failed,
+    Cancelled,
+}
+
+impl TurnState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Posted => "posted",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "open" => Some(Self::Open),
+            "posted" => Some(Self::Posted),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// Coordinates needed to persist a newly opened turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTurn {
+    pub bot_id: BotId,
+    pub channel_id: String,
+    pub event_id: EventId,
+    pub ask_id: String,
+    pub reply_to_event_id: Option<EventId>,
+}
+
+/// One persisted turn in session order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRecord {
+    pub sequence: i64,
+    pub bot_id: BotId,
+    pub channel_id: String,
+    pub event_id: EventId,
+    pub ask_id: String,
+    pub reply_to_event_id: Option<EventId>,
+    pub state: TurnState,
+}
+
+/// Persistence used by the host ingest and turn-processing paths.
+pub trait HostRepository {
+    type Error;
+
+    /// Mark an event processed, returning false when it was already recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the operation cannot be persisted.
+    fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error>;
+
+    /// Store or replace a session binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the binding cannot be persisted.
+    fn save_session(&mut self, session: &SessionRecord) -> Result<(), Self::Error>;
+
+    /// Find a session by bot and channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the session cannot be read.
+    fn session(
+        &self,
+        bot_id: &BotId,
+        channel_id: &str,
+    ) -> Result<Option<SessionRecord>, Self::Error>;
+
+    /// Append an open turn to its session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the turn cannot be persisted.
+    fn insert_turn(&mut self, turn: &NewTurn) -> Result<TurnRecord, Self::Error>;
+
+    /// Change the state of the turn identified by its ask id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the state cannot be persisted.
+    fn set_turn_state(&mut self, ask_id: &str, state: TurnState) -> Result<bool, Self::Error>;
+
+    /// Read a session's turns in insertion order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the turns cannot be read.
+    fn turns_for_session(
+        &self,
+        bot_id: &BotId,
+        channel_id: &str,
+    ) -> Result<Vec<TurnRecord>, Self::Error>;
+}
