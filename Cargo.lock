@@ -211,6 +211,7 @@ name = "botserver"
 version = "0.1.0"
 dependencies = [
  "botserver-domain",
+ "clap",
  "nostr-sdk",
  "rusqlite",
  "serde",
