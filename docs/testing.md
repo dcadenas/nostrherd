@@ -250,7 +250,7 @@ later from example-bot
 EOF
 
 # Flow 7: parent message, then bot: --reply-to that event.
-# Expect: still one A session, open turn.reply_to_event_id length 64, botcli --reply-to.
+# Expect: still one A session, open turn.reply_to_event_id equals the parent (0/1).
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --content 'parent for thread' > "$PROOF/a-parent.json"
 python3 -c 'import json,sys
@@ -263,7 +263,7 @@ env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM sessions WHERE channel_id='$CHANNEL_A';"
 sqlite3 "$PROOF/host.sqlite" \
-  "SELECT t.state, length(t.reply_to_event_id) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';"
+  "SELECT t.state, t.reply_to_event_id = '$PARENT' FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';"
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
 REPLY_TO=$(sqlite3 "$PROOF/host.sqlite" \
