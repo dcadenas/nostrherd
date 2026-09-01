@@ -251,7 +251,7 @@ impl KelpieClient {
         pane_id: &str,
         terminal_id: &str,
     ) -> Result<AdoptedWaiter<'_>, KelpieError> {
-        self.adopt(pane_id, terminal_id, None)
+        self.adopted_waiter(pane_id, terminal_id, WAITER_NAME, None)
     }
 
     /// Continue the durable waiter identity in a replacement Herdr pane.
@@ -266,7 +266,48 @@ impl KelpieClient {
         terminal_id: &str,
         logical_agent_id: &str,
     ) -> Result<AdoptedWaiter<'_>, KelpieError> {
-        self.adopt(pane_id, terminal_id, Some(logical_agent_id))
+        self.adopted_waiter(pane_id, terminal_id, WAITER_NAME, Some(logical_agent_id))
+    }
+
+    /// Continue a recorded occupant in a live pane without minting a twin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot bind the pane to that logical agent.
+    pub fn adopt_occupant(
+        &self,
+        pane_id: &str,
+        terminal_id: &str,
+        name: &str,
+        logical_agent_id: &str,
+    ) -> Result<StartedOccupant, KelpieError> {
+        let identity = self.bind_agent(pane_id, terminal_id, name, Some(logical_agent_id))?;
+        if identity.logical_agent_id() != logical_agent_id {
+            return Err(KelpieError::InvalidReceipt(
+                "session occupant is not the recorded logical agent".to_owned(),
+            ));
+        }
+        Ok(StartedOccupant {
+            logical_agent_id: identity.logical_agent_id().to_owned(),
+            incarnation_id: identity.incarnation_id().to_owned(),
+        })
+    }
+
+    /// Return the Ready occupant currently bound to a public name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot resolve the alias.
+    pub fn occupant_whoami(&self, alias: &str) -> Result<StartedOccupant, KelpieError> {
+        let output = self.invoke(&["--json", "whoami", alias], &[])?;
+        if !output.success {
+            return Err(output.rejected());
+        }
+        let result = result(&output.receipt)?;
+        Ok(StartedOccupant {
+            logical_agent_id: field(result, "logical_agent_id")?,
+            incarnation_id: field(result, "incarnation_id")?,
+        })
     }
 
     /// Start a session occupant in an existing Herdr pane.
@@ -368,12 +409,26 @@ impl KelpieClient {
         field(result(&output.receipt)?, "renew_id")
     }
 
-    fn adopt(
+    fn adopted_waiter<'a>(
+        &'a self,
+        pane_id: &str,
+        terminal_id: &str,
+        name: &str,
+        logical_agent_id: Option<&str>,
+    ) -> Result<AdoptedWaiter<'a>, KelpieError> {
+        Ok(AdoptedWaiter {
+            client: self,
+            identity: self.bind_agent(pane_id, terminal_id, name, logical_agent_id)?,
+        })
+    }
+
+    fn bind_agent(
         &self,
         pane_id: &str,
         terminal_id: &str,
+        name: &str,
         logical_agent_id: Option<&str>,
-    ) -> Result<AdoptedWaiter<'_>, KelpieError> {
+    ) -> Result<WaiterIdentity, KelpieError> {
         let mut arguments = vec![
             "--json",
             "adopt",
@@ -382,7 +437,7 @@ impl KelpieClient {
             "--terminal",
             terminal_id,
             "--name",
-            WAITER_NAME,
+            name,
         ];
         if let Some(logical_agent_id) = logical_agent_id {
             arguments.extend(["--logical-id", logical_agent_id]);
@@ -394,16 +449,12 @@ impl KelpieClient {
         let result = result(&output.receipt)?;
         if field(result, "outcome")? != "succeeded" {
             return Err(KelpieError::InvalidReceipt(
-                "waiter adoption did not succeed".to_owned(),
+                "adoption did not succeed".to_owned(),
             ));
         }
-        let identity = WaiterIdentity {
+        Ok(WaiterIdentity {
             logical_agent_id: field(result, "logical_agent_id")?,
             incarnation_id: field(result, "incarnation_id")?,
-        };
-        Ok(AdoptedWaiter {
-            client: self,
-            identity,
         })
     }
 
@@ -598,14 +649,10 @@ impl AdoptedWaiter<'_> {
     }
 
     fn resolve_recipient(&self, alias: &str) -> Result<RecipientIdentity, KelpieError> {
-        let output = self.client.invoke(&["--json", "whoami", alias], &[])?;
-        if !output.success {
-            return Err(output.rejected());
-        }
-        let result = result(&output.receipt)?;
+        let occupant = self.client.occupant_whoami(alias)?;
         Ok(RecipientIdentity {
-            logical_agent_id: field(result, "logical_agent_id")?,
-            incarnation_id: field(result, "incarnation_id")?,
+            logical_agent_id: occupant.logical_agent_id().to_owned(),
+            incarnation_id: occupant.incarnation_id().to_owned(),
         })
     }
 
@@ -820,6 +867,57 @@ mod tests {
                 "waiter-agent"
             ]
         );
+    }
+
+    #[test]
+    fn adopt_occupant_continues_recorded_logical_id() {
+        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
+            "logical_agent_id": "occupant-agent",
+            "incarnation_id": "occupant-incarnation-2",
+            "operation_id": "adopt-operation",
+            "outcome": "succeeded"
+        }))]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+
+        let occupant = client
+            .adopt_occupant("w2:p1", "term-9", "bot-foobar", "occupant-agent")
+            .expect("adopt occupant");
+
+        assert_eq!(occupant.logical_agent_id(), "occupant-agent");
+        assert_eq!(occupant.incarnation_id(), "occupant-incarnation-2");
+        assert_eq!(
+            runner.calls.lock().expect("calls lock")[0].0,
+            vec![
+                "--json",
+                "adopt",
+                "--pane",
+                "w2:p1",
+                "--terminal",
+                "term-9",
+                "--name",
+                "bot-foobar",
+                "--logical-id",
+                "occupant-agent"
+            ]
+        );
+    }
+
+    #[test]
+    fn adopt_occupant_rejects_a_different_logical_id() {
+        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
+            "logical_agent_id": "twin-agent",
+            "incarnation_id": "twin-incarnation",
+            "operation_id": "adopt-operation",
+            "outcome": "succeeded"
+        }))]));
+        let client = KelpieClient::with_runner(runner);
+
+        let error = client
+            .adopt_occupant("w2:p1", "term-9", "bot-foobar", "occupant-agent")
+            .expect_err("twin");
+        assert!(error
+            .to_string()
+            .contains("session occupant is not the recorded logical agent"));
     }
 
     #[test]
