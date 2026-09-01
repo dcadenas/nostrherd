@@ -275,9 +275,6 @@ where
             match self.ask_oldest_queued(kelpie, waiter, &session.channel_id, &body) {
                 Ok(()) => return Ok(Some(TriggerOutcome::Asked)),
                 Err(error) => {
-                    if matches!(error, ActorError::AskNotDelivered(_)) {
-                        let _ = self.repository.cancel_queued_turn(&queued.event_id);
-                    }
                     if first_error.is_none() {
                         first_error = Some(error);
                     }
