@@ -239,10 +239,136 @@ async fn refresh_subscription(
     subscriber: &RelaySubscriber,
     operator_pubkey: &str,
     repository: &SqliteRepository,
+    channel_ids: &[String],
+    active_event_ids: &[EventId],
 ) -> Result<(), HostError> {
     subscriber
-        .subscribe(operator_pubkey, &[], &[], replay_since(repository)?)
+        .subscribe(
+            operator_pubkey,
+            channel_ids,
+            active_event_ids,
+            replay_since(repository)?,
+        )
         .await?;
+    Ok(())
+}
+
+struct RelayPoll {
+    announced: bool,
+    last_retry_error: Option<String>,
+    last_queued_resume: Instant,
+    last_channel_ids: Vec<String>,
+    last_active_event_ids: Vec<EventId>,
+}
+
+fn note_retry(last_retry_error: &mut Option<String>, message: String) {
+    if last_retry_error.as_ref() != Some(&message) {
+        eprintln!("{message}");
+        *last_retry_error = Some(message);
+    }
+}
+
+async fn fetch_stored_events(
+    subscriber: &RelaySubscriber,
+    operator_pubkey: &str,
+    channel_ids: &[String],
+    active_event_ids: &[EventId],
+    since: Timestamp,
+) -> Result<Vec<Event>, RelaySubscribeError> {
+    let mut events = subscriber.fetch_messages(operator_pubkey, since).await?;
+    events.extend(
+        subscriber
+            .fetch_channel_messages(channel_ids, since)
+            .await?,
+    );
+    events.extend(subscriber.fetch_mutations(active_event_ids, since).await?);
+    Ok(events)
+}
+
+async fn poll_relay(
+    actor: &mut BotActor<SqliteRepository, HerdrPaneAllocator>,
+    kelpie: &KelpieClient,
+    waiter: &AdoptedWaiter<'_>,
+    ingest: &mut RelayIngest<SqliteRepository>,
+    subscriber: &RelaySubscriber,
+    operator_pubkey: &str,
+    poll: &mut RelayPoll,
+) -> Result<(), HostError> {
+    let scope = match actor.pending_scope() {
+        Ok(scope) => scope,
+        Err(error) => {
+            note_retry(&mut poll.last_retry_error, error.to_string());
+            return Ok(());
+        }
+    };
+    if !poll.announced
+        || scope.channel_ids != poll.last_channel_ids
+        || scope.active_event_ids != poll.last_active_event_ids
+    {
+        match refresh_subscription(
+            subscriber,
+            operator_pubkey,
+            ingest.repository_mut(),
+            &scope.channel_ids,
+            &scope.active_event_ids,
+        )
+        .await
+        {
+            Ok(()) => {
+                poll.last_retry_error = None;
+                poll.last_channel_ids.clone_from(&scope.channel_ids);
+                poll.last_active_event_ids
+                    .clone_from(&scope.active_event_ids);
+                if !poll.announced {
+                    eprintln!("botserver connected");
+                    poll.announced = true;
+                }
+            }
+            Err(error) => {
+                note_retry(&mut poll.last_retry_error, error.to_string());
+            }
+        }
+        if !poll.announced {
+            return Ok(());
+        }
+    }
+    // HTTP publishes on the local Buzz relay are stored immediately
+    // but are not fanned out to operator #p websocket subscribers.
+    let since = match replay_since(ingest.repository_mut()) {
+        Ok(since) => since,
+        Err(error) => {
+            note_retry(
+                &mut poll.last_retry_error,
+                format!("relay replay cursor failed: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    let events = match fetch_stored_events(
+        subscriber,
+        operator_pubkey,
+        &scope.channel_ids,
+        &scope.active_event_ids,
+        since,
+    )
+    .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            note_retry(&mut poll.last_retry_error, error.to_string());
+            return Ok(());
+        }
+    };
+    poll.last_retry_error = None;
+    for event in events {
+        observe_event(actor, kelpie, waiter, ingest, &event)?;
+    }
+    if poll.last_queued_resume.elapsed() >= RESUME_QUEUED_EVERY {
+        if let Err(error) = actor.resume_queued(kelpie, waiter) {
+            eprintln!("queued occupant resume failed: {error}");
+        }
+        poll.last_queued_resume = Instant::now();
+    }
     Ok(())
 }
 
@@ -274,9 +400,13 @@ async fn serve(
     );
     let mut refresh = tokio::time::interval(SUBSCRIPTION_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut announced = false;
-    let mut last_retry_error = None;
-    let mut last_queued_resume = Instant::now();
+    let mut poll = RelayPoll {
+        announced: false,
+        last_retry_error: None,
+        last_queued_resume: Instant::now(),
+        last_channel_ids: Vec::new(),
+        last_active_event_ids: Vec::new(),
+    };
     loop {
         tokio::select! {
             notification = notifications.next() => match notification {
@@ -288,63 +418,16 @@ async fn serve(
                 None => return Err(HostError::NotificationClosed),
             },
             _ = refresh.tick() => {
-                if !announced {
-                    match refresh_subscription(
-                        &subscriber,
-                        &operator_pubkey,
-                        ingest.repository_mut(),
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            last_retry_error = None;
-                            eprintln!("botserver connected");
-                            announced = true;
-                        }
-                        Err(error) => {
-                            let message = error.to_string();
-                            if last_retry_error.as_ref() != Some(&message) {
-                                eprintln!("relay subscribe retry failed: {message}");
-                                last_retry_error = Some(message);
-                            }
-                        }
-                    }
-                    continue;
-                }
-                // HTTP publishes on the local Buzz relay are stored immediately
-                // but are not fanned out to operator #p websocket subscribers.
-                let since = match replay_since(ingest.repository_mut()) {
-                    Ok(since) => since,
-                    Err(error) => {
-                        let message = format!("relay replay cursor failed: {error}");
-                        if last_retry_error.as_ref() != Some(&message) {
-                            eprintln!("{message}");
-                            last_retry_error = Some(message);
-                        }
-                        continue;
-                    }
-                };
-                match subscriber.fetch_messages(&operator_pubkey, since).await {
-                    Ok(events) => {
-                        last_retry_error = None;
-                        for event in events {
-                            observe_event(&mut actor, &kelpie, &waiter, &mut ingest, &event)?;
-                        }
-                        if last_queued_resume.elapsed() >= RESUME_QUEUED_EVERY {
-                            if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
-                                eprintln!("queued occupant resume failed: {error}");
-                            }
-                            last_queued_resume = Instant::now();
-                        }
-                    }
-                    Err(error) => {
-                        let message = error.to_string();
-                        if last_retry_error.as_ref() != Some(&message) {
-                            eprintln!("relay subscribe retry failed: {message}");
-                            last_retry_error = Some(message);
-                        }
-                    }
-                }
+                poll_relay(
+                    &mut actor,
+                    &kelpie,
+                    &waiter,
+                    &mut ingest,
+                    &subscriber,
+                    &operator_pubkey,
+                    &mut poll,
+                )
+                .await?;
             }
         }
     }
