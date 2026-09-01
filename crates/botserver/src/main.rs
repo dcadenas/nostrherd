@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -13,7 +14,8 @@ use botserver::sqlite::SqliteRepository;
 use botserver::HostRepository;
 use botserver_domain::EventId;
 use clap::Parser;
-use nostr_sdk::prelude::{Client, Event, Keys, RelayPoolNotification, Timestamp};
+use futures::StreamExt;
+use nostr_sdk::prelude::{Client, ClientNotification, Event, Keys, SignerAuthenticator, Timestamp};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const EMPTY_REPLAY_OVERLAP_SECS: u64 = 900;
@@ -64,7 +66,7 @@ enum HostError {
     MissingEnv(&'static str),
     InvalidOperatorKey,
     Runtime(std::io::Error),
-    Relay(nostr_sdk::client::Error),
+    Relay(nostr_sdk::error::Error),
     Subscribe(RelaySubscribeError),
     Ingest(IngestError<rusqlite::Error>),
     NotificationClosed,
@@ -112,8 +114,8 @@ impl From<rusqlite::Error> for HostError {
     }
 }
 
-impl From<nostr_sdk::client::Error> for HostError {
-    fn from(error: nostr_sdk::client::Error) -> Self {
+impl From<nostr_sdk::error::Error> for HostError {
+    fn from(error: nostr_sdk::error::Error) -> Self {
         Self::Relay(error)
     }
 }
@@ -183,13 +185,14 @@ async fn refresh_subscription(
 }
 
 async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<(), HostError> {
-    let operator_pubkey = operator.keys.public_key.to_hex();
-    let client = Client::new(operator.keys);
+    let operator_pubkey = operator.keys.public_key().to_hex();
+    let client = Client::builder()
+        .authenticator(SignerAuthenticator::new(operator.keys))
+        .build();
     client.add_relay(&operator.relay_url).await?;
-    client.connect().await;
-    client.wait_for_connection(CONNECT_TIMEOUT).await;
+    client.connect().and_wait(CONNECT_TIMEOUT).await;
     let subscriber = RelaySubscriber::new(client);
-    let mut notifications = subscriber.notifications();
+    let mut notifications = pin!(subscriber.notifications());
     let mut ingest = RelayIngest::new(operator_pubkey.clone(), String::new(), repository);
     let mut refresh = tokio::time::interval(SUBSCRIPTION_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -197,16 +200,13 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
     let mut last_retry_error = None;
     loop {
         tokio::select! {
-            notification = notifications.recv() => match notification {
-                Ok(RelayPoolNotification::Event { event, .. }) => {
+            notification = notifications.next() => match notification {
+                Some(ClientNotification::Event { event, .. }) => {
                     observe_event(&mut ingest, &event)?;
                 }
-                Ok(RelayPoolNotification::Shutdown) => return Ok(()),
-                Ok(RelayPoolNotification::Message { .. })
-                | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Err(HostError::NotificationClosed);
-                }
+                Some(ClientNotification::Shutdown) => return Ok(()),
+                Some(ClientNotification::Message { .. }) => {}
+                None => return Err(HostError::NotificationClosed),
             },
             _ = refresh.tick() => {
                 // HTTP publishes on the local Buzz relay are stored immediately
@@ -480,7 +480,7 @@ mod tests {
     fn generated_operator_key_is_accepted_without_logging_it() {
         let keys = Keys::generate();
         let parsed = Keys::parse(&keys.secret_key().to_secret_hex()).expect("parse");
-        assert_eq!(parsed.public_key, keys.public_key);
+        assert_eq!(parsed.public_key(), keys.public_key());
         assert!(!format!("{parsed:?}").contains("secret"));
     }
 }
