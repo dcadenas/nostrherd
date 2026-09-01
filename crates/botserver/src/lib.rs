@@ -853,12 +853,26 @@ pub trait HostRepository {
     /// Returns an adapter error when the state cannot be persisted.
     fn set_turn_state(&mut self, ask_id: &str, state: TurnState) -> Result<bool, Self::Error>;
 
+    /// Cancel queued work for an edited or deleted triggering event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the state cannot be persisted.
+    fn cancel_queued_turn(&mut self, event_id: &EventId) -> Result<bool, Self::Error>;
+
     /// Find a turn by the Kelpie ask id.
     ///
     /// # Errors
     ///
     /// Returns an adapter error when the turn cannot be read.
     fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<TurnRecord>, Self::Error>;
+
+    /// Find queued or open work for a triggering event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the turn cannot be read.
+    fn active_turn_for_event(&self, event_id: &EventId) -> Result<Option<TurnRecord>, Self::Error>;
 
     /// Read a session's turns in insertion order.
     ///
@@ -871,10 +885,10 @@ pub trait HostRepository {
         channel_id: &str,
     ) -> Result<Vec<TurnRecord>, Self::Error>;
 
-    /// List sessions that have an open ask for restart recovery.
+    /// List sessions that have queued or open work for restart recovery.
     ///
     /// # Errors
     ///
     /// Returns an adapter error when the sessions cannot be read.
-    fn sessions_with_open_turns(&self) -> Result<Vec<SessionRecord>, Self::Error>;
+    fn sessions_with_pending_turns(&self) -> Result<Vec<SessionRecord>, Self::Error>;
 }

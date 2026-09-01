@@ -60,12 +60,16 @@ impl SqliteRepository {
                  ),
                  CHECK(
                      (state = 'queued' AND ask_id IS NULL)
-                     OR (state != 'queued' AND ask_id IS NOT NULL)
+                     OR (state = 'open' AND ask_id IS NOT NULL)
+                     OR state IN ('posted', 'failed', 'cancelled')
                  )
              ) STRICT;
 
              CREATE UNIQUE INDEX IF NOT EXISTS turns_one_open_per_session
                  ON turns(session_id) WHERE state = 'open';
+
+             CREATE UNIQUE INDEX IF NOT EXISTS turns_one_live_per_event
+                 ON turns(event_id) WHERE state IN ('queued', 'open');
 
              CREATE INDEX IF NOT EXISTS turns_session_order
                  ON turns(session_id, sequence);",
@@ -233,6 +237,15 @@ impl HostRepository for SqliteRepository {
         Ok(changed == 1)
     }
 
+    fn cancel_queued_turn(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
+        let changed = self.connection.execute(
+            "UPDATE turns SET state = 'cancelled'
+             WHERE event_id = ?1 AND state = 'queued'",
+            [event_id.as_str()],
+        )?;
+        Ok(changed == 1)
+    }
+
     fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<TurnRecord>, Self::Error> {
         self.connection
             .query_row(
@@ -242,6 +255,20 @@ impl HostRepository for SqliteRepository {
                  JOIN sessions AS s ON s.id = t.session_id
                  WHERE t.ask_id = ?1",
                 [ask_id],
+                Self::read_turn,
+            )
+            .optional()
+    }
+
+    fn active_turn_for_event(&self, event_id: &EventId) -> Result<Option<TurnRecord>, Self::Error> {
+        self.connection
+            .query_row(
+                "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
+                        t.reply_to_event_id, t.state
+                 FROM turns AS t
+                 JOIN sessions AS s ON s.id = t.session_id
+                 WHERE t.event_id = ?1 AND t.state IN ('queued', 'open')",
+                [event_id.as_str()],
                 Self::read_turn,
             )
             .optional()
@@ -266,13 +293,13 @@ impl HostRepository for SqliteRepository {
         turns
     }
 
-    fn sessions_with_open_turns(&self) -> Result<Vec<SessionRecord>, Self::Error> {
+    fn sessions_with_pending_turns(&self) -> Result<Vec<SessionRecord>, Self::Error> {
         let mut statement = self.connection.prepare(
             "SELECT DISTINCT s.bot_id, s.channel_id, s.session_name,
                     s.occupant_logical_id, s.renew_id
              FROM sessions AS s
              JOIN turns AS t ON t.session_id = s.id
-             WHERE t.state = 'open'
+             WHERE t.state IN ('queued', 'open')
              ORDER BY s.bot_id, s.channel_id",
         )?;
         let sessions = statement
@@ -445,6 +472,36 @@ mod tests {
     }
 
     #[test]
+    fn queued_turns_can_be_cancelled_and_replaced() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        let turn = turn(&bot_id, channel_id, 'a');
+        repository.enqueue_turn(&turn).unwrap();
+        assert_eq!(
+            repository
+                .active_turn_for_event(&turn.event_id)
+                .unwrap()
+                .expect("queued turn")
+                .state,
+            TurnState::Queued
+        );
+
+        assert!(repository.cancel_queued_turn(&turn.event_id).unwrap());
+        let replacement = repository.enqueue_turn(&turn).unwrap();
+        let turns = repository.turns_for_session(&bot_id, channel_id).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].state, TurnState::Cancelled);
+        assert_eq!(turns[0].ask_id, None);
+        assert_eq!(turns[1], replacement);
+    }
+
+    #[test]
     fn enqueue_and_processed_marker_are_atomic() {
         let mut repository =
             SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
@@ -468,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn open_sessions_can_be_enumerated_for_recovery() {
+    fn pending_sessions_can_be_enumerated_for_recovery() {
         let mut repository =
             SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
                 .expect("repository");
@@ -479,12 +536,15 @@ mod tests {
         repository
             .enqueue_turn(&turn(&bot_id, channel_id, 'a'))
             .unwrap();
+        assert_eq!(
+            repository.sessions_with_pending_turns().unwrap(),
+            vec![expected.clone()]
+        );
         repository
             .open_next_turn(&bot_id, channel_id, "ask-1")
             .unwrap();
-
         assert_eq!(
-            repository.sessions_with_open_turns().unwrap(),
+            repository.sessions_with_pending_turns().unwrap(),
             vec![expected]
         );
     }
