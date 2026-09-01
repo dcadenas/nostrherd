@@ -57,9 +57,13 @@ relay  ->  botserver (host occupant, waiter)
 After parse, configuration is a set of `Bot` records. Runtime is one
 `BotActor` per bot. A trigger becomes a `Turn` bound to a `Session`.
 
-The follow-up bind rule (thread stays bound vs prefix every turn) is
-**not** specified here. It is `docs/open-questions.md` Q1 and blocks v1
-routing tests.
+A `Turn` opens only on a **trigger** (D8, D9). No occupant is created
+until the first trigger for that place. Ordinary channel traffic, thread
+replies without the prefix, and `@daniel` without `bot:` MUST NOT start
+or poke a session.
+
+Session grain is one occupant per Buzz channel UUID, including DMs
+(D10). Thread ids are reply coordinates on the turn, not extra sessions.
 
 ## Kelpie envelope (receiver)
 

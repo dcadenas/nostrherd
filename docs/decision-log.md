@@ -56,3 +56,41 @@ Status: accepted
 
 Session occupants are Kelpie-started in the corpus cwd. This repo does
 not exec `herdr-acp` or `buzz-acp`.
+
+## D8. Inject only on an explicit trigger
+
+Status: accepted
+
+Closes Q1. The host MUST open or poke a session only when the event is
+a trigger (D9). If nobody ever writes that form, no occupant exists.
+Existing occupants MUST NOT receive ordinary messages, thread follow-ups
+without the prefix, or a bare mention of the operator.
+
+The operator's own unprefixed reply in a thread is human mail.
+
+## D9. Fixed trigger and stamp protocol
+
+Status: accepted
+
+Closes Q2.
+
+Inbound: the event MUST `p`-tag the operator pubkey and the body MUST
+have `bot:` as the first token after an optional leading mention.
+Example: `@daniel bot: hello`.
+
+Outbound: `botcli` MUST prefix the published body with `[bot]:`.
+Occupants MUST NOT stamp it themselves. Own `[bot]:` posts MUST NOT
+trigger a new turn (`ignore_self`).
+
+## D10. Session grain follows Buzz: one occupant per channel
+
+Status: accepted
+
+Closes Q3. Buzz keys ACP sessions by channel UUID (`has_session_for`
+in buzz-acp; one agent in five channels is five sessions). Threads are
+NIP-10 reply targets inside that session, not separate occupants. DMs
+are channels with their own UUID.
+
+Session name is `<botid>-<channel-slug>` (slug from channel display +
+stable id as needed to stay unique and ≤32 chars). Reply-to event id
+travels on the Turn for `botcli`, not in the session name.

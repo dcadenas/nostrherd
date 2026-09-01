@@ -17,8 +17,9 @@ One actor in the host process maps 1:1 to one `Bot`.
 
 ### Session
 
-A live conversation lane for one bot in one **place** (channel, DM,
-group DM). Name is derived, e.g. `bot-foobar`, `bot-dm-<pubkey8>`.
+A live conversation lane for one bot in one Buzz **channel UUID**
+(including DMs). Name is derived, e.g. `bot-foobar`. Threads are not
+sessions (D10).
 Holds: place id, occupant Kelpie logical id when bound, renew id when
 armed.
 
@@ -32,9 +33,9 @@ is `botcli` publish **then** Kelpie final, not cancel.
 
 - `EventId`, `Pubkey` — relay coordinates, opaque hex.
 - `Place` — `Channel(uuid)` | `Dm(pubkey)` | `GroupDm(id)` (shape TBD).
-- `TriggerMatch` — parsed from event content + tags against a bot's
-  trigger. Q1 (follow-up bind) decides whether a non-prefix reply in an
-  open thread is a match.
+- `TriggerMatch` — operator `p`-tag plus first token `bot:` after an
+  optional mention (D8, D9). A non-prefix reply in an open thread is
+  not a match.
 
 ## Invariants
 
