@@ -581,6 +581,22 @@ impl AdoptedWaiter<'_> {
         })
     }
 
+    /// Cancel an in-flight ask owned by this waiter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie rejects the cancel.
+    pub fn cancel(&self, ask_id: &str, reason: &str) -> Result<(), KelpieError> {
+        let output = self
+            .client
+            .invoke(&["--json", "cancel", ask_id, "--reason", reason], &[])?;
+        if output.success {
+            Ok(())
+        } else {
+            Err(output.rejected())
+        }
+    }
+
     fn resolve_recipient(&self, alias: &str) -> Result<RecipientIdentity, KelpieError> {
         let output = self.client.invoke(&["--json", "whoami", alias], &[])?;
         if !output.success {
@@ -1028,6 +1044,30 @@ mod tests {
     }
 
     #[test]
+    fn cancel_uses_the_ask_id_and_reason() {
+        let runner = Arc::new(FakeRunner::new([
+            success(&serde_json::json!({
+                "logical_agent_id": "waiter-agent",
+                "incarnation_id": "waiter-incarnation",
+                "operation_id": "adopt-operation",
+                "outcome": "succeeded"
+            })),
+            success(&serde_json::json!({})),
+        ]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        let waiter = client
+            .adopt_waiter("w1:p2", "term-2")
+            .expect("adopt waiter");
+
+        waiter.cancel("ask-id", "trigger edited").expect("cancel");
+
+        assert_eq!(
+            runner.calls.lock().expect("calls")[1].0,
+            vec!["--json", "cancel", "ask-id", "--reason", "trigger edited"]
+        );
+    }
+
+    #[test]
     fn parsed_kelpie_error_message_is_reported() {
         let runner = Arc::new(FakeRunner::new([failure(
             "conflict",
@@ -1133,6 +1173,13 @@ pub struct TurnRecord {
     pub state: TurnState,
 }
 
+/// Result of cancelling unclaimed work and enqueueing a replacement turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnReplacement {
+    pub cancelled: TurnRecord,
+    pub queued: TurnRecord,
+}
+
 /// Persistence used by the host ingest and turn-processing paths.
 pub trait HostRepository {
     type Error;
@@ -1175,6 +1222,13 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the event cannot be read.
     fn indexed_event(&self, event_id: &EventId) -> Result<Option<IndexedRelayEvent>, Self::Error>;
+
+    /// Return the latest indexed body for a triggering event, including edits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when indexed events cannot be read.
+    fn latest_body_for_event(&self, event_id: &EventId) -> Result<Option<String>, Self::Error>;
 
     /// Return a safe inclusive relay replay cursor.
     ///
@@ -1262,12 +1316,48 @@ pub trait HostRepository {
     /// Returns an adapter error when the state cannot be persisted.
     fn set_turn_state(&mut self, ask_id: &str, state: TurnState) -> Result<bool, Self::Error>;
 
+    /// Claim an open turn so host cancel cannot win the publish race.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the claim cannot be persisted.
+    fn claim_turn_for_publish(&mut self, ask_id: &str) -> Result<bool, Self::Error>;
+
+    /// Release a publish claim after a failed relay publish.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the claim cannot be persisted.
+    fn release_publish_claim(&mut self, ask_id: &str) -> Result<bool, Self::Error>;
+
     /// Cancel queued work for an edited or deleted triggering event.
     ///
     /// # Errors
     ///
     /// Returns an adapter error when the state cannot be persisted.
     fn cancel_queued_turn(&mut self, event_id: &EventId) -> Result<bool, Self::Error>;
+
+    /// Cancel queued or unclaimed-open work for an edited or deleted trigger.
+    ///
+    /// Returns the cancelled turn when the host won the reservation race.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the state cannot be persisted.
+    fn cancel_unclaimed_turn(
+        &mut self,
+        event_id: &EventId,
+    ) -> Result<Option<TurnRecord>, Self::Error>;
+
+    /// Cancel unclaimed work and enqueue a replacement turn for the same event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the replacement cannot be persisted.
+    fn replace_unclaimed_turn(
+        &mut self,
+        turn: &NewTurn,
+    ) -> Result<Option<TurnReplacement>, Self::Error>;
 
     /// Find a turn by the Kelpie ask id.
     ///

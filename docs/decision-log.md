@@ -269,3 +269,14 @@ occupant's exact incarnation. Prepare writes `progress.md`. Resume reads
 does not block the ask; the next turn retries the arm. D19's MUST is the
 file contents, not occupant filesystem isolation: occupants share the
 corpus cwd (D7). Token-count renew remains later (Q6).
+
+## D28. Publish reservation is a claim, not a TurnState
+
+Status: accepted
+
+`botcli` and the host share one SQLite claim on an `open` turn. `botcli`
+MUST set the claim before relay publish. Host edit/delete cancel MUST
+UPDATE only `queued` rows or `open` rows whose claim is clear. A claimed
+turn is treated as already landing: later edits and deletes of that
+EventId are ignored (D14 after publish). A failed publish MUST clear the
+claim so retry can proceed. Do not add a `publishing` TurnState.

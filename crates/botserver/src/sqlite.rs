@@ -1,11 +1,17 @@
 //! SQLite host-state adapter.
 
 use std::path::Path;
+use std::time::Duration;
 
 use botserver_domain::{BotId, EventId};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord, TurnState};
+use crate::{
+    HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord, TurnReplacement,
+    TurnState,
+};
+
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// SQLite-backed host repository.
 #[derive(Debug)]
@@ -29,6 +35,7 @@ impl SqliteRepository {
     ///
     /// Returns an error when SQLite cannot configure or initialize the database.
     pub fn from_connection(connection: Connection) -> rusqlite::Result<Self> {
+        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
 
@@ -79,14 +86,18 @@ impl SqliteRepository {
                  reply_to_event_id TEXT CHECK(
                      reply_to_event_id IS NULL OR length(reply_to_event_id) = 64
                  ),
-                 state TEXT NOT NULL CHECK(
-                     state IN ('queued', 'open', 'posted', 'failed', 'cancelled')
-                 ),
-                 CHECK(
-                     (state = 'queued' AND ask_id IS NULL)
-                     OR (state = 'open' AND ask_id IS NOT NULL)
-                     OR state IN ('posted', 'failed', 'cancelled')
-                 )
+                  state TEXT NOT NULL CHECK(
+                      state IN ('queued', 'open', 'posted', 'failed', 'cancelled')
+                  ),
+                  publish_claimed INTEGER NOT NULL DEFAULT 0 CHECK(
+                      publish_claimed IN (0, 1)
+                  ),
+                  CHECK(
+                      (state = 'queued' AND ask_id IS NULL)
+                      OR (state = 'open' AND ask_id IS NOT NULL)
+                      OR state IN ('posted', 'failed', 'cancelled')
+                  ),
+                  CHECK(publish_claimed = 0 OR state = 'open')
              ) STRICT;
 
              CREATE UNIQUE INDEX IF NOT EXISTS turns_one_open_per_session
@@ -210,6 +221,20 @@ impl HostRepository for SqliteRepository {
                  WHERE event_id = ?1",
                 [event_id.as_str()],
                 Self::read_indexed_event,
+            )
+            .optional()
+    }
+
+    fn latest_body_for_event(&self, event_id: &EventId) -> Result<Option<String>, Self::Error> {
+        self.connection
+            .query_row(
+                "SELECT content FROM relay_events
+                 WHERE event_id = ?1
+                    OR (target_event_id = ?1 AND kind = 40003)
+                 ORDER BY created_at DESC, event_id DESC
+                 LIMIT 1",
+                [event_id.as_str()],
+                |row| row.get(0),
             )
             .optional()
     }
@@ -391,10 +416,33 @@ impl HostRepository for SqliteRepository {
         if matches!(state, TurnState::Queued | TurnState::Open) {
             return Ok(false);
         }
+        let sql = if state == TurnState::Cancelled {
+            "UPDATE turns SET state = ?1, publish_claimed = 0
+             WHERE ask_id = ?2 AND state = 'open' AND publish_claimed = 0"
+        } else {
+            "UPDATE turns SET state = ?1, publish_claimed = 0
+             WHERE ask_id = ?2 AND state = 'open'"
+        };
+        let changed = self
+            .connection
+            .execute(sql, params![state.as_str(), ask_id])?;
+        Ok(changed == 1)
+    }
+
+    fn claim_turn_for_publish(&mut self, ask_id: &str) -> Result<bool, Self::Error> {
         let changed = self.connection.execute(
-            "UPDATE turns SET state = ?1
-             WHERE ask_id = ?2 AND state = 'open'",
-            params![state.as_str(), ask_id],
+            "UPDATE turns SET publish_claimed = 1
+             WHERE ask_id = ?1 AND state = 'open' AND publish_claimed = 0",
+            [ask_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    fn release_publish_claim(&mut self, ask_id: &str) -> Result<bool, Self::Error> {
+        let changed = self.connection.execute(
+            "UPDATE turns SET publish_claimed = 0
+             WHERE ask_id = ?1 AND state = 'open' AND publish_claimed = 1",
+            [ask_id],
         )?;
         Ok(changed == 1)
     }
@@ -406,6 +454,73 @@ impl HostRepository for SqliteRepository {
             [event_id.as_str()],
         )?;
         Ok(changed == 1)
+    }
+
+    fn cancel_unclaimed_turn(
+        &mut self,
+        event_id: &EventId,
+    ) -> Result<Option<TurnRecord>, Self::Error> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE turns SET state = 'cancelled', publish_claimed = 0
+             WHERE event_id = ?1
+               AND (
+                   state = 'queued'
+                   OR (state = 'open' AND publish_claimed = 0)
+               )",
+            [event_id.as_str()],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let record = transaction.query_row(
+            "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
+                    t.reply_to_event_id, t.state
+             FROM turns AS t
+             JOIN sessions AS s ON s.id = t.session_id
+             WHERE t.event_id = ?1 AND t.state = 'cancelled'
+             ORDER BY t.sequence DESC
+             LIMIT 1",
+            [event_id.as_str()],
+            Self::read_turn,
+        )?;
+        transaction.commit()?;
+        Ok(Some(record))
+    }
+
+    fn replace_unclaimed_turn(
+        &mut self,
+        turn: &NewTurn,
+    ) -> Result<Option<TurnReplacement>, Self::Error> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE turns SET state = 'cancelled', publish_claimed = 0
+             WHERE event_id = ?1
+               AND (
+                   state = 'queued'
+                   OR (state = 'open' AND publish_claimed = 0)
+               )",
+            [turn.event_id.as_str()],
+        )?;
+        if changed == 0 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let cancelled = transaction.query_row(
+            "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
+                    t.reply_to_event_id, t.state
+             FROM turns AS t
+             JOIN sessions AS s ON s.id = t.session_id
+             WHERE t.event_id = ?1 AND t.state = 'cancelled'
+             ORDER BY t.sequence DESC
+             LIMIT 1",
+            [turn.event_id.as_str()],
+            Self::read_turn,
+        )?;
+        let queued = insert_queued_turn(&transaction, turn)?;
+        transaction.commit()?;
+        Ok(Some(TurnReplacement { cancelled, queued }))
     }
 
     fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<TurnRecord>, Self::Error> {
@@ -777,6 +892,101 @@ mod tests {
         assert_eq!(
             repository.sessions_with_pending_turns().unwrap(),
             vec![expected]
+        );
+    }
+
+    #[test]
+    fn claimed_open_turn_cannot_be_cancelled() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        let turn = turn(&bot_id, channel_id, 'a');
+        repository.enqueue_turn(&turn).unwrap();
+        repository
+            .open_next_turn(&bot_id, channel_id, "ask-1")
+            .unwrap();
+
+        assert!(repository.claim_turn_for_publish("ask-1").unwrap());
+        assert!(repository
+            .cancel_unclaimed_turn(&turn.event_id)
+            .unwrap()
+            .is_none());
+        assert!(repository.replace_unclaimed_turn(&turn).unwrap().is_none());
+        assert!(!repository
+            .set_turn_state("ask-1", TurnState::Cancelled)
+            .unwrap());
+        assert!(repository.release_publish_claim("ask-1").unwrap());
+        assert_eq!(
+            repository
+                .cancel_unclaimed_turn(&turn.event_id)
+                .unwrap()
+                .expect("cancelled")
+                .state,
+            TurnState::Cancelled
+        );
+    }
+
+    #[test]
+    fn replace_unclaimed_turn_cancels_and_enqueues() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        let turn = turn(&bot_id, channel_id, 'a');
+        repository.enqueue_turn(&turn).unwrap();
+        repository
+            .open_next_turn(&bot_id, channel_id, "ask-1")
+            .unwrap();
+
+        let replaced = repository
+            .replace_unclaimed_turn(&turn)
+            .unwrap()
+            .expect("replaced");
+        assert_eq!(replaced.cancelled.ask_id.as_deref(), Some("ask-1"));
+        assert_eq!(replaced.cancelled.state, TurnState::Cancelled);
+        assert_eq!(replaced.queued.state, TurnState::Queued);
+        assert_eq!(replaced.queued.event_id, turn.event_id);
+    }
+
+    #[test]
+    fn latest_body_prefers_a_later_edit() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let original = IndexedRelayEvent {
+            event_id: event_id('a'),
+            author_pubkey: "b".repeat(64),
+            created_at: 1_000,
+            kind: 9,
+            content: "bot: original".to_owned(),
+            tags_json: "[]".to_owned(),
+            channel_id: Some("channel".to_owned()),
+            target_event_id: None,
+        };
+        let edit = IndexedRelayEvent {
+            event_id: event_id('c'),
+            author_pubkey: "b".repeat(64),
+            created_at: 2_000,
+            kind: 40_003,
+            content: "bot: replacement".to_owned(),
+            tags_json: "[]".to_owned(),
+            channel_id: Some("channel".to_owned()),
+            target_event_id: Some(event_id('a')),
+        };
+        repository.index_event(&original, false).unwrap();
+        repository.index_event(&edit, false).unwrap();
+        assert_eq!(
+            repository.latest_body_for_event(&event_id('a')).unwrap(),
+            Some("bot: replacement".to_owned())
         );
     }
 }

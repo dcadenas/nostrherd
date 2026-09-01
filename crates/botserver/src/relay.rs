@@ -589,6 +589,18 @@ mod tests {
                 .cloned())
         }
 
+        fn latest_body_for_event(&self, event_id: &EventId) -> Result<Option<String>, Self::Error> {
+            Ok(self
+                .indexed
+                .iter()
+                .filter(|event| {
+                    event.event_id == *event_id
+                        || (event.target_event_id.as_ref() == Some(event_id) && event.kind == 40003)
+                })
+                .max_by_key(|event| (event.created_at, event.event_id.as_str().to_owned()))
+                .map(|event| event.content.clone()))
+        }
+
         fn relay_replay_since(&self) -> Result<Option<i64>, Self::Error> {
             let oldest_pending = self
                 .indexed
@@ -668,6 +680,28 @@ mod tests {
         }
 
         fn cancel_queued_turn(&mut self, _event_id: &EventId) -> Result<bool, Self::Error> {
+            unreachable!()
+        }
+
+        fn claim_turn_for_publish(&mut self, _ask_id: &str) -> Result<bool, Self::Error> {
+            unreachable!()
+        }
+
+        fn release_publish_claim(&mut self, _ask_id: &str) -> Result<bool, Self::Error> {
+            unreachable!()
+        }
+
+        fn cancel_unclaimed_turn(
+            &mut self,
+            _event_id: &EventId,
+        ) -> Result<Option<TurnRecord>, Self::Error> {
+            unreachable!()
+        }
+
+        fn replace_unclaimed_turn(
+            &mut self,
+            _turn: &NewTurn,
+        ) -> Result<Option<crate::TurnReplacement>, Self::Error> {
             unreachable!()
         }
 

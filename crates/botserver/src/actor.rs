@@ -55,8 +55,10 @@ pub enum TriggerOutcome {
     Queued,
     /// The event was already processed.
     Duplicate,
-    /// The action was acknowledged and left for a later issue.
+    /// The action was acknowledged without changing turns.
     Declined,
+    /// Queued or open work was cancelled and not replaced.
+    Cancelled,
 }
 
 /// Failure while starting or asking an occupant.
@@ -187,9 +189,8 @@ where
 
     /// Handle one ingest action for this bot.
     ///
-    /// Turn candidates start or ask the occupant. Edits and deletes are
-    /// acknowledged without changing turns; those transitions belong to a later
-    /// issue.
+    /// Turn candidates start or ask the occupant. Edits and deletes cancel
+    /// unclaimed in-flight work and may open a replacement turn.
     ///
     /// # Errors
     ///
@@ -226,14 +227,37 @@ where
                     },
                 )
             }
-            crate::relay::IngestAction::Edit { event_id, .. }
-            | crate::relay::IngestAction::Delete { event_id, .. } => {
-                self.repository
-                    .mark_event_processed(event_id)
-                    .map_err(ActorError::Repository)?;
-                Ok(TriggerOutcome::Declined)
+            crate::relay::IngestAction::Edit {
+                event_id,
+                target_event_id,
+                replacement,
+            } => self.handle_edit(
+                kelpie,
+                waiter,
+                event_id,
+                target_event_id,
+                replacement.as_ref(),
+            ),
+            crate::relay::IngestAction::Delete {
+                event_id,
+                target_event_id,
+            } => {
+                self.abandon_unclaimed(kelpie, waiter, event_id, target_event_id, "trigger deleted")
             }
         }
+    }
+
+    /// Drain the next queued turn after an in-flight turn is posted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence, pane allocation, or Kelpie fails.
+    pub fn handle_turn_completed(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &AdoptedWaiter<'_>,
+    ) -> Result<Option<TriggerOutcome>, ActorError<R::Error>> {
+        self.resume_queued(kelpie, waiter)
     }
 
     /// Start or ask the oldest queued turn that has no open sibling.
@@ -269,13 +293,7 @@ where
             else {
                 continue;
             };
-            let body = self
-                .repository
-                .indexed_event(&queued.event_id)
-                .map_err(ActorError::Repository)?
-                .and_then(|event| botserver_domain::TriggerMatch::from_body(&event.content))
-                .map(|trigger| trigger.request().to_owned())
-                .filter(|content| !content.is_empty());
+            let body = self.queued_ask_body(&queued.event_id)?;
             let Some(body) = body else {
                 continue;
             };
@@ -292,6 +310,104 @@ where
             Some(error) => Err(error),
             None => Ok(None),
         }
+    }
+
+    fn handle_edit(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &AdoptedWaiter<'_>,
+        event_id: &EventId,
+        target_event_id: &EventId,
+        replacement: Option<&botserver_domain::TriggerMatch>,
+    ) -> Result<TriggerOutcome, ActorError<R::Error>> {
+        let Some(request) = replacement
+            .map(botserver_domain::TriggerMatch::request)
+            .filter(|request| !request.is_empty())
+        else {
+            return self.abandon_unclaimed(
+                kelpie,
+                waiter,
+                event_id,
+                target_event_id,
+                "trigger edited",
+            );
+        };
+        let Some(active) = self
+            .repository
+            .active_turn_for_event(target_event_id)
+            .map_err(ActorError::Repository)?
+        else {
+            self.repository
+                .mark_event_processed(event_id)
+                .map_err(ActorError::Repository)?;
+            return Ok(TriggerOutcome::Declined);
+        };
+        let Some(replaced) = self
+            .repository
+            .replace_unclaimed_turn(&NewTurn {
+                bot_id: self.bot.id().clone(),
+                channel_id: active.channel_id.clone(),
+                event_id: target_event_id.clone(),
+                reply_to_event_id: active.reply_to_event_id.clone(),
+            })
+            .map_err(ActorError::Repository)?
+        else {
+            self.repository
+                .mark_event_processed(event_id)
+                .map_err(ActorError::Repository)?;
+            return Ok(TriggerOutcome::Declined);
+        };
+        if let Some(ask_id) = replaced.cancelled.ask_id.as_deref() {
+            waiter
+                .cancel(ask_id, "trigger edited")
+                .map_err(ActorError::Kelpie)?;
+        }
+        self.repository
+            .mark_event_processed(event_id)
+            .map_err(ActorError::Repository)?;
+        if !self.should_ask_event(&replaced.queued.channel_id, &replaced.queued.event_id)? {
+            return Ok(TriggerOutcome::Queued);
+        }
+        self.ask_oldest_queued(kelpie, waiter, &replaced.queued.channel_id, request)?;
+        Ok(TriggerOutcome::Asked)
+    }
+
+    fn abandon_unclaimed(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &AdoptedWaiter<'_>,
+        event_id: &EventId,
+        target_event_id: &EventId,
+        reason: &str,
+    ) -> Result<TriggerOutcome, ActorError<R::Error>> {
+        let Some(cancelled) = self
+            .repository
+            .cancel_unclaimed_turn(target_event_id)
+            .map_err(ActorError::Repository)?
+        else {
+            self.repository
+                .mark_event_processed(event_id)
+                .map_err(ActorError::Repository)?;
+            return Ok(TriggerOutcome::Declined);
+        };
+        if let Some(ask_id) = cancelled.ask_id.as_deref() {
+            waiter.cancel(ask_id, reason).map_err(ActorError::Kelpie)?;
+        }
+        self.repository
+            .mark_event_processed(event_id)
+            .map_err(ActorError::Repository)?;
+        self.resume_queued(kelpie, waiter)?;
+        Ok(TriggerOutcome::Cancelled)
+    }
+
+    fn queued_ask_body(&self, event_id: &EventId) -> Result<Option<String>, ActorError<R::Error>> {
+        Ok(self
+            .repository
+            .latest_body_for_event(event_id)
+            .map_err(ActorError::Repository)?
+            .and_then(|content| botserver_domain::TriggerMatch::from_body(&content))
+            .map(|trigger| trigger.request().to_owned())
+            .filter(|content| !content.is_empty()))
     }
 
     fn should_ask_event(
@@ -624,6 +740,10 @@ mod tests {
             "phase": "scheduled",
             "every_ms": 2_700_000
         }))
+    }
+
+    fn cancelled() -> CommandOutput {
+        success(&serde_json::json!({}))
     }
 
     fn failure(class: &str, message: &str) -> CommandOutput {
@@ -1142,5 +1262,275 @@ mod tests {
         assert!(snapshot.contains("channel hello"));
         assert!(!snapshot.contains("secret dm"));
         assert!(!snapshot.contains(dm_channel));
+    }
+
+    fn index_trigger(
+        actor: &mut BotActor<SqliteRepository, Arc<FakePanes>>,
+        trigger: &TriggerWork,
+    ) {
+        actor
+            .repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: trigger.event_id.clone(),
+                    author_pubkey: "b".repeat(64),
+                    created_at: 1,
+                    kind: 9,
+                    content: format!("bot: {}", trigger.nostr_body),
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(trigger.channel_id.clone()),
+                    target_event_id: None,
+                },
+                false,
+            )
+            .expect("index");
+    }
+
+    #[test]
+    fn handle_turn_completed_asks_the_queued_turn() {
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            whoami(),
+            asked("ask-2"),
+        ]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let first = work('a', "first", None);
+        let second = work('b', "second", None);
+        index_trigger(&mut actor, &first);
+        index_trigger(&mut actor, &second);
+        actor
+            .handle_trigger(&kelpie, &waiter, &first)
+            .expect("first");
+        actor
+            .handle_trigger(&kelpie, &waiter, &second)
+            .expect("queued");
+        actor
+            .repository
+            .set_turn_state("ask-1", TurnState::Posted)
+            .expect("posted");
+
+        assert_eq!(
+            actor
+                .handle_turn_completed(&kelpie, &waiter)
+                .expect("drain"),
+            Some(TriggerOutcome::Asked)
+        );
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &first.channel_id)
+            .expect("turns");
+        assert_eq!(turns[1].state, TurnState::Open);
+        assert_eq!(turns[1].ask_id.as_deref(), Some("ask-2"));
+        assert_eq!(
+            runner.calls.lock().expect("calls").last().expect("ask").1,
+            b"second"
+        );
+    }
+
+    #[test]
+    fn ingest_edit_cancels_open_work_and_asks_the_latest_body() {
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            cancelled(),
+            whoami(),
+            asked("ask-2"),
+        ]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let trigger = work('a', "hello", Some('c'));
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("first");
+        let edit_id = event_id('e');
+        let replacement = botserver_domain::TriggerMatch::from_body("bot: latest").expect("edit");
+
+        assert_eq!(
+            actor
+                .handle_ingest(
+                    &kelpie,
+                    &waiter,
+                    &crate::relay::IngestAction::Edit {
+                        event_id: edit_id.clone(),
+                        target_event_id: trigger.event_id.clone(),
+                        replacement: Some(replacement),
+                    },
+                    &trigger.channel_display,
+                )
+                .expect("replaced"),
+            TriggerOutcome::Asked
+        );
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &trigger.channel_id)
+            .expect("turns");
+        assert_eq!(turns[0].state, TurnState::Cancelled);
+        assert_eq!(turns[1].state, TurnState::Open);
+        assert_eq!(turns[1].ask_id.as_deref(), Some("ask-2"));
+        assert_eq!(turns[1].event_id, trigger.event_id);
+        assert_eq!(turns[1].reply_to_event_id, trigger.reply_to_event_id);
+        let calls = runner.calls.lock().expect("calls");
+        assert_eq!(
+            calls
+                .iter()
+                .find(|call| call.0[1] == "cancel")
+                .expect("cancel")
+                .0[2],
+            "ask-1"
+        );
+        assert_eq!(calls.last().expect("ask").1, b"latest");
+        assert!(actor
+            .repository
+            .event_processed(&edit_id)
+            .expect("processed"));
+    }
+
+    #[test]
+    fn ingest_delete_cancels_open_work_without_asking() {
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            cancelled(),
+        ]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("first");
+        let delete_id = event_id('d');
+
+        assert_eq!(
+            actor
+                .handle_ingest(
+                    &kelpie,
+                    &waiter,
+                    &crate::relay::IngestAction::Delete {
+                        event_id: delete_id.clone(),
+                        target_event_id: trigger.event_id.clone(),
+                    },
+                    &trigger.channel_display,
+                )
+                .expect("cancelled"),
+            TriggerOutcome::Cancelled
+        );
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &trigger.channel_id)
+            .expect("turns");
+        assert_eq!(turns[0].state, TurnState::Cancelled);
+        assert_eq!(
+            runner
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .filter(|call| call.0[1] == "ask")
+                .count(),
+            1
+        );
+        assert!(actor
+            .repository
+            .event_processed(&delete_id)
+            .expect("processed"));
+    }
+
+    #[test]
+    fn claimed_open_turn_ignores_later_edits() {
+        let (mut actor, kelpie, runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("first");
+        assert!(actor
+            .repository
+            .claim_turn_for_publish("ask-1")
+            .expect("claim"));
+
+        assert_eq!(
+            actor
+                .handle_ingest(
+                    &kelpie,
+                    &waiter,
+                    &crate::relay::IngestAction::Edit {
+                        event_id: event_id('e'),
+                        target_event_id: trigger.event_id.clone(),
+                        replacement: botserver_domain::TriggerMatch::from_body("bot: stale"),
+                    },
+                    &trigger.channel_display,
+                )
+                .expect("ignored"),
+            TriggerOutcome::Declined
+        );
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &trigger.channel_id)
+            .expect("turns");
+        assert_eq!(turns[0].state, TurnState::Open);
+        assert!(runner
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .all(|call| call.0[1] != "cancel"));
+    }
+
+    #[test]
+    fn ingest_edit_of_queued_work_replaces_without_a_second_ask() {
+        let (mut actor, kelpie, runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let first = work('a', "first", None);
+        let second = work('b', "second", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &first)
+            .expect("first");
+        actor
+            .handle_trigger(&kelpie, &waiter, &second)
+            .expect("queued");
+
+        assert_eq!(
+            actor
+                .handle_ingest(
+                    &kelpie,
+                    &waiter,
+                    &crate::relay::IngestAction::Edit {
+                        event_id: event_id('e'),
+                        target_event_id: second.event_id.clone(),
+                        replacement: botserver_domain::TriggerMatch::from_body("bot: later"),
+                    },
+                    &second.channel_display,
+                )
+                .expect("queued replacement"),
+            TriggerOutcome::Queued
+        );
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &first.channel_id)
+            .expect("turns");
+        assert_eq!(turns[0].state, TurnState::Open);
+        assert_eq!(turns[1].state, TurnState::Cancelled);
+        assert_eq!(turns[2].state, TurnState::Queued);
+        assert_eq!(turns[2].event_id, second.event_id);
+        assert_eq!(
+            runner
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .filter(|call| call.0[1] == "ask")
+                .count(),
+            1
+        );
     }
 }
