@@ -175,17 +175,11 @@ async fn refresh_subscription(
     subscriber: &RelaySubscriber,
     operator_pubkey: &str,
     repository: &SqliteRepository,
-) {
-    let since = match replay_since(repository) {
-        Ok(since) => since,
-        Err(error) => {
-            eprintln!("relay subscribe retry failed: {error}");
-            return;
-        }
-    };
-    if let Err(error) = subscriber.subscribe(operator_pubkey, &[], &[], since).await {
-        eprintln!("relay subscribe retry failed: {error}");
-    }
+) -> Result<(), HostError> {
+    subscriber
+        .subscribe(operator_pubkey, &[], &[], replay_since(repository)?)
+        .await?;
+    Ok(())
 }
 
 async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<(), HostError> {
@@ -196,10 +190,11 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
     client.wait_for_connection(CONNECT_TIMEOUT).await;
     let subscriber = RelaySubscriber::new(client);
     let mut notifications = subscriber.notifications();
-    eprintln!("botserver connected");
     let mut ingest = RelayIngest::new(operator_pubkey.clone(), String::new(), repository);
     let mut refresh = tokio::time::interval(SUBSCRIPTION_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut announced = false;
+    let mut last_retry_error = None;
     loop {
         tokio::select! {
             notification = notifications.recv() => match notification {
@@ -216,12 +211,28 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
             _ = refresh.tick() => {
                 // HTTP publishes on the local Buzz relay are stored immediately
                 // but are not fanned out to operator #p websocket subscribers.
-                refresh_subscription(
+                match refresh_subscription(
                     &subscriber,
                     &operator_pubkey,
                     ingest.repository_mut(),
                 )
-                .await;
+                .await
+                {
+                    Ok(()) => {
+                        last_retry_error = None;
+                        if !announced {
+                            eprintln!("botserver connected");
+                            announced = true;
+                        }
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if last_retry_error.as_ref() != Some(&message) {
+                            eprintln!("relay subscribe retry failed: {message}");
+                            last_retry_error = Some(message);
+                        }
+                    }
+                }
             }
         }
     }
