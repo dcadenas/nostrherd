@@ -1,13 +1,16 @@
 //! Per-bot actor: start a corpus occupant, then ask on each trigger.
 
 use std::fmt;
+use std::io;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use botserver_domain::{Bot, EventId, SessionName};
 
+use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
 use crate::{
-    AdoptedWaiter, AskDelivery, HostRepository, KelpieClient, KelpieError, NewTurn, OccupantLaunch,
-    SessionRecord, TurnState, OCCUPANT_BOOTSTRAP,
+    occupant_bootstrap, AdoptedWaiter, AskDelivery, HostRepository, KelpieClient, KelpieError,
+    NewTurn, OccupantLaunch, SessionRecord, TurnState,
 };
 
 /// Kelpie readiness wait for a newly started occupant.
@@ -73,6 +76,8 @@ pub enum ActorError<E> {
     EmptyAskBody,
     /// `open_next_turn` did not bind a delivered ask.
     TurnNotOpened { ask_id: String },
+    /// The host could not write the channel snapshot.
+    Snapshot(io::Error),
 }
 
 impl<E: fmt::Display> fmt::Display for ActorError<E> {
@@ -89,6 +94,7 @@ impl<E: fmt::Display> fmt::Display for ActorError<E> {
             Self::TurnNotOpened { ask_id } => {
                 write!(formatter, "delivered ask {ask_id} was not bound to a turn")
             }
+            Self::Snapshot(error) => write!(formatter, "place snapshot failed: {error}"),
         }
     }
 }
@@ -101,6 +107,7 @@ where
         match self {
             Self::Repository(error) => Some(error),
             Self::Kelpie(error) => Some(error),
+            Self::Snapshot(error) => Some(error),
             Self::Pane(_)
             | Self::UnnameableSession
             | Self::AskNotDelivered(_)
@@ -318,9 +325,39 @@ where
             .session(self.bot.id(), channel_id)
             .map_err(ActorError::Repository)?
             .ok_or(ActorError::UnnameableSession)?;
+        let snapshot_relpath = self.refresh_snapshot(&session)?;
         if session.occupant_logical_id.is_none() {
-            let occupant = self.start_occupant(kelpie, waiter, &session)?;
+            let occupant = self.start_occupant(kelpie, waiter, &session, &snapshot_relpath)?;
             session.occupant_logical_id = Some(occupant.logical_agent_id().to_owned());
+            self.repository
+                .save_session(&session)
+                .map_err(ActorError::Repository)?;
+            if session.renew_id.is_none() {
+                session.renew_id = Some(
+                    kelpie
+                        .arm_occupant_renew(
+                            occupant.logical_agent_id(),
+                            occupant.incarnation_id(),
+                            &snapshot_relpath,
+                        )
+                        .map_err(ActorError::Kelpie)?,
+                );
+                self.repository
+                    .save_session(&session)
+                    .map_err(ActorError::Repository)?;
+            }
+        } else if session.renew_id.is_none() {
+            let (logical_id, incarnation_id) = waiter
+                .occupant_ids(
+                    &session.session_name,
+                    session.occupant_logical_id.as_deref(),
+                )
+                .map_err(ActorError::Kelpie)?;
+            session.renew_id = Some(
+                kelpie
+                    .arm_occupant_renew(&logical_id, &incarnation_id, &snapshot_relpath)
+                    .map_err(ActorError::Kelpie)?,
+            );
             self.repository
                 .save_session(&session)
                 .map_err(ActorError::Repository)?;
@@ -362,11 +399,13 @@ where
         kelpie: &KelpieClient,
         waiter: &AdoptedWaiter<'_>,
         session: &SessionRecord,
+        snapshot_relpath: &str,
     ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
         let pane = self
             .panes
             .allocate(&session.session_name, self.bot.corpus_path())
             .map_err(|error| ActorError::Pane(error.to_string()))?;
+        let bootstrap = occupant_bootstrap(snapshot_relpath);
         kelpie
             .start_occupant(
                 &OccupantLaunch {
@@ -377,10 +416,32 @@ where
                     cwd: self.bot.corpus_path().to_path_buf(),
                     timeout_ms: OCCUPANT_START_TIMEOUT_MS,
                 },
-                OCCUPANT_BOOTSTRAP,
+                &bootstrap,
                 Some(waiter.identity().logical_agent_id()),
             )
             .map_err(ActorError::Kelpie)
+    }
+
+    fn refresh_snapshot(&self, session: &SessionRecord) -> Result<String, ActorError<R::Error>> {
+        let relpath = place_snapshot_relpath(&session.session_name).ok_or_else(|| {
+            ActorError::Snapshot(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session name is not a safe snapshot filename",
+            ))
+        })?;
+        let events = self
+            .repository
+            .indexed_events_for_channel(&session.channel_id)
+            .map_err(ActorError::Repository)?;
+        let markdown = render_place_snapshot(
+            &session.session_name,
+            &session.channel_id,
+            unix_now().map_err(ActorError::Snapshot)?,
+            &events,
+        );
+        refresh_place_snapshot(self.bot.corpus_path(), &session.session_name, &markdown)
+            .map_err(ActorError::Snapshot)?;
+        Ok(relpath)
     }
 
     pub(crate) fn ensure_session(
@@ -426,11 +487,19 @@ where
     }
 }
 
+fn unix_now() -> io::Result<i64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+    i64::try_from(elapsed.as_secs()).map_err(|_| io::Error::other("unix time does not fit i64"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     use rusqlite::Connection;
@@ -438,7 +507,7 @@ mod tests {
 
     use super::*;
     use crate::sqlite::SqliteRepository;
-    use crate::{CommandOutput, CommandRunner, IndexedRelayEvent, WAITER_NAME};
+    use crate::{occupant_bootstrap, CommandOutput, CommandRunner, IndexedRelayEvent, WAITER_NAME};
 
     #[derive(Debug)]
     struct FakePanes {
@@ -535,6 +604,18 @@ mod tests {
         }))
     }
 
+    fn renewed() -> CommandOutput {
+        success(&serde_json::json!({
+            "renew_id": "renew-id",
+            "recipient": "occupant-agent",
+            "recipient_incarnation": "occupant-incarnation",
+            "scheduled_at_ms": 1,
+            "on_timeout": "abort",
+            "phase": "scheduled",
+            "every_ms": 2_700_000
+        }))
+    }
+
     fn failure(class: &str, message: &str) -> CommandOutput {
         CommandOutput {
             success: false,
@@ -552,10 +633,21 @@ mod tests {
         EventId::parse_hex(&character.to_string().repeat(64)).expect("event")
     }
 
+    fn temp_corpus() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "botserver-actor-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("corpus");
+        path
+    }
+
     fn bot() -> Bot {
         Bot::new(
             botserver_domain::BotId::new("bot").expect("id"),
-            PathBuf::from("/corpus"),
+            temp_corpus(),
             "opencode",
         )
         .expect("bot")
@@ -600,7 +692,7 @@ mod tests {
     #[test]
     fn first_trigger_starts_then_asks_and_stores_reply_to() {
         let (mut actor, kelpie, runner, panes) =
-            actor([adopt(), start(), whoami(), asked("ask-1")]);
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
 
@@ -621,6 +713,7 @@ mod tests {
             session.occupant_logical_id.as_deref(),
             Some("occupant-agent")
         );
+        assert_eq!(session.renew_id.as_deref(), Some("renew-id"));
         let turns = actor
             .repository
             .turns_for_session(actor.bot.id(), &trigger.channel_id)
@@ -631,7 +724,20 @@ mod tests {
         assert_eq!(turns[0].reply_to_event_id, trigger.reply_to_event_id);
         assert_eq!(
             panes.calls.lock().expect("pane calls").as_slice(),
-            &[("bot-foobar".to_owned(), PathBuf::from("/corpus"))]
+            &[(
+                "bot-foobar".to_owned(),
+                actor.bot().corpus_path().to_path_buf()
+            )]
+        );
+        let snapshot = actor
+            .bot()
+            .corpus_path()
+            .join(".botserver/places/bot-foobar.md");
+        assert!(snapshot.exists());
+        assert!(
+            std::fs::read_to_string(actor.bot().corpus_path().join("startup.md"))
+                .expect("startup")
+                .contains(".botserver/places/<your public Kelpie name>.md")
         );
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls[1].0[1], "start");
@@ -639,10 +745,14 @@ mod tests {
             .0
             .windows(2)
             .any(|pair| pair == ["--sender-id", "waiter-agent"]));
-        assert_eq!(calls[1].1, OCCUPANT_BOOTSTRAP.as_bytes());
-        assert_eq!(calls[3].0[1], "ask");
         assert_eq!(
-            calls[3].0[calls[3]
+            calls[1].1,
+            occupant_bootstrap(".botserver/places/bot-foobar.md").as_bytes()
+        );
+        assert_eq!(calls[2].0[1], "renew");
+        assert_eq!(calls[4].0[1], "ask");
+        assert_eq!(
+            calls[4].0[calls[4]
                 .0
                 .iter()
                 .position(|arg| arg == "--idempotency-key")
@@ -650,7 +760,7 @@ mod tests {
                 + 1],
             format!("{}:1", trigger.event_id.as_str())
         );
-        assert_eq!(calls[3].1, trigger.nostr_body.as_bytes());
+        assert_eq!(calls[4].1, trigger.nostr_body.as_bytes());
         assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
         assert_eq!(WAITER_NAME, "botserver");
     }
@@ -660,6 +770,7 @@ mod tests {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
             start(),
+            renewed(),
             whoami(),
             asked("ask-1"),
             whoami(),
@@ -683,6 +794,7 @@ mod tests {
         assert_eq!(panes.calls.lock().expect("pane calls").len(), 1);
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls.iter().filter(|call| call.0[1] == "start").count(), 1);
+        assert_eq!(calls.iter().filter(|call| call.0[1] == "renew").count(), 1);
         assert_eq!(calls.iter().filter(|call| call.0[1] == "ask").count(), 2);
         assert_eq!(calls.last().expect("ask").1, b"bot: second");
     }
@@ -690,7 +802,7 @@ mod tests {
     #[test]
     fn open_turn_queues_without_a_second_ask() {
         let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), start(), whoami(), asked("ask-1")]);
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: first", None))
@@ -723,7 +835,7 @@ mod tests {
     #[test]
     fn resume_queued_starts_an_occupant_for_bootstrapping() {
         let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), start(), whoami(), asked("ask-1")]);
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         let trigger = work('a', "bot: hello", None);
         actor
@@ -769,6 +881,8 @@ mod tests {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
             failure("target_unavailable", "no ready occupant"),
+            whoami(),
+            renewed(),
             whoami(),
             asked("ask-2"),
         ]);
@@ -850,7 +964,7 @@ mod tests {
     #[test]
     fn ingest_turn_candidate_uses_the_actor_path() {
         let (mut actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), whoami(), asked("ask-1")]);
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
         let action = crate::relay::IngestAction::TurnCandidate {
@@ -919,5 +1033,62 @@ mod tests {
             .expect("calls")
             .iter()
             .all(|call| call.0[1] != "ask"));
+    }
+
+    #[test]
+    fn snapshot_excludes_other_channel_dms() {
+        let (mut actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+        let now = unix_now().expect("now");
+        let dm_channel = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        actor
+            .repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: event_id('d'),
+                    author_pubkey: "b".repeat(64),
+                    created_at: now - 30,
+                    kind: 9,
+                    content: "secret dm".to_owned(),
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(dm_channel.to_owned()),
+                    target_event_id: None,
+                },
+                false,
+            )
+            .expect("index dm");
+        actor
+            .repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: trigger.event_id.clone(),
+                    author_pubkey: "b".repeat(64),
+                    created_at: now - 10,
+                    kind: 9,
+                    content: "channel hello".to_owned(),
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(trigger.channel_id.clone()),
+                    target_event_id: None,
+                },
+                false,
+            )
+            .expect("index channel");
+
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("handle");
+
+        let snapshot = std::fs::read_to_string(
+            actor
+                .bot()
+                .corpus_path()
+                .join(".botserver/places/bot-foobar.md"),
+        )
+        .expect("snapshot");
+        assert!(snapshot.contains("channel hello"));
+        assert!(!snapshot.contains("secret dm"));
+        assert!(!snapshot.contains(dm_channel));
     }
 }

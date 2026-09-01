@@ -251,3 +251,17 @@ remainder is empty (`bot:` or `@daniel bot:` with no request text), the
 host MUST acknowledge the event and MUST NOT open a Turn, start an
 occupant, or send an ask. Silence here is not D8 untriggered traffic;
 it is a classified trigger with nothing to answer.
+
+## D27. Place snapshots are last 7 days; renew is every 45 minutes
+
+Status: accepted
+
+Closes the unspecified window and interval in D6/D19 for v1. The host
+writes one last-7-days file per channel session at
+`<corpus>/.botserver/places/<session-name>.md` from indexed events with
+that channel UUID only. Corpus `startup.md` points at
+`.botserver/places/<your public Kelpie name>.md`. Occupant start and
+each new Turn refresh that file. After start, the host arms
+`kelpie renew --every 45m --on-timeout abort` on the occupant's exact
+incarnation. Prepare writes `progress.md`. Resume reads `startup.md`
+and the snapshot. Token-count renew remains later (Q6).

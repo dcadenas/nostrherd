@@ -45,6 +45,26 @@ pub struct OccupantLaunch {
 /// Short trusted body used only to finish `kelpie start --tell`.
 pub const OCCUPANT_BOOTSTRAP: &str = "Wait for Kelpie asks from botserver.";
 
+/// Wall-clock renew interval for a session occupant (D27).
+pub const OCCUPANT_RENEW_EVERY: &str = "45m";
+
+/// Prepare prompt stored on the occupant renew policy (D27).
+pub const OCCUPANT_RENEW_PREPARE: &str = "Write progress.md so a later instance of you can resume this channel work with no memory of this conversation: what is done, what is next, decisions and why, absolute paths.";
+
+/// Bootstrap tell body that points at the channel snapshot.
+#[must_use]
+pub fn occupant_bootstrap(snapshot_relpath: &str) -> String {
+    format!("{OCCUPANT_BOOTSTRAP}\nChannel snapshot: {snapshot_relpath}")
+}
+
+/// Resume prompt stored on the occupant renew policy.
+#[must_use]
+pub fn occupant_renew_resume(snapshot_relpath: &str) -> String {
+    format!(
+        "Read startup.md, then the channel snapshot at {snapshot_relpath}. Continue from progress.md if it exists."
+    )
+}
+
 /// A host identity adopted into Kelpie.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaiterIdentity {
@@ -311,6 +331,43 @@ impl KelpieClient {
         })
     }
 
+    /// Arm wall-clock renew on one occupant's exact incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie rejects the policy or the receipt is invalid.
+    pub fn arm_occupant_renew(
+        &self,
+        logical_agent_id: &str,
+        incarnation_id: &str,
+        snapshot_relpath: &str,
+    ) -> Result<String, KelpieError> {
+        let resume = occupant_renew_resume(snapshot_relpath);
+        let output = self.invoke(
+            &[
+                "--json",
+                "renew",
+                "--recipient-id",
+                logical_agent_id,
+                "--recipient-incarnation",
+                incarnation_id,
+                "--prepare-prompt",
+                OCCUPANT_RENEW_PREPARE,
+                "--prompt",
+                &resume,
+                "--on-timeout",
+                "abort",
+                "--every",
+                OCCUPANT_RENEW_EVERY,
+            ],
+            &[],
+        )?;
+        if !output.success {
+            return Err(output.rejected());
+        }
+        field(result(&output.receipt)?, "renew_id")
+    }
+
     fn adopt(
         &self,
         pane_id: &str,
@@ -443,6 +500,26 @@ impl AdoptedWaiter<'_> {
         idempotency_key: &str,
     ) -> Result<AskReceipt, KelpieError> {
         self.ask_named(recipient, None, nostr_body, idempotency_key)
+    }
+
+    /// Resolve a live occupant alias to durable ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot resolve the alias, or when it is not
+    /// the recorded occupant.
+    pub fn occupant_ids(
+        &self,
+        alias: &str,
+        expected_logical_id: Option<&str>,
+    ) -> Result<(String, String), KelpieError> {
+        let recipient = self.resolve_recipient(alias)?;
+        if expected_logical_id.is_some_and(|expected| expected != recipient.logical_agent_id) {
+            return Err(KelpieError::InvalidReceipt(
+                "session occupant is not the recorded logical agent".to_owned(),
+            ));
+        }
+        Ok((recipient.logical_agent_id, recipient.incarnation_id))
     }
 
     /// Send an ask and require the alias to resolve to a recorded logical id.
@@ -790,6 +867,53 @@ mod tests {
     }
 
     #[test]
+    fn arm_occupant_renew_targets_exact_ids_and_aborts_on_timeout() {
+        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
+            "renew_id": "renew-1",
+            "recipient": "occupant-agent",
+            "recipient_incarnation": "occupant-incarnation",
+            "scheduled_at_ms": 1,
+            "on_timeout": "abort",
+            "phase": "scheduled",
+            "every_ms": 2_700_000
+        }))]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        let snapshot = ".botserver/places/bot-foobar.md";
+
+        let renew_id = client
+            .arm_occupant_renew("occupant-agent", "occupant-incarnation", snapshot)
+            .expect("renew");
+
+        assert_eq!(renew_id, "renew-1");
+        let calls = runner.calls.lock().expect("calls lock");
+        assert_eq!(calls[0].0[1], "renew");
+        assert!(calls[0]
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--recipient-id", "occupant-agent"]));
+        assert!(calls[0]
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--recipient-incarnation", "occupant-incarnation"]));
+        assert!(calls[0]
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--on-timeout", "abort"]));
+        assert!(calls[0]
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--every", OCCUPANT_RENEW_EVERY]));
+        assert!(calls[0]
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--prepare-prompt", OCCUPANT_RENEW_PREPARE]));
+        assert!(calls[0]
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--prompt", &occupant_renew_resume(snapshot)]));
+    }
+
+    #[test]
     fn ask_is_owned_by_waiter_and_passes_body_on_stdin() {
         let body = "<kelpie from=relay-pubkey>\n$(not-a-command) & hello";
         let runner = Arc::new(FakeRunner::new([
@@ -924,6 +1048,7 @@ pub mod actor;
 pub mod config;
 pub mod herdr;
 pub mod relay;
+pub mod snapshot;
 pub mod sqlite;
 
 use botserver_domain::{BotId, EventId};
