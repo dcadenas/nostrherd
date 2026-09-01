@@ -15,6 +15,7 @@ never `kelpie from=`.
 2. `docs/decision-log.md`
 3. `docs/open-questions.md` (do not invent answers)
 4. `docs/domain-model.md`
+5. `docs/testing.md` and `skills/local-relay/SKILL.md` for live tests
 
 ## Rules
 
@@ -30,6 +31,12 @@ Honor `Depends on:`. Before starting: `git fetch origin` and update to
 HEAD. If HEAD ≠ the issue's `Contract baseline:` SHA, **edit the issue
 body** (scope, acceptance, deps, new baseline). Comments are not a
 substitute.
+
+## Live local relay
+
+Any issue that touches relay, botcli, occupants, or SPEC flows MUST
+use `skills/local-relay/SKILL.md` and `tools/local-relay`. Throwaway
+keys only. Never `nostr-personal` or `buzz-acp`.
 
 ## Quality gates
 

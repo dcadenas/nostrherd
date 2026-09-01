@@ -209,6 +209,15 @@ Status: accepted
 command is `send`. Body is `--stdin` or `--file` only. Default stdout
 is a JSON receipt. Closing the Kelpie ask after a successful post is
 an implementation side effect, not the occupant-facing verb.
+
+## D23. Live tests use the throwaway local relay
+
+Status: accepted
+
+Issues that need a real relay MUST use `skills/local-relay` and
+`tools/local-relay`. Throwaway envchain namespaces `botserver-proof`
+(operator) and `botserver-proof-peer` (peer). Never `nostr-personal`
+or `buzz-acp`.
 ## D23. Ingest enforces Buzz mutation contracts
 
 Status: accepted
