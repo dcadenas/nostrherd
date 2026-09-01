@@ -69,8 +69,8 @@ pub enum ActorError<E> {
     UnnameableSession,
     /// Ask delivery was rejected or had no recipient.
     AskNotDelivered(AskDelivery),
-    /// Queued work had no indexed Nostr body.
-    MissingAskBody,
+    /// The trigger text after `bot:` was empty.
+    EmptyAskBody,
     /// `open_next_turn` did not bind a delivered ask.
     TurnNotOpened { ask_id: String },
 }
@@ -85,7 +85,7 @@ impl<E: fmt::Display> fmt::Display for ActorError<E> {
             Self::AskNotDelivered(delivery) => {
                 write!(formatter, "occupant ask was not delivered ({delivery:?})")
             }
-            Self::MissingAskBody => formatter.write_str("queued turn has no indexed Nostr body"),
+            Self::EmptyAskBody => formatter.write_str("trigger request is empty"),
             Self::TurnNotOpened { ask_id } => {
                 write!(formatter, "delivered ask {ask_id} was not bound to a turn")
             }
@@ -104,7 +104,7 @@ where
             Self::Pane(_)
             | Self::UnnameableSession
             | Self::AskNotDelivered(_)
-            | Self::MissingAskBody
+            | Self::EmptyAskBody
             | Self::TurnNotOpened { .. } => None,
         }
     }
@@ -151,7 +151,7 @@ where
         work: &TriggerWork,
     ) -> Result<TriggerOutcome, ActorError<R::Error>> {
         if work.nostr_body.trim().is_empty() {
-            return Err(ActorError::MissingAskBody);
+            return Err(ActorError::EmptyAskBody);
         }
         let display = if work.channel_display.is_empty() {
             work.channel_id.as_str()
@@ -267,10 +267,14 @@ where
                 .map_err(ActorError::Repository)?
                 .and_then(|event| botserver_domain::TriggerMatch::from_body(&event.content))
                 .map(|trigger| trigger.request().to_owned())
-                .filter(|content| !content.is_empty())
-                .ok_or(ActorError::MissingAskBody)?;
-            self.ask_oldest_queued(kelpie, waiter, &session.channel_id, &body)?;
-            return Ok(Some(TriggerOutcome::Asked));
+                .filter(|content| !content.is_empty());
+            let Some(body) = body else {
+                continue;
+            };
+            match self.ask_oldest_queued(kelpie, waiter, &session.channel_id, &body) {
+                Ok(()) => return Ok(Some(TriggerOutcome::Asked)),
+                Err(_) => continue,
+            }
         }
         Ok(None)
     }
@@ -738,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_queued_without_indexed_body_is_an_error() {
+    fn resume_queued_skips_a_session_without_indexed_body() {
         let (mut actor, kelpie, _runner, _panes) = actor([adopt()]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         let trigger = work('a', "bot: hello", None);
@@ -755,8 +759,7 @@ mod tests {
             })
             .expect("enqueue");
 
-        let error = actor.resume_queued(&kelpie, &waiter).expect_err("body");
-        assert!(error.to_string().contains("no indexed Nostr body"));
+        assert_eq!(actor.resume_queued(&kelpie, &waiter).expect("skip"), None);
     }
 
     #[test]
@@ -792,7 +795,7 @@ mod tests {
         let error = actor
             .handle_trigger(&kelpie, &waiter, &work('a', "   ", None))
             .expect_err("empty");
-        assert!(error.to_string().contains("no indexed Nostr body"));
+        assert!(error.to_string().contains("trigger request is empty"));
         assert!(runner
             .calls
             .lock()

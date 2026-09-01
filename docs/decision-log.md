@@ -241,3 +241,13 @@ trusted bootstrap body. The triggering Nostr text is always a `kelpie
 ask` owned by waiter `botserver` (D5), including on the first trigger.
 Start and ask keep separate receipts so an accepted runtime does not
 imply the trigger obligation exists.
+
+## D26. A trigger with an empty request opens no Turn
+
+Status: accepted
+
+D9 requires `bot:` as the first token after an optional mention. If the
+remainder is empty (`bot:` or `@daniel bot:` with no request text), the
+host MUST acknowledge the event and MUST NOT open a Turn, start an
+occupant, or send an ask. Silence here is not D8 untriggered traffic;
+it is a classified trigger with nothing to answer.
