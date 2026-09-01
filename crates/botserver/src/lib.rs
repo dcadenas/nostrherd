@@ -40,6 +40,7 @@ pub struct OccupantLaunch {
     pub backend: String,
     pub cwd: PathBuf,
     pub timeout_ms: u64,
+    pub logical_agent_id: Option<String>,
 }
 
 /// Short trusted body used only to finish `kelpie start --tell`.
@@ -352,6 +353,9 @@ impl KelpieClient {
         if let Some(sender_id) = sender_id {
             arguments.extend(["--sender-id".to_owned(), sender_id.to_owned()]);
         }
+        if let Some(logical_agent_id) = &launch.logical_agent_id {
+            arguments.extend(["--logical-id".to_owned(), logical_agent_id.clone()]);
+        }
         let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
         let output = self.invoke(&arguments, bootstrap.as_bytes())?;
         if !output.success {
@@ -366,10 +370,20 @@ impl KelpieClient {
                 "occupant runtime start did not succeed".to_owned(),
             ));
         }
-        Ok(StartedOccupant {
+        let started = StartedOccupant {
             logical_agent_id: field(result, "logical_agent_id")?,
             incarnation_id: field(result, "incarnation_id")?,
-        })
+        };
+        if launch
+            .logical_agent_id
+            .as_deref()
+            .is_some_and(|expected| expected != started.logical_agent_id())
+        {
+            return Err(KelpieError::InvalidReceipt(
+                "session occupant is not the recorded logical agent".to_owned(),
+            ));
+        }
+        Ok(started)
     }
 
     /// Arm wall-clock renew on one occupant's exact incarnation.
@@ -945,6 +959,7 @@ mod tests {
                     backend: "opencode".to_owned(),
                     cwd: PathBuf::from("/corpus"),
                     timeout_ms: 90_000,
+                    logical_agent_id: None,
                 },
                 OCCUPANT_BOOTSTRAP,
                 None,
@@ -1025,6 +1040,48 @@ mod tests {
             .0
             .windows(2)
             .any(|pair| pair == ["--prompt", &occupant_renew_resume(snapshot)]));
+    }
+
+    #[test]
+    fn start_occupant_continues_a_recorded_logical_id() {
+        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
+            "logical_agent_id": "occupant-agent",
+            "incarnation_id": "occupant-incarnation-2",
+            "runtime_start": {
+                "operation_id": "start-operation",
+                "outcome": "succeeded"
+            },
+            "initial_message": {
+                "message_id": "tell-id",
+                "operation_id": "tell-operation",
+                "outcome": "accepted"
+            }
+        }))]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        let started = client
+            .start_occupant(
+                &OccupantLaunch {
+                    name: "bot-foobar".to_owned(),
+                    pane_id: "w2:p1".to_owned(),
+                    terminal_id: "term-9".to_owned(),
+                    backend: "opencode".to_owned(),
+                    cwd: PathBuf::from("/corpus"),
+                    timeout_ms: 90_000,
+                    logical_agent_id: Some("occupant-agent".to_owned()),
+                },
+                OCCUPANT_BOOTSTRAP,
+                Some("waiter-agent"),
+            )
+            .expect("continue occupant");
+
+        assert_eq!(started.logical_agent_id(), "occupant-agent");
+        let args = &runner.calls.lock().expect("calls lock")[0].0;
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--logical-id", "occupant-agent"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sender-id", "waiter-agent"]));
     }
 
     #[test]

@@ -177,8 +177,17 @@ snapshot MUST NOT include other channels' DMs.
 Status: accepted
 
 If the pane is gone but the ask is open: Kelpie reminder, then
-`adopt --logical-id`. Do not `kelpie start` a new logical agent
-because the public name is free.
+recover that logical agent. Do not `kelpie start` a new logical
+agent because the public name is free.
+
+A replacement pane has no occupant runtime, so `kelpie adopt` cannot
+bind it. The host continues the recorded id with `kelpie start
+--logical-id` on that pane. That is a new incarnation of the same
+agent, not a twin. `adopt --logical-id` remains the path when a live
+pane already exists.
+
+The original ask stays open. Recovery MUST NOT send a second ask.
+Kelpie's reminder delivers the original question.
 
 User-visible: still at most one eventual `[bot]:` for that Turn
 (recovery MUST NOT double-post).
