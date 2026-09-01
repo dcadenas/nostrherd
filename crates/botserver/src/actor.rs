@@ -332,35 +332,26 @@ where
             self.repository
                 .save_session(&session)
                 .map_err(ActorError::Repository)?;
-            if session.renew_id.is_none() {
-                session.renew_id = Some(
-                    kelpie
-                        .arm_occupant_renew(
-                            occupant.logical_agent_id(),
-                            occupant.incarnation_id(),
-                            &snapshot_relpath,
-                        )
-                        .map_err(ActorError::Kelpie)?,
-                );
-                self.repository
-                    .save_session(&session)
-                    .map_err(ActorError::Repository)?;
-            }
+            self.try_arm_renew(
+                kelpie,
+                occupant.logical_agent_id(),
+                occupant.incarnation_id(),
+                &snapshot_relpath,
+                &mut session,
+            )?;
         } else if session.renew_id.is_none() {
-            let (logical_id, incarnation_id) = waiter
-                .occupant_ids(
-                    &session.session_name,
-                    session.occupant_logical_id.as_deref(),
-                )
-                .map_err(ActorError::Kelpie)?;
-            session.renew_id = Some(
-                kelpie
-                    .arm_occupant_renew(&logical_id, &incarnation_id, &snapshot_relpath)
-                    .map_err(ActorError::Kelpie)?,
-            );
-            self.repository
-                .save_session(&session)
-                .map_err(ActorError::Repository)?;
+            if let Ok((logical_id, incarnation_id)) = waiter.occupant_ids(
+                &session.session_name,
+                session.occupant_logical_id.as_deref(),
+            ) {
+                self.try_arm_renew(
+                    kelpie,
+                    &logical_id,
+                    &incarnation_id,
+                    &snapshot_relpath,
+                    &mut session,
+                )?;
+            }
         }
         let queued = self
             .repository
@@ -420,6 +411,25 @@ where
                 Some(waiter.identity().logical_agent_id()),
             )
             .map_err(ActorError::Kelpie)
+    }
+
+    fn try_arm_renew(
+        &mut self,
+        kelpie: &KelpieClient,
+        logical_id: &str,
+        incarnation_id: &str,
+        snapshot_relpath: &str,
+        session: &mut SessionRecord,
+    ) -> Result<(), ActorError<R::Error>> {
+        if let Ok(renew_id) =
+            kelpie.arm_occupant_renew(logical_id, incarnation_id, snapshot_relpath)
+        {
+            session.renew_id = Some(renew_id);
+            self.repository
+                .save_session(session)
+                .map_err(ActorError::Repository)?;
+        }
+        Ok(())
     }
 
     fn refresh_snapshot(&self, session: &SessionRecord) -> Result<String, ActorError<R::Error>> {
@@ -766,6 +776,47 @@ mod tests {
     }
 
     #[test]
+    fn failed_renew_still_asks() {
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            start(),
+            failure("conflict", "incarnation already has a renew"),
+            whoami(),
+            asked("ask-1"),
+        ]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+
+        assert_eq!(
+            actor
+                .handle_trigger(&kelpie, &waiter, &trigger)
+                .expect("handle"),
+            TriggerOutcome::Asked
+        );
+        let session = actor
+            .repository
+            .session(actor.bot.id(), &trigger.channel_id)
+            .expect("session")
+            .expect("bound");
+        assert_eq!(session.renew_id, None);
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &trigger.channel_id)
+            .expect("turns");
+        assert_eq!(turns[0].state, TurnState::Open);
+        assert_eq!(
+            runner
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .filter(|call| call.0[1] == "ask")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn later_trigger_asks_the_same_occupant_without_starting() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
@@ -880,6 +931,7 @@ mod tests {
         let second_channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            failure("target_unavailable", "no ready occupant"),
             failure("target_unavailable", "no ready occupant"),
             whoami(),
             renewed(),
