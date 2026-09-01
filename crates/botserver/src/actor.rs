@@ -1144,7 +1144,7 @@ mod tests {
             start(),
             whoami(),
             asked("ask-1"),
-            failure("target_unavailable", "no ready occupant"),
+            failure("conflict", "no ready agent for alias bot-foobar"),
             start(),
         ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
@@ -1232,7 +1232,7 @@ mod tests {
             start(),
             whoami(),
             asked("ask-1"),
-            failure("target_unavailable", "no ready occupant"),
+            failure("conflict", "no ready agent for alias bot-foobar"),
             start(),
         ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
@@ -1418,8 +1418,8 @@ mod tests {
         let second_channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
-            failure("target_unavailable", "no ready occupant"),
-            failure("target_unavailable", "no ready occupant"),
+            failure("conflict", "no ready agent for alias bot-aaa"),
+            failure("conflict", "no ready agent for alias bot-aaa"),
             whoami(),
             renewed(),
             whoami(),

@@ -307,7 +307,7 @@ impl KelpieClient {
     pub fn occupant_whoami(&self, alias: &str) -> Result<StartedOccupant, KelpieError> {
         let output = self.invoke(&["--json", "whoami", alias], &[])?;
         if !output.success {
-            if error_class(&output.receipt) == Some("target_unavailable") {
+            if occupant_alias_unbound(&output.receipt) {
                 return Err(KelpieError::TargetUnavailable);
             }
             return Err(output.rejected());
@@ -728,6 +728,14 @@ fn error_class(receipt: &Value) -> Option<&str> {
     receipt.pointer("/error/class").and_then(Value::as_str)
 }
 
+fn occupant_alias_unbound(receipt: &Value) -> bool {
+    error_class(receipt) == Some("conflict")
+        && receipt
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("no ready agent for alias"))
+}
+
 fn result(receipt: &Value) -> Result<&Value, KelpieError> {
     if let Some(error) = receipt.get("error").filter(|error| !error.is_null()) {
         return Err(KelpieError::InvalidReceipt(format!(
@@ -940,6 +948,17 @@ mod tests {
         assert!(error
             .to_string()
             .contains("session occupant is not the recorded logical agent"));
+    }
+
+    #[test]
+    fn occupant_whoami_treats_an_unbound_alias_as_unavailable() {
+        let runner = Arc::new(FakeRunner::new([failure(
+            "conflict",
+            "no ready agent for alias bot-foobar; a live Herdr agent may hold that name unadopted",
+        )]));
+        let client = KelpieClient::with_runner(runner);
+        let error = client.occupant_whoami("bot-foobar").expect_err("unbound");
+        assert!(matches!(error, KelpieError::TargetUnavailable));
     }
 
     #[test]
