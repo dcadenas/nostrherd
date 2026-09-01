@@ -184,12 +184,23 @@ cmd_smoke() {
   if [ ! -x "$botcli" ]; then
     cargo build -q -p botcli --manifest-path "$ROOT/Cargo.toml"
   fi
-  local receipt
+  local receipt event_id
   receipt=$(printf 'local-relay smoke\n' | env -u BUZZ_AUTH_TAG envchain "$NS_OP" "$botcli" send --stdin --channel "$channel")
   echo "$receipt"
-  env -u BUZZ_AUTH_TAG envchain "$NS_OP" buzz messages get --channel "$channel" --limit 3 \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d[0] if isinstance(d,list) else d; c=(m.get("content") if isinstance(m,dict) else "") or "";
-print("body_ok" if c.startswith("[bot]:") else "body_bad")'
+  event_id=$(printf '%s\n' "$receipt" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')
+  env -u BUZZ_AUTH_TAG envchain "$NS_OP" buzz messages get --channel "$channel" --limit 50 \
+    | python3 -c 'import json,sys
+want=sys.argv[1]
+raw=json.load(sys.stdin)
+items=raw if isinstance(raw, list) else [raw]
+ok=any(
+    isinstance(m, dict)
+    and (m.get("id") or m.get("event_id")) == want
+    and (m.get("content") or "").startswith("[bot]:")
+    for m in items
+)
+print("body_ok" if ok else "body_bad")
+' "$event_id"
 }
 
 cmd_trigger() {
