@@ -214,7 +214,7 @@ hello from example-bot
 EOF
 
 # Flow 4: second bot: in the same channel, --reply-to the first trigger.
-# Expect: one session, second turn open, same occupant pane.
+# Expect: one session, second turn open (leave it open for flow 5).
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
   "$PROOF/a-trigger1.json" "$PROOF/a-trigger1.id"
@@ -227,6 +227,17 @@ sqlite3 "$PROOF/host.sqlite" \
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state, length(t.reply_to_event_id) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' ORDER BY t.sequence;"
 
+# Flow 5: bot: on the other channel while A's second turn is still open.
+# Expect: two sessions, two names, A still open, B open (does not wait on A).
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL_B" --mention "$OPERATOR_PUB" --content 'bot: status'
+sqlite3 "$PROOF/host.sqlite" "SELECT count(*) FROM sessions;"
+sqlite3 "$PROOF/host.sqlite" "SELECT count(DISTINCT session_name) FROM sessions;"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' ORDER BY t.sequence;"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_B';"
+
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
 REPLY_TO=$(sqlite3 "$PROOF/host.sqlite" \
@@ -238,17 +249,8 @@ HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
 later from example-bot
 EOF
 
-# Flow 5: bot: on the other channel while A can be busy or idle.
-# Expect: second session, independent occupant, B turn open.
-env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
-  --channel "$CHANNEL_B" --mention "$OPERATOR_PUB" --content 'bot: status'
-sqlite3 "$PROOF/host.sqlite" "SELECT count(*) FROM sessions;"
-sqlite3 "$PROOF/host.sqlite" \
-  "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_B';"
-
 # Flow 7: parent message, then bot: --reply-to that event.
-# Expect: same A session, turn.reply_to_event_id matches parent, botcli --reply-to,
-# channel body starting with [bot]: tagged as a reply to the parent.
+# Expect: still one A session, open turn.reply_to_event_id length 64, botcli --reply-to.
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --content 'parent for thread' > "$PROOF/a-parent.json"
 python3 -c 'import json,sys
@@ -258,18 +260,24 @@ PARENT=$(tr -d '\n' < "$PROOF/a-parent.id")
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --reply-to "$PARENT" \
   --content 'bot: in thread'
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT count(*) FROM sessions WHERE channel_id='$CHANNEL_A';"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.state, length(t.reply_to_event_id) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';"
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
+REPLY_TO=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.reply_to_event_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
 HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   "$ROOT/target/debug/botcli" send --stdin \
   --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$CHANNEL_A" \
-  --reply-to "$PARENT" <<'EOF'
+  --reply-to "$REPLY_TO" <<'EOF'
 thread reply from example-bot
 EOF
 
 # Flow 8: two bot: triggers before a reply.
-# Expect: one open and one queued on A, one occupant; after botcli of the open
-# turn, the queued turn becomes open on the 30s resume tick.
+# Expect: one open and one queued on A; after botcli of the open turn, poll until
+# the queued turn becomes open (host resume tick is every 30s).
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --content 'bot: first'
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
@@ -283,6 +291,16 @@ HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$CHANNEL_A" <<'EOF'
 busy first
 EOF
+for _ in $(seq 1 40); do
+  queued=$(sqlite3 "$PROOF/host.sqlite" \
+    "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='queued';")
+  opened=$(sqlite3 "$PROOF/host.sqlite" \
+    "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
+  if [ "$queued" = 0 ] && [ "$opened" = 1 ]; then
+    break
+  fi
+  sleep 1
+done
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' ORDER BY t.sequence;"
 ```
