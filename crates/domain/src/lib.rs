@@ -57,12 +57,12 @@ impl SessionName {
         mut is_taken: impl FnMut(&str) -> bool,
     ) -> Option<Self> {
         let display_slug = slugify(channel_display);
+        let compact_id = compact_uuid(channel_id)?;
         let base = session_candidate(bot.as_str(), &display_slug, None)?;
         if !is_taken(&base) {
             return Some(Self(base));
         }
 
-        let compact_id = compact_uuid(channel_id)?;
         let maximum_suffix_len = 32_usize.checked_sub(bot.as_str().len() + 1)?;
         let maximum_suffix_len = compact_id.len().min(maximum_suffix_len);
         let mut suffix_len = 8.min(maximum_suffix_len);
@@ -309,7 +309,7 @@ mod tests {
     fn session_name_rejects_a_non_uuid_channel_id() {
         let bot = BotId::new("bot").expect("bot");
         assert!(
-            SessionName::from_bot_and_channel(&bot, "not-a-uuid", "foobar", |_| true).is_none()
+            SessionName::from_bot_and_channel(&bot, "not-a-uuid", "foobar", |_| false).is_none()
         );
     }
 
