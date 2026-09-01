@@ -150,6 +150,9 @@ where
         waiter: &AdoptedWaiter<'_>,
         work: &TriggerWork,
     ) -> Result<TriggerOutcome, ActorError<R::Error>> {
+        if work.nostr_body.trim().is_empty() {
+            return Err(ActorError::MissingAskBody);
+        }
         let display = if work.channel_display.is_empty() {
             work.channel_id.as_str()
         } else {
@@ -190,25 +193,32 @@ where
         waiter: &AdoptedWaiter<'_>,
         action: &crate::relay::IngestAction,
         channel_display: &str,
-        nostr_body: &str,
     ) -> Result<TriggerOutcome, ActorError<R::Error>> {
         match action {
             crate::relay::IngestAction::TurnCandidate {
                 event_id,
                 channel_id,
                 reply_to_event_id,
-                trigger: _,
-            } => self.handle_trigger(
-                kelpie,
-                waiter,
-                &TriggerWork {
-                    event_id: event_id.clone(),
-                    channel_id: channel_id.clone(),
-                    channel_display: channel_display.to_owned(),
-                    reply_to_event_id: reply_to_event_id.clone(),
-                    nostr_body: nostr_body.to_owned(),
-                },
-            ),
+                trigger,
+            } => {
+                if trigger.request().is_empty() {
+                    self.repository
+                        .mark_event_processed(event_id)
+                        .map_err(ActorError::Repository)?;
+                    return Ok(TriggerOutcome::Declined);
+                }
+                self.handle_trigger(
+                    kelpie,
+                    waiter,
+                    &TriggerWork {
+                        event_id: event_id.clone(),
+                        channel_id: channel_id.clone(),
+                        channel_display: channel_display.to_owned(),
+                        reply_to_event_id: reply_to_event_id.clone(),
+                        nostr_body: trigger.request().to_owned(),
+                    },
+                )
+            }
             crate::relay::IngestAction::Edit { event_id, .. }
             | crate::relay::IngestAction::Delete { event_id, .. } => {
                 self.repository
@@ -255,7 +265,8 @@ where
                 .repository
                 .indexed_event(&queued.event_id)
                 .map_err(ActorError::Repository)?
-                .map(|event| event.content)
+                .and_then(|event| botserver_domain::TriggerMatch::from_body(&event.content))
+                .map(|trigger| trigger.request().to_owned())
                 .filter(|content| !content.is_empty())
                 .ok_or(ActorError::MissingAskBody)?;
             self.ask_oldest_queued(kelpie, waiter, &session.channel_id, &body)?;
@@ -768,15 +779,57 @@ mod tests {
 
         assert_eq!(
             actor
-                .handle_ingest(
-                    &kelpie,
-                    &waiter,
-                    &action,
-                    &trigger.channel_display,
-                    &trigger.nostr_body
-                )
+                .handle_ingest(&kelpie, &waiter, &action, &trigger.channel_display)
                 .expect("ingest"),
             TriggerOutcome::Asked
         );
+    }
+
+    #[test]
+    fn empty_trigger_request_is_not_asked() {
+        let (mut actor, kelpie, runner, _panes) = actor([adopt()]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let error = actor
+            .handle_trigger(&kelpie, &waiter, &work('a', "   ", None))
+            .expect_err("empty");
+        assert!(error.to_string().contains("no indexed Nostr body"));
+        assert!(runner
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .all(|call| call.0[1] != "start"));
+    }
+
+    #[test]
+    fn ingest_edit_is_acknowledged_without_asking() {
+        let (mut actor, kelpie, runner, _panes) = actor([adopt()]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let edit_id = event_id('a');
+        assert_eq!(
+            actor
+                .handle_ingest(
+                    &kelpie,
+                    &waiter,
+                    &crate::relay::IngestAction::Edit {
+                        event_id: edit_id.clone(),
+                        target_event_id: event_id('b'),
+                        replacement: None,
+                    },
+                    "foobar",
+                )
+                .expect("declined"),
+            TriggerOutcome::Declined
+        );
+        assert!(actor
+            .repository
+            .event_processed(&edit_id)
+            .expect("processed"));
+        assert!(runner
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .all(|call| call.0[1] != "ask"));
     }
 }

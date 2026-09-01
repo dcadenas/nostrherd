@@ -239,7 +239,15 @@ impl TriggerMatch {
         {
             return None;
         }
+        Self::from_body(body)
+    }
 
+    /// Parse the inbound trigger token without checking `p`-tags.
+    ///
+    /// Use this on already-classified trigger text, such as a stored channel
+    /// body being replayed as an ask.
+    #[must_use]
+    pub fn from_body(body: &str) -> Option<Self> {
         let body = body.trim_start();
         let (first, remainder) = split_first_token(body)?;
         let request = if first == "bot:" {
@@ -405,6 +413,16 @@ mod tests {
         .expect("trigger");
 
         assert_eq!(matched.request(), "review the PR");
+        assert_eq!(
+            TriggerMatch::from_body("@daniel bot: review the PR")
+                .expect("body")
+                .request(),
+            "review the PR"
+        );
+        assert_eq!(
+            TriggerMatch::from_body("bot:").expect("empty").request(),
+            ""
+        );
     }
 
     #[test]

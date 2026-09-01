@@ -878,6 +878,32 @@ mod tests {
     }
 
     #[test]
+    fn ask_named_rejects_an_alias_bound_to_a_different_agent() {
+        let runner = Arc::new(FakeRunner::new([
+            success(&serde_json::json!({
+                "logical_agent_id": "waiter-agent",
+                "incarnation_id": "waiter-incarnation",
+                "operation_id": "adopt-operation",
+                "outcome": "succeeded"
+            })),
+            recipient(),
+        ]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        let waiter = client
+            .adopt_waiter("w1:p2", "term-2")
+            .expect("adopt waiter");
+
+        let error = waiter
+            .ask_named("bot-foobar", Some("other-occupant"), "hello", "turn-1:1")
+            .expect_err("mismatch");
+
+        assert!(error
+            .to_string()
+            .contains("session occupant is not the recorded logical agent"));
+        assert_eq!(runner.calls.lock().expect("calls").len(), 2);
+    }
+
+    #[test]
     fn parsed_kelpie_error_message_is_reported() {
         let runner = Arc::new(FakeRunner::new([failure(
             "conflict",
