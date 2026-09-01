@@ -1,6 +1,7 @@
 //! Read-only relay subscription and event classification.
 
 use std::fmt;
+use std::time::Duration;
 
 use botserver_domain::{EventId, TriggerMatch};
 use futures::Stream;
@@ -412,6 +413,24 @@ impl RelaySubscriber {
     /// Receive client notifications for the ingest loop.
     pub fn notifications(&self) -> impl Stream<Item = ClientNotification> + Send {
         self.client.notifications()
+    }
+
+    /// Fetch stored operator-mention messages since `since`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an SDK error when the fetch cannot complete.
+    pub async fn fetch_messages(
+        &self,
+        operator_pubkey: &str,
+        since: Timestamp,
+    ) -> Result<Vec<Event>, RelaySubscribeError> {
+        let events = self
+            .client
+            .fetch_events(message_filter(operator_pubkey, since))
+            .timeout(Duration::from_secs(5))
+            .await?;
+        Ok(events.into_iter().collect())
     }
 }
 

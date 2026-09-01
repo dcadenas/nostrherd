@@ -209,20 +209,42 @@ async fn serve(operator: OperatorEnv, repository: SqliteRepository) -> Result<()
                 None => return Err(HostError::NotificationClosed),
             },
             _ = refresh.tick() => {
-                // HTTP publishes on the local Buzz relay are stored immediately
-                // but are not fanned out to operator #p websocket subscribers.
-                match refresh_subscription(
-                    &subscriber,
-                    &operator_pubkey,
-                    ingest.repository_mut(),
-                )
-                .await
-                {
-                    Ok(()) => {
-                        last_retry_error = None;
-                        if !announced {
+                if !announced {
+                    match refresh_subscription(
+                        &subscriber,
+                        &operator_pubkey,
+                        ingest.repository_mut(),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            last_retry_error = None;
                             eprintln!("botserver connected");
                             announced = true;
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            if last_retry_error.as_ref() != Some(&message) {
+                                eprintln!("relay subscribe retry failed: {message}");
+                                last_retry_error = Some(message);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // HTTP publishes on the local Buzz relay are stored immediately
+                // but are not fanned out to operator #p websocket subscribers.
+                let since = match replay_since(ingest.repository_mut()) {
+                    Ok(since) => since,
+                    Err(error) => {
+                        eprintln!("relay subscribe retry failed: {error}");
+                        continue;
+                    }
+                };
+                match subscriber.fetch_messages(&operator_pubkey, since).await {
+                    Ok(events) => {
+                        for event in events {
+                            observe_event(&mut ingest, &event)?;
                         }
                     }
                     Err(error) => {
