@@ -1183,15 +1183,14 @@ mod tests {
 
     #[test]
     fn ready_open_occupant_is_left_bound_without_asking() {
-        let (mut actor, kelpie, runner, panes) =
-            actor([
-                adopt(),
-                start(),
-                renewed(),
-                whoami(),
-                asked("ask-1"),
-                whoami(),
-            ]);
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            whoami(),
+        ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
@@ -1211,15 +1210,14 @@ mod tests {
 
     #[test]
     fn recovery_refuses_a_namesake_twin() {
-        let (mut actor, kelpie, runner, _panes) =
-            actor([
-                adopt(),
-                start(),
-                renewed(),
-                whoami(),
-                asked("ask-1"),
-                whoami_other(),
-            ]);
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            whoami_other(),
+        ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
@@ -1306,15 +1304,14 @@ mod tests {
     fn resume_queued_asks_later_channel_when_open_recovery_fails() {
         let first_channel = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
         let second_channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
-        let (mut actor, kelpie, runner, _panes) =
-            actor([
-                adopt(),
-                whoami_other(),
-                whoami(),
-                renewed(),
-                whoami(),
-                asked("ask-2"),
-            ]);
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            whoami_other(),
+            whoami(),
+            renewed(),
+            whoami(),
+            asked("ask-2"),
+        ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         actor
             .repository
