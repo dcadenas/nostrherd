@@ -218,6 +218,7 @@ Issues that need a real relay MUST use `skills/local-relay` and
 `tools/local-relay`. Throwaway envchain namespaces `botserver-proof`
 (operator) and `botserver-proof-peer` (peer). Never `nostr-personal`
 or `buzz-acp`.
+
 ## D23. Ingest enforces Buzz mutation contracts
 
 Status: accepted
@@ -298,3 +299,18 @@ UPDATE only `queued` rows or `open` rows whose claim is clear. A claimed
 turn is treated as already landing: later edits and deletes of that
 EventId are ignored (D14 after publish). A failed publish MUST clear the
 claim so retry can proceed. Do not add a `publishing` TurnState.
+
+## D29. envchain wraps the process; binaries only read env
+
+Status: accepted
+
+`envchain NAMESPACE CMD` injects secrets into CMD's environment.
+`botcli` and `botserver` MUST read `BUZZ_PRIVATE_KEY` and
+`BUZZ_RELAY_URL` from the environment when present. They MUST NOT take
+`--envchain` and MUST NOT exec `envchain` themselves.
+
+Occupant calls look like `envchain botserver-proof botcli send --stdin
+…`, or an alias/wrapper on PATH that does that exec. The namespace name
+is not a secret. The nsec MUST NOT be standing pane-env.
+
+Supersedes the `--envchain` flag shipped in #6.

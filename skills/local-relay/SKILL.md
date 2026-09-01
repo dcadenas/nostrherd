@@ -66,15 +66,16 @@ to exercise ingest once `botserver` is running.
 
 ## Secrets in commands
 
-Wrap processes, never export into the pane:
+Wrap the **binary**, never put the nsec in pane-env or in flags:
 
 ```bash
-envchain botserver-proof botcli send --stdin --channel "$CHANNEL" --envchain botserver-proof <<'EOF'
+envchain botserver-proof botcli send --stdin --channel "$CHANNEL" <<'EOF'
 text
 EOF
 
 envchain botserver-proof botserver --config … --database …
 ```
 
-`botcli` already invokes `envchain` for `buzz messages send`. The
-`--envchain` flag is the namespace name, not a secret.
+`envchain NAMESPACE CMD` injects Buzz vars into CMD. The binaries only
+read the environment (D29). Until #24, `botcli` still accepts a leftover
+`--envchain` flag; do not add new call sites that use it.

@@ -90,8 +90,9 @@ shell-expanded argument. Occupants SHOULD use a quoted heredoc
 (`<<'EOF'`). `--body` is forbidden for agent-generated text.
 
 Host coordinates (channel, reply-to event, mention, in-flight Kelpie
-ask id) are flags, not the body. `botcli` MUST stamp `[bot]:` onto the
-body after reading it.
+ask id) are flags, not the body. There is no `--envchain` flag.
+`botcli` MUST stamp `[bot]:` onto the body after reading it.
+
 
 Stdout defaults to JSON: a receipt (`event_id`, and ask id if a Kelpie
 ask was closed). That is the CLI result, not the channel message.
@@ -110,8 +111,12 @@ git is the store of bot personality. SQLite MUST NOT store nsecs.
 
 ## Secrets
 
-Operator keys enter `botcli` via envchain (or equivalent exec). They
-MUST NOT appear in process titles, sqlite, or logs.
+Operator keys enter the process environment via an outer wrapper
+(`envchain NAMESPACE botcli …` / `envchain NAMESPACE botserver …`, or
+an alias). The binaries MUST read `BUZZ_PRIVATE_KEY` and
+`BUZZ_RELAY_URL` when set. They MUST NOT take `--envchain` and MUST
+NOT exec `envchain`. Keys MUST NOT appear in process titles, sqlite,
+logs, or standing pane-env.
 
 ## User-visible flows (v1)
 

@@ -17,20 +17,23 @@ publishes through `botcli`.
 argument. Host coordinates remain flags:
 
 ```bash
-botcli send --stdin \
+envchain botserver-proof botcli send --stdin \
   --database /path/to/botserver.sqlite \
   --ask-id <kelpie-ask-id> \
   --channel <channel-uuid> \
   --reply-to <event-id> \
-  --mention <pubkey> \
-  --envchain <namespace> <<'EOF'
+  --mention <pubkey> <<'EOF'
 reply text
 EOF
 ```
 
-The command stamps `[bot]:`, publishes through envchain, and prints a JSON
-receipt. When `--ask-id` is omitted, `--database` is omitted too and no Kelpie
-obligation is closed.
+`envchain` wraps the process. `botcli` only reads `BUZZ_PRIVATE_KEY` and
+`BUZZ_RELAY_URL` from the environment (D29). It stamps `[bot]:` and prints
+a JSON receipt. When `--ask-id` is omitted, `--database` is omitted too
+and no Kelpie obligation is closed.
+
+Until issue #24 lands, the current binary still has a leftover
+`--envchain` flag from #6.
 
 ## Read order
 
