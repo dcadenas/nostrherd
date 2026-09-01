@@ -243,6 +243,7 @@ where
             .repository
             .sessions_with_pending_turns()
             .map_err(ActorError::Repository)?;
+        let mut first_error = None;
         for session in sessions {
             if session.bot_id != *self.bot.id() {
                 continue;
@@ -271,14 +272,22 @@ where
             let Some(body) = body else {
                 continue;
             };
-            if self
-                .ask_oldest_queued(kelpie, waiter, &session.channel_id, &body)
-                .is_ok()
-            {
-                return Ok(Some(TriggerOutcome::Asked));
+            match self.ask_oldest_queued(kelpie, waiter, &session.channel_id, &body) {
+                Ok(()) => return Ok(Some(TriggerOutcome::Asked)),
+                Err(error) => {
+                    if matches!(error, ActorError::AskNotDelivered(_)) {
+                        let _ = self.repository.cancel_queued_turn(&queued.event_id);
+                    }
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
-        Ok(None)
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
 
     fn should_ask_event(
@@ -529,6 +538,19 @@ mod tests {
         }))
     }
 
+    fn failure(class: &str, message: &str) -> CommandOutput {
+        CommandOutput {
+            success: false,
+            status: "exit status: 1".to_owned(),
+            stdout: serde_json::to_vec(&serde_json::json!({
+                "id": "request-id",
+                "error": {"class": class, "message": message}
+            }))
+            .expect("json"),
+            stderr: b"kelpie: request failed".to_vec(),
+        }
+    }
+
     fn event_id(character: char) -> EventId {
         EventId::parse_hex(&character.to_string().repeat(64)).expect("event")
     }
@@ -741,6 +763,70 @@ mod tests {
             Some(TriggerOutcome::Asked)
         );
         assert_eq!(runner.calls.lock().expect("calls")[1].0[1], "start");
+    }
+
+    #[test]
+    fn resume_queued_asks_a_later_channel_when_the_first_whoami_fails() {
+        let first_channel = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let second_channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            failure("target_unavailable", "no ready occupant"),
+            whoami(),
+            asked("ask-2"),
+        ]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        for (channel, display, character, body) in [
+            (first_channel, "aaa", 'a', "bot: first"),
+            (second_channel, "foobar", 'b', "bot: second"),
+        ] {
+            actor
+                .repository
+                .save_session(&crate::SessionRecord {
+                    bot_id: actor.bot.id().clone(),
+                    channel_id: channel.to_owned(),
+                    session_name: format!("bot-{display}"),
+                    occupant_logical_id: Some("occupant-agent".to_owned()),
+                    renew_id: None,
+                })
+                .expect("session");
+            let event = event_id(character);
+            actor
+                .repository
+                .index_event(
+                    &IndexedRelayEvent {
+                        event_id: event.clone(),
+                        author_pubkey: "b".repeat(64),
+                        created_at: 1,
+                        kind: 9,
+                        content: body.to_owned(),
+                        tags_json: "[]".to_owned(),
+                        channel_id: Some(channel.to_owned()),
+                        target_event_id: None,
+                    },
+                    false,
+                )
+                .expect("index");
+            actor
+                .repository
+                .enqueue_unprocessed_turn(&NewTurn {
+                    bot_id: actor.bot.id().clone(),
+                    channel_id: channel.to_owned(),
+                    event_id: event,
+                    reply_to_event_id: None,
+                })
+                .expect("enqueue");
+        }
+
+        assert_eq!(
+            actor
+                .resume_queued(&kelpie, &waiter)
+                .expect("second channel"),
+            Some(TriggerOutcome::Asked)
+        );
+        let calls = runner.calls.lock().expect("calls");
+        assert_eq!(calls.iter().filter(|call| call.0[1] == "ask").count(), 1);
+        assert_eq!(calls.last().expect("ask").1, b"second");
     }
 
     #[test]
