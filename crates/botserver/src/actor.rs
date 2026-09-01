@@ -1542,6 +1542,7 @@ mod tests {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
             start(),
+            renewed(),
             whoami(),
             asked("ask-1"),
             cancelled(),
