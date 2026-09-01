@@ -72,8 +72,9 @@ fn run(args: &Args) -> Result<(), HostError> {
     if args.check {
         return Ok(());
     }
-    std::thread::park();
-    Ok(())
+    loop {
+        std::thread::park();
+    }
 }
 
 fn main() -> ExitCode {
