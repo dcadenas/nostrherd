@@ -328,13 +328,15 @@ fn flow_02_first_call_starts_bot_foobar_and_asks() {
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].state, TurnState::Open);
     assert_eq!(turns[0].ask_id.as_deref(), Some("ask-1"));
+    assert_eq!(turns[0].event_id.as_str(), message.id.to_hex());
     assert_eq!(harness.ask_bodies(), vec![b"hello".to_vec()]);
     assert_eq!(
         harness.panes.calls.lock().expect("panes")[0].0,
         "bot-foobar"
     );
     assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
-    assert_eq!(WAITER_NAME, "botserver");
+    let adopt = &harness.runner.calls.lock().expect("calls")[0].0;
+    assert!(adopt.windows(2).any(|pair| pair == ["--name", WAITER_NAME]));
 }
 
 #[test]
@@ -351,7 +353,11 @@ fn flow_03_follow_up_without_prefix_does_not_poke() {
         .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
         .expect("first");
 
-    let follow_up = ordinary_event(FOOBAR, "and the PR?");
+    let follow_up = event(
+        CHANNEL_KIND,
+        "and the PR?",
+        [tag(&["h", FOOBAR]), tag(&["p", &operator()])],
+    );
     assert_eq!(harness.ingest(&follow_up), None);
     assert_eq!(turns(&actor, FOOBAR).len(), 1);
     assert_eq!(
@@ -386,7 +392,8 @@ fn flow_04_second_call_reuses_the_same_occupant() {
         .set_turn_state("ask-1", TurnState::Posted)
         .expect("posted");
 
-    let second = trigger_event(FOOBAR, "@daniel bot: later", None);
+    let first_hex = first.id.to_hex();
+    let second = trigger_event(FOOBAR, "@daniel bot: later", Some(&first_hex));
     let second_action = harness.ingest(&second).expect("second");
     assert_eq!(
         actor
@@ -395,6 +402,12 @@ fn flow_04_second_call_reuses_the_same_occupant() {
         TriggerOutcome::Asked
     );
     assert_eq!(session_name(&actor, FOOBAR).as_deref(), Some("bot-foobar"));
+    let second_turn = &turns(&actor, FOOBAR)[1];
+    assert_eq!(second_turn.event_id.as_str(), second.id.to_hex());
+    assert_eq!(
+        second_turn.reply_to_event_id.as_ref().map(EventId::as_str),
+        Some(first_hex.as_str())
+    );
     assert_eq!(harness.panes.calls.lock().expect("panes").len(), 1);
     assert_eq!(
         harness
@@ -730,6 +743,38 @@ fn flow_10_claimed_turn_keeps_the_landing_reply() {
 }
 
 #[test]
+fn flow_10_posted_turn_is_left_up_after_delete() {
+    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let author = Keys::generate();
+    let operator = operator();
+    let first = event_with_keys(
+        &author,
+        CHANNEL_KIND,
+        "@daniel bot: hello",
+        [tag(&["h", FOOBAR]), tag(&["p", &operator])],
+    );
+    let action = harness.ingest(&first).expect("first");
+    let mut actor = harness.actor();
+    let waiter = harness
+        .kelpie
+        .adopt_waiter("w1:p2", "term-2")
+        .expect("waiter");
+    actor
+        .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
+        .expect("first");
+    actor
+        .repository
+        .set_turn_state("ask-1", TurnState::Posted)
+        .expect("posted");
+
+    let target = first.id.to_hex();
+    let delete = event_with_keys(&author, 5, "", [tag(&["h", FOOBAR]), tag(&["e", &target])]);
+    assert_eq!(harness.ingest(&delete), None);
+    assert_eq!(turns(&actor, FOOBAR)[0].state, TurnState::Posted);
+    assert!(harness.verbs().iter().all(|verb| verb != "cancel"));
+}
+
+#[test]
 fn flow_11_one_ask_while_the_occupant_works() {
     let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
     let message = trigger_event(FOOBAR, "@daniel bot: long job", None);
@@ -755,7 +800,8 @@ fn flow_11_one_ask_while_the_occupant_works() {
 
 #[test]
 fn flow_12_host_does_not_publish_presence_or_typing() {
-    let _subscriber = RelaySubscriber::new(nostr_sdk::Client::default());
+    let subscriber = RelaySubscriber::new(nostr_sdk::Client::default());
+    let _notifications = subscriber.notifications();
     let harness = Harness::new([]);
     for kind in [0_u16, 7, 30_315] {
         assert_eq!(harness.ingest(&event(kind, "typing", [])), None);
@@ -763,4 +809,11 @@ fn flow_12_host_does_not_publish_presence_or_typing() {
     let actor = harness.actor();
     assert!(session_name(&actor, FOOBAR).is_none());
     assert!(harness.verbs().is_empty());
+    assert!(harness
+        .runner
+        .calls
+        .lock()
+        .expect("calls")
+        .iter()
+        .all(|call| call.0.iter().all(|arg| arg != "envchain" && arg != "send")));
 }
