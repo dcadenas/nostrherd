@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn publishes_stamped_body_then_marks_posted_and_resolves_final() {
+    fn spec_flow_11_one_stamped_reply_then_final() {
         let mut repository = repository("open");
         let mut runner = FakeRunner {
             outputs: VecDeque::from([
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_turn_never_reaches_envchain() {
+    fn spec_flow_10_cancelled_turn_never_reaches_envchain() {
         let mut repository = repository("cancelled");
         let mut runner = FakeRunner {
             outputs: VecDeque::new(),

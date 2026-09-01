@@ -1273,6 +1273,9 @@ pub mod relay;
 pub mod snapshot;
 pub mod sqlite;
 
+#[cfg(test)]
+mod spec_flows;
+
 use botserver_domain::{BotId, EventId};
 
 /// Immutable relay event cached for channel snapshots.
