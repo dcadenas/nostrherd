@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use botserver_domain::{BotId, EventId};
+use botserver_domain::{BotId, EventId, TurnTransition};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
@@ -142,7 +142,7 @@ impl SqliteRepository {
                 .as_deref()
                 .map(|value| parse_event_id(value, 5))
                 .transpose()?,
-            state: TurnState::from_str(&state)
+            state: TurnState::parse(&state)
                 .ok_or_else(|| invalid_value(6, "invalid turn state"))?,
         })
     }
@@ -433,10 +433,10 @@ impl HostRepository for SqliteRepository {
     }
 
     fn set_turn_state(&mut self, ask_id: &str, state: TurnState) -> Result<bool, Self::Error> {
-        if matches!(state, TurnState::Queued | TurnState::Open) {
+        let Some(transition) = TurnTransition::parse(TurnState::Open, state) else {
             return Ok(false);
-        }
-        let sql = if state == TurnState::Cancelled {
+        };
+        let sql = if transition.to_state() == TurnState::Cancelled {
             "UPDATE turns SET state = ?1, publish_claimed = 0
              WHERE ask_id = ?2 AND state = 'open' AND publish_claimed = 0"
         } else {
@@ -445,7 +445,7 @@ impl HostRepository for SqliteRepository {
         };
         let changed = self
             .connection
-            .execute(sql, params![state.as_str(), ask_id])?;
+            .execute(sql, params![transition.to_state().as_str(), ask_id])?;
         Ok(changed == 1)
     }
 

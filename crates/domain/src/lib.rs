@@ -302,6 +302,86 @@ impl EventId {
     }
 }
 
+/// Lifecycle state of one triggered turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnState {
+    Queued,
+    Open,
+    Posted,
+    Failed,
+    Cancelled,
+}
+
+impl TurnState {
+    /// Parse a stored turn-state token.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "queued" => Some(Self::Queued),
+            "open" => Some(Self::Open),
+            "posted" => Some(Self::Posted),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
+    /// Return the stored token for this state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Open => "open",
+            Self::Posted => "posted",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl fmt::Display for TurnState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Legal change from one turn state to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnTransition {
+    from: TurnState,
+    to: TurnState,
+}
+
+impl TurnTransition {
+    /// Parse a legal turn-state change.
+    ///
+    /// Queued work may open or cancel. Open work may post, fail, or cancel.
+    /// Terminal states have no outgoing transition. There is no `publishing`
+    /// state.
+    #[must_use]
+    pub fn parse(from: TurnState, to: TurnState) -> Option<Self> {
+        let allowed = matches!(
+            (from, to),
+            (TurnState::Queued, TurnState::Open | TurnState::Cancelled)
+                | (
+                    TurnState::Open,
+                    TurnState::Posted | TurnState::Failed | TurnState::Cancelled
+                )
+        );
+        allowed.then_some(Self { from, to })
+    }
+
+    #[must_use]
+    pub fn from_state(self) -> TurnState {
+        self.from
+    }
+
+    #[must_use]
+    pub fn to_state(self) -> TurnState {
+        self.to
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +474,20 @@ mod tests {
     }
 
     #[test]
+    fn session_names_include_the_bot_id() {
+        let bot = BotId::new("bot").expect("bot");
+        let review = BotId::new("review").expect("bot");
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let bot_name =
+            SessionName::from_bot_and_channel(&bot, channel, "foobar", |_| false).expect("bot");
+        let review_name = SessionName::from_bot_and_channel(&review, channel, "foobar", |_| false)
+            .expect("review");
+        assert_eq!(bot_name.as_str(), "bot-foobar");
+        assert_eq!(review_name.as_str(), "review-foobar");
+        assert_ne!(bot_name.as_str(), review_name.as_str());
+    }
+
+    #[test]
     fn trigger_requires_operator_p_tag() {
         assert!(TriggerMatch::parse("operator", ["someone-else"], "bot: hello").is_none());
         assert_eq!(
@@ -448,5 +542,56 @@ mod tests {
         assert!(EventId::parse_hex("ab").is_none());
         let hex = "a".repeat(64);
         assert_eq!(EventId::parse_hex(&hex).map(|e| e.as_str().len()), Some(64));
+    }
+
+    #[test]
+    fn turn_state_parses_known_tokens_only() {
+        assert_eq!(TurnState::parse("queued"), Some(TurnState::Queued));
+        assert_eq!(TurnState::parse("open"), Some(TurnState::Open));
+        assert_eq!(TurnState::parse("posted"), Some(TurnState::Posted));
+        assert_eq!(TurnState::parse("failed"), Some(TurnState::Failed));
+        assert_eq!(TurnState::parse("cancelled"), Some(TurnState::Cancelled));
+        assert!(TurnState::parse("publishing").is_none());
+        assert!(TurnState::parse("Open").is_none());
+        assert_eq!(TurnState::Open.to_string(), "open");
+    }
+
+    #[test]
+    fn turn_transition_parses_legal_changes_only() {
+        let allowed = [
+            (TurnState::Queued, TurnState::Open),
+            (TurnState::Queued, TurnState::Cancelled),
+            (TurnState::Open, TurnState::Posted),
+            (TurnState::Open, TurnState::Failed),
+            (TurnState::Open, TurnState::Cancelled),
+        ];
+        for (from, to) in allowed {
+            let transition = TurnTransition::parse(from, to).expect("legal");
+            assert_eq!(transition.from_state(), from);
+            assert_eq!(transition.to_state(), to);
+        }
+        for from in [
+            TurnState::Queued,
+            TurnState::Open,
+            TurnState::Posted,
+            TurnState::Failed,
+            TurnState::Cancelled,
+        ] {
+            for to in [
+                TurnState::Queued,
+                TurnState::Open,
+                TurnState::Posted,
+                TurnState::Failed,
+                TurnState::Cancelled,
+            ] {
+                if allowed.contains(&(from, to)) {
+                    continue;
+                }
+                assert!(
+                    TurnTransition::parse(from, to).is_none(),
+                    "unexpected {from} -> {to}"
+                );
+            }
+        }
     }
 }

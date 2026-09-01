@@ -15,7 +15,8 @@ never `kelpie from=`.
 2. `docs/decision-log.md`
 3. `docs/open-questions.md` (do not invent answers)
 4. `docs/domain-model.md`
-5. `docs/testing.md` and `skills/local-relay/SKILL.md` for live tests
+5. `docs/invariants.md`
+6. `docs/testing.md` and `skills/local-relay/SKILL.md` for live tests
 
 ## Rules
 

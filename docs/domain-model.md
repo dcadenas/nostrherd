@@ -26,8 +26,9 @@ armed.
 ### Turn
 
 Work owed for one triggering Nostr event. Holds: event id, Kelpie ask
-id, state (`open`, `posted`, `failed`, `cancelled`). Completing a turn
-is `botcli` publish **then** Kelpie final, not cancel.
+id, `TurnState` (`queued`, `open`, `posted`, `failed`, `cancelled`).
+Completing a turn is `botcli` publish **then** Kelpie final, not
+cancel. Publish reservation is a claim, not a state (D28).
 
 ## Values
 
@@ -36,12 +37,9 @@ is `botcli` publish **then** Kelpie final, not cancel.
 - `TriggerMatch` — operator `p`-tag plus first token `bot:` after an
   optional mention (D8, D9). A non-prefix reply in an open thread is
   not a match.
+- `TurnState` / `TurnTransition` — parsed tokens. Illegal changes are
+  `None`.
 
 ## Invariants
 
-1. Two bots MUST NOT share a session name.
-2. A session for place A MUST NOT be given history from place B
-   (especially DMs into a channel session).
-3. Processed `EventId`s are idempotent: a replay MUST NOT open a second
-   turn.
-4. `from=` on Kelpie envelopes for this host is only `botserver`.
+Named tests live in `docs/invariants.md`.

@@ -1278,6 +1278,8 @@ mod spec_flows;
 
 use botserver_domain::{BotId, EventId};
 
+pub use botserver_domain::{TurnState, TurnTransition};
+
 /// Immutable relay event cached for channel snapshots.
 ///
 /// The relay remains the canonical message store; this record is a rebuildable
@@ -1302,39 +1304,6 @@ pub struct SessionRecord {
     pub session_name: String,
     pub occupant_logical_id: Option<String>,
     pub renew_id: Option<String>,
-}
-
-/// Lifecycle state of one triggered turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnState {
-    Queued,
-    Open,
-    Posted,
-    Failed,
-    Cancelled,
-}
-
-impl TurnState {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Open => "open",
-            Self::Posted => "posted",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "queued" => Some(Self::Queued),
-            "open" => Some(Self::Open),
-            "posted" => Some(Self::Posted),
-            "failed" => Some(Self::Failed),
-            "cancelled" => Some(Self::Cancelled),
-            _ => None,
-        }
-    }
 }
 
 /// Coordinates needed to persist a queued turn.
