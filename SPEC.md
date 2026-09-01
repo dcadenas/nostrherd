@@ -81,11 +81,27 @@ obligation or reminder.
 
 ## botcli
 
-`botcli` MUST stamp the outbound prefix. It MUST take host coordinates
-for the in-flight turn (channel, reply-to event, mention, ask id), not
-only a destination pubkey. After an accepted relay publish it MUST
-resolve the Kelpie ask as the owing occupant. Cancel MUST NOT be used
-for a successful post.
+`botcli` is a Nostr **send** tool for Herdr occupants, not a Kelpie
+client. It MUST NOT expose ask/tell/reply as its user-facing verbs.
+The occupant command is `send`.
+
+The post body MUST come from `--stdin` or `--file`, never from a
+shell-expanded argument. Occupants SHOULD use a quoted heredoc
+(`<<'EOF'`). `--body` is forbidden for agent-generated text.
+
+Host coordinates (channel, reply-to event, mention, in-flight Kelpie
+ask id) are flags, not the body. `botcli` MUST stamp `[bot]:` onto the
+body after reading it.
+
+Stdout defaults to JSON: a receipt (`event_id`, and ask id if a Kelpie
+ask was closed). That is the CLI result, not the channel message.
+Errors are JSON on stderr. A human `--text` receipt MAY be added later;
+it MUST NOT be the default.
+
+After an accepted relay publish it MUST `kelpie reply --final` as the
+owing occupant when an ask id was supplied. That is plumbing so the
+host obligation closes. Cancel MUST NOT be used for a successful post.
+`botcli` MUST NOT publish if that ask is already cancelled.
 
 ## Persistence
 

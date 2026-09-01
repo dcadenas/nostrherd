@@ -191,3 +191,12 @@ D-numbers it implements. Before coding, the agent MUST update from
 `origin/master` (not an arbitrary topic-branch pull). If HEAD differs
 from the baseline, it MUST edit the issue body (scope, acceptance,
 deps) and the baseline SHA. A comment alone is not enough.
+
+## D22. botcli is send, stdin body, JSON receipt
+
+Status: accepted
+
+`botcli` publishes to Nostr as the operator. It is not Kelpie. The
+command is `send`. Body is `--stdin` or `--file` only. Default stdout
+is a JSON receipt. Closing the Kelpie ask after a successful post is
+an implementation side effect, not the occupant-facing verb.
