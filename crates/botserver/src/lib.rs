@@ -262,34 +262,37 @@ impl KelpieClient {
         &self,
         launch: &OccupantLaunch,
         bootstrap: &str,
+        sender_id: Option<&str>,
     ) -> Result<StartedOccupant, KelpieError> {
         let timeout_ms = launch.timeout_ms.to_string();
         let cwd = launch.cwd.to_str().ok_or_else(|| {
             KelpieError::InvalidReceipt("occupant corpus path is not valid UTF-8".to_owned())
         })?;
-        let output = self.invoke(
-            &[
-                "--json",
-                "start",
-                "--name",
-                &launch.name,
-                "--pane",
-                &launch.pane_id,
-                "--terminal",
-                &launch.terminal_id,
-                "--backend",
-                &launch.backend,
-                "--cwd",
-                cwd,
-                "--timeout-ms",
-                &timeout_ms,
-                "--keep-open",
-                "--parentless",
-                "--tell",
-                "--stdin",
-            ],
-            bootstrap.as_bytes(),
-        )?;
+        let mut arguments = vec![
+            "--json".to_owned(),
+            "start".to_owned(),
+            "--name".to_owned(),
+            launch.name.clone(),
+            "--pane".to_owned(),
+            launch.pane_id.clone(),
+            "--terminal".to_owned(),
+            launch.terminal_id.clone(),
+            "--backend".to_owned(),
+            launch.backend.clone(),
+            "--cwd".to_owned(),
+            cwd.to_owned(),
+            "--timeout-ms".to_owned(),
+            timeout_ms,
+            "--keep-open".to_owned(),
+            "--parentless".to_owned(),
+            "--tell".to_owned(),
+            "--stdin".to_owned(),
+        ];
+        if let Some(sender_id) = sender_id {
+            arguments.extend(["--sender-id".to_owned(), sender_id.to_owned()]);
+        }
+        let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = self.invoke(&arguments, bootstrap.as_bytes())?;
         if !output.success {
             return Err(output.rejected());
         }
@@ -439,7 +442,28 @@ impl AdoptedWaiter<'_> {
         nostr_body: &str,
         idempotency_key: &str,
     ) -> Result<AskReceipt, KelpieError> {
+        self.ask_named(recipient, None, nostr_body, idempotency_key)
+    }
+
+    /// Send an ask and require the alias to resolve to a recorded logical id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless Kelpie returns the durable ids needed to
+    /// reconcile the attempt, or when the alias is not the recorded occupant.
+    pub fn ask_named(
+        &self,
+        recipient: &str,
+        expected_logical_id: Option<&str>,
+        nostr_body: &str,
+        idempotency_key: &str,
+    ) -> Result<AskReceipt, KelpieError> {
         let recipient = self.resolve_recipient(recipient)?;
+        if expected_logical_id.is_some_and(|expected| expected != recipient.logical_agent_id) {
+            return Err(KelpieError::InvalidReceipt(
+                "session occupant is not the recorded logical agent".to_owned(),
+            ));
+        }
         let output = self.client.invoke(
             &[
                 "--json",
@@ -732,6 +756,7 @@ mod tests {
                     timeout_ms: 90_000,
                 },
                 OCCUPANT_BOOTSTRAP,
+                None,
             )
             .expect("start occupant");
 

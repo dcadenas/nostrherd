@@ -52,6 +52,8 @@ pub enum TriggerOutcome {
     Queued,
     /// The event was already processed.
     Duplicate,
+    /// The action was acknowledged and left for a later issue.
+    Declined,
 }
 
 /// Failure while starting or asking an occupant.
@@ -67,6 +69,10 @@ pub enum ActorError<E> {
     UnnameableSession,
     /// Ask delivery was rejected or had no recipient.
     AskNotDelivered(AskDelivery),
+    /// Queued work had no indexed Nostr body.
+    MissingAskBody,
+    /// `open_next_turn` did not bind a delivered ask.
+    TurnNotOpened { ask_id: String },
 }
 
 impl<E: fmt::Display> fmt::Display for ActorError<E> {
@@ -78,6 +84,10 @@ impl<E: fmt::Display> fmt::Display for ActorError<E> {
             Self::UnnameableSession => formatter.write_str("channel cannot be named as a session"),
             Self::AskNotDelivered(delivery) => {
                 write!(formatter, "occupant ask was not delivered ({delivery:?})")
+            }
+            Self::MissingAskBody => formatter.write_str("queued turn has no indexed Nostr body"),
+            Self::TurnNotOpened { ask_id } => {
+                write!(formatter, "delivered ask {ask_id} was not bound to a turn")
             }
         }
     }
@@ -91,7 +101,11 @@ where
         match self {
             Self::Repository(error) => Some(error),
             Self::Kelpie(error) => Some(error),
-            Self::Pane(_) | Self::UnnameableSession | Self::AskNotDelivered(_) => None,
+            Self::Pane(_)
+            | Self::UnnameableSession
+            | Self::AskNotDelivered(_)
+            | Self::MissingAskBody
+            | Self::TurnNotOpened { .. } => None,
         }
     }
 }
@@ -136,7 +150,12 @@ where
         waiter: &AdoptedWaiter<'_>,
         work: &TriggerWork,
     ) -> Result<TriggerOutcome, ActorError<R::Error>> {
-        self.ensure_session(&work.channel_id, &work.channel_display)?;
+        let display = if work.channel_display.is_empty() {
+            work.channel_id.as_str()
+        } else {
+            work.channel_display.as_str()
+        };
+        self.ensure_session(&work.channel_id, display)?;
         let Some(_) = self
             .repository
             .enqueue_unprocessed_turn(&NewTurn {
@@ -154,6 +173,50 @@ where
         }
         self.ask_oldest_queued(kelpie, waiter, &work.channel_id, &work.nostr_body)?;
         Ok(TriggerOutcome::Asked)
+    }
+
+    /// Handle one ingest action for this bot.
+    ///
+    /// Turn candidates start or ask the occupant. Edits and deletes are
+    /// acknowledged without changing turns; those transitions belong to a later
+    /// issue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence, pane allocation, or Kelpie fails.
+    pub fn handle_ingest(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &AdoptedWaiter<'_>,
+        action: &crate::relay::IngestAction,
+        channel_display: &str,
+        nostr_body: &str,
+    ) -> Result<TriggerOutcome, ActorError<R::Error>> {
+        match action {
+            crate::relay::IngestAction::TurnCandidate {
+                event_id,
+                channel_id,
+                reply_to_event_id,
+                trigger: _,
+            } => self.handle_trigger(
+                kelpie,
+                waiter,
+                &TriggerWork {
+                    event_id: event_id.clone(),
+                    channel_id: channel_id.clone(),
+                    channel_display: channel_display.to_owned(),
+                    reply_to_event_id: reply_to_event_id.clone(),
+                    nostr_body: nostr_body.to_owned(),
+                },
+            ),
+            crate::relay::IngestAction::Edit { event_id, .. }
+            | crate::relay::IngestAction::Delete { event_id, .. } => {
+                self.repository
+                    .mark_event_processed(event_id)
+                    .map_err(ActorError::Repository)?;
+                Ok(TriggerOutcome::Declined)
+            }
+        }
     }
 
     /// Start or ask the oldest queued turn that has no open sibling.
@@ -193,7 +256,8 @@ where
                 .indexed_event(&queued.event_id)
                 .map_err(ActorError::Repository)?
                 .map(|event| event.content)
-                .unwrap_or_default();
+                .filter(|content| !content.is_empty())
+                .ok_or(ActorError::MissingAskBody)?;
             self.ask_oldest_queued(kelpie, waiter, &session.channel_id, &body)?;
             return Ok(Some(TriggerOutcome::Asked));
         }
@@ -232,23 +296,28 @@ where
             .map_err(ActorError::Repository)?
             .ok_or(ActorError::UnnameableSession)?;
         if session.occupant_logical_id.is_none() {
-            let occupant = self.start_occupant(kelpie, &session)?;
+            let occupant = self.start_occupant(kelpie, waiter, &session)?;
             session.occupant_logical_id = Some(occupant.logical_agent_id().to_owned());
             self.repository
                 .save_session(&session)
                 .map_err(ActorError::Repository)?;
         }
-        let event_id = self
+        let queued = self
             .repository
             .turns_for_session(self.bot.id(), channel_id)
             .map_err(ActorError::Repository)?
             .into_iter()
             .filter(|turn| turn.state == TurnState::Queued)
             .min_by_key(|turn| turn.sequence)
-            .ok_or(ActorError::UnnameableSession)?
-            .event_id;
+            .ok_or(ActorError::UnnameableSession)?;
+        let idempotency_key = format!("{}:{}", queued.event_id.as_str(), queued.sequence);
         let receipt = waiter
-            .ask(&session.session_name, nostr_body, event_id.as_str())
+            .ask_named(
+                &session.session_name,
+                session.occupant_logical_id.as_deref(),
+                nostr_body,
+                &idempotency_key,
+            )
             .map_err(ActorError::Kelpie)?;
         match receipt.delivery() {
             AskDelivery::Accepted | AskDelivery::Unknown => {}
@@ -259,13 +328,16 @@ where
         self.repository
             .open_next_turn(self.bot.id(), channel_id, receipt.message_id())
             .map_err(ActorError::Repository)?
-            .ok_or(ActorError::UnnameableSession)?;
+            .ok_or_else(|| ActorError::TurnNotOpened {
+                ask_id: receipt.message_id().to_owned(),
+            })?;
         Ok(())
     }
 
     fn start_occupant(
         &self,
         kelpie: &KelpieClient,
+        waiter: &AdoptedWaiter<'_>,
         session: &SessionRecord,
     ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
         let pane = self
@@ -283,6 +355,7 @@ where
                     timeout_ms: OCCUPANT_START_TIMEOUT_MS,
                 },
                 OCCUPANT_BOOTSTRAP,
+                Some(waiter.identity().logical_agent_id()),
             )
             .map_err(ActorError::Kelpie)
     }
@@ -526,8 +599,13 @@ mod tests {
         );
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls[1].0[1], "start");
+        assert!(calls[1].0.windows(2).any(|pair| pair == ["--sender-id", "waiter-agent"]));
         assert_eq!(calls[1].1, OCCUPANT_BOOTSTRAP.as_bytes());
         assert_eq!(calls[3].0[1], "ask");
+        assert_eq!(
+            calls[3].0[calls[3].0.iter().position(|arg| arg == "--idempotency-key").expect("key") + 1],
+            format!("{}:1", trigger.event_id.as_str())
+        );
         assert_eq!(calls[3].1, trigger.nostr_body.as_bytes());
         assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
         assert_eq!(WAITER_NAME, "botserver");
@@ -638,5 +716,58 @@ mod tests {
             Some(TriggerOutcome::Asked)
         );
         assert_eq!(runner.calls.lock().expect("calls")[1].0[1], "start");
+    }
+
+    #[test]
+    fn resume_queued_without_indexed_body_is_an_error() {
+        let (mut actor, kelpie, _runner, _panes) = actor([adopt()]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+        actor
+            .ensure_session(&trigger.channel_id, &trigger.channel_display)
+            .expect("session");
+        actor
+            .repository
+            .enqueue_unprocessed_turn(&NewTurn {
+                bot_id: actor.bot.id().clone(),
+                channel_id: trigger.channel_id.clone(),
+                event_id: trigger.event_id.clone(),
+                reply_to_event_id: None,
+            })
+            .expect("enqueue");
+
+        let error = actor.resume_queued(&kelpie, &waiter).expect_err("body");
+        assert!(error.to_string().contains("no indexed Nostr body"));
+    }
+
+    #[test]
+    fn ingest_turn_candidate_uses_the_actor_path() {
+        let (mut actor, kelpie, _runner, _panes) = actor([adopt(), start(), whoami(), asked("ask-1")]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let trigger = work('a', "@daniel bot: hello", Some('c'));
+        let action = crate::relay::IngestAction::TurnCandidate {
+            event_id: trigger.event_id.clone(),
+            channel_id: trigger.channel_id.clone(),
+            reply_to_event_id: trigger.reply_to_event_id.clone(),
+            trigger: botserver_domain::TriggerMatch::parse(
+                "operator",
+                ["operator"],
+                "@daniel bot: hello",
+            )
+            .expect("trigger"),
+        };
+
+        assert_eq!(
+            actor
+                .handle_ingest(
+                    &kelpie,
+                    &waiter,
+                    &action,
+                    &trigger.channel_display,
+                    &trigger.nostr_body
+                )
+                .expect("ingest"),
+            TriggerOutcome::Asked
+        );
     }
 }
