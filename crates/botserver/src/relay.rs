@@ -127,8 +127,8 @@ impl<R: HostRepository> RelayIngest<R> {
         repository: R,
     ) -> Self {
         Self {
-            operator_pubkey: operator_pubkey.into(),
-            relay_pubkey: relay_pubkey.into(),
+            operator_pubkey: operator_pubkey.into().to_ascii_lowercase(),
+            relay_pubkey: relay_pubkey.into().to_ascii_lowercase(),
             repository,
         }
     }
@@ -137,8 +137,10 @@ impl<R: HostRepository> RelayIngest<R> {
     ///
     /// Replayed event ids return `Ok(None)` after downstream processing. Ordinary
     /// kind 9 channel messages are indexed but do not emit an action. Consumers
-    /// atomically persist a trigger candidate; after handling an edit or delete,
-    /// they mark that mutation event processed.
+    /// atomically persist a trigger candidate. Every emitted action must be
+    /// acknowledged with [`HostRepository::mark_event_processed`], including
+    /// actions the consumer intentionally declines; turn enqueue does this
+    /// atomically for accepted trigger candidates.
     ///
     /// # Errors
     ///
@@ -233,14 +235,24 @@ impl<R: HostRepository> RelayIngest<R> {
         let channel_id = channel_id?;
         let mut skipped_attribution = false;
         let p_tags = tag_values(tags, "p").filter(|pubkey| {
-            if !skipped_attribution && author.attribution_p_tag.as_deref() == Some(*pubkey) {
+            if !skipped_attribution
+                && author
+                    .attribution_p_tag
+                    .as_deref()
+                    .is_some_and(|attribution| attribution.eq_ignore_ascii_case(pubkey))
+            {
                 skipped_attribution = true;
                 false
             } else {
                 true
             }
         });
-        let trigger = TriggerMatch::parse(&self.operator_pubkey, p_tags, content)?;
+        let p_tags = p_tags.map(str::to_ascii_lowercase).collect::<Vec<_>>();
+        let trigger = TriggerMatch::parse(
+            &self.operator_pubkey,
+            p_tags.iter().map(String::as_str),
+            content,
+        )?;
         Some(IngestAction::TurnCandidate {
             event_id,
             channel_id,
@@ -431,14 +443,14 @@ fn effective_author(
     }
     if let Some(actor) = tag_values(tags, "actor").find(|value| is_pubkey(value)) {
         return EffectiveAuthor {
-            pubkey: actor.to_owned(),
+            pubkey: actor.to_ascii_lowercase(),
             attribution_p_tag: None,
         };
     }
     if let Some(author) = tag_values(tags, "p").find(|value| is_pubkey(value)) {
         return EffectiveAuthor {
-            pubkey: author.to_owned(),
-            attribution_p_tag: Some(author.to_owned()),
+            pubkey: author.to_ascii_lowercase(),
+            attribution_p_tag: Some(author.to_ascii_lowercase()),
         };
     }
     EffectiveAuthor {
@@ -758,7 +770,9 @@ mod tests {
     #[test]
     fn relay_signed_actor_can_edit_its_trigger() {
         let operator = "a".repeat(64);
-        let actor = "c".repeat(64);
+        let actor = Keys::generate();
+        let actor_pubkey = actor.public_key().to_hex();
+        let uppercase_actor = actor_pubkey.to_ascii_uppercase();
         let relay = Keys::generate();
         let relay_pubkey = relay.public_key().to_hex();
         let mut ingest = RelayIngest::new(&operator, relay_pubkey, FakeRepository::default());
@@ -768,7 +782,7 @@ mod tests {
             "bot: original",
             [
                 tag(&["h", "channel"]),
-                tag(&["actor", &actor]),
+                tag(&["actor", &uppercase_actor]),
                 tag(&["p", &operator]),
             ],
         );
@@ -785,14 +799,14 @@ mod tests {
                 .unwrap()
                 .expect("indexed")
                 .author_pubkey,
-            actor
+            actor_pubkey
         );
         ingest.repository.active_event_id = Some(target.clone());
         let edit = event_with_keys(
-            &relay,
+            &actor,
             MESSAGE_EDIT_KIND,
             "bot: replacement",
-            [tag(&["actor", &actor]), tag(&["e", target.as_str()])],
+            [tag(&["e", target.as_str()])],
         );
         assert!(matches!(
             ingest.ingest(&edit).unwrap(),

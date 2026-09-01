@@ -227,4 +227,6 @@ unprocessed actionable event; with none pending it overlaps the newest
 indexed timestamp by Buzz's 15-minute accepted clock drift. The host
 refreshes subscriptions when known channels or active EventIds change;
 an empty set closes its corresponding subscription rather than widening
-it.
+it. The consumer MUST acknowledge every emitted ingest action, including
+actions it intentionally declines, so declined work cannot pin the replay
+cursor indefinitely.

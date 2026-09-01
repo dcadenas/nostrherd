@@ -805,7 +805,10 @@ pub struct TurnRecord {
 pub trait HostRepository {
     type Error;
 
-    /// Mark an event processed, returning false when it was already recorded.
+    /// Acknowledge an emitted ingest action, returning false if already acknowledged.
+    ///
+    /// Consumers must acknowledge every emitted action, including actions they
+    /// intentionally decline, so it no longer holds the relay replay cursor.
     ///
     /// # Errors
     ///
@@ -814,7 +817,9 @@ pub trait HostRepository {
 
     /// Index a relay event without consuming its processing marker.
     ///
-    /// Returns false when the event id was already indexed.
+    /// `pending_action` records that the classifier emitted an action whose
+    /// acknowledgement must precede cursor advancement. Returns false when the
+    /// event id was already indexed.
     ///
     /// # Errors
     ///
@@ -840,6 +845,10 @@ pub trait HostRepository {
     fn indexed_event(&self, event_id: &EventId) -> Result<Option<IndexedRelayEvent>, Self::Error>;
 
     /// Return a safe inclusive relay replay cursor.
+    ///
+    /// This is the oldest unacknowledged pending action timestamp, or the newest
+    /// indexed timestamp minus the relay's accepted clock drift when none await
+    /// acknowledgement. An empty index returns `None`.
     ///
     /// # Errors
     ///
