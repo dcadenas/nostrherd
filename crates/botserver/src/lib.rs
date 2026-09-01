@@ -466,8 +466,8 @@ impl KelpieClient {
         }
         let output = self.invoke(&arguments, &[])?;
         if !output.success {
-            if already_adopted(&output.receipt) {
-                return self.identity_from_whoami(name);
+            if let Some(incarnation_id) = already_adopted_incarnation(&output.receipt) {
+                return self.identity_from_whoami(name, incarnation_id);
             }
             return Err(output.rejected());
         }
@@ -483,16 +483,26 @@ impl KelpieClient {
         })
     }
 
-    fn identity_from_whoami(&self, name: &str) -> Result<WaiterIdentity, KelpieError> {
+    fn identity_from_whoami(
+        &self,
+        name: &str,
+        expected_incarnation: &str,
+    ) -> Result<WaiterIdentity, KelpieError> {
         let output = self.invoke(&["--json", "whoami", name], &[])?;
         if !output.success {
             return Err(output.rejected());
         }
         let result = result(&output.receipt)?;
-        Ok(WaiterIdentity {
+        let identity = WaiterIdentity {
             logical_agent_id: field(result, "logical_agent_id")?,
             incarnation_id: field(result, "incarnation_id")?,
-        })
+        };
+        if identity.incarnation_id() != expected_incarnation {
+            return Err(KelpieError::InvalidReceipt(
+                "already-adopted pane is not the waiter alias".to_owned(),
+            ));
+        }
+        Ok(identity)
     }
 
     fn invoke(&self, arguments: &[&str], stdin: &[u8]) -> Result<InvocationOutput, KelpieError> {
@@ -751,12 +761,17 @@ fn occupant_alias_unbound(receipt: &Value) -> bool {
             .is_some_and(|message| message.contains("no ready agent for alias"))
 }
 
-fn already_adopted(receipt: &Value) -> bool {
-    error_class(receipt) == Some("conflict")
-        && receipt
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .is_some_and(|message| message.contains("already adopted by ready incarnation"))
+fn already_adopted_incarnation(receipt: &Value) -> Option<&str> {
+    if error_class(receipt) != Some("conflict") {
+        return None;
+    }
+    let message = receipt.pointer("/error/message").and_then(Value::as_str)?;
+    let remainder = message.rsplit_once("already adopted by ready incarnation ")?;
+    remainder
+        .1
+        .split_whitespace()
+        .next()
+        .filter(|id| !id.is_empty())
 }
 
 fn result(receipt: &Value) -> Result<&Value, KelpieError> {
@@ -938,6 +953,28 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn adopt_waiter_rejects_an_already_bound_pane_under_another_alias() {
+        let runner = Arc::new(FakeRunner::new([
+            failure(
+                "conflict",
+                "exact live binding is already adopted by ready incarnation other-incarnation",
+            ),
+            success(&serde_json::json!({
+                "logical_agent_id": "waiter-agent",
+                "incarnation_id": "waiter-incarnation",
+                "public_name": "botserver"
+            })),
+        ]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        let error = client
+            .adopt_waiter("w1:p2", "term-2")
+            .expect_err("mismatched incarnation");
+        assert!(error
+            .to_string()
+            .contains("already-adopted pane is not the waiter alias"));
     }
 
     #[test]

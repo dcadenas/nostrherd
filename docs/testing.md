@@ -81,6 +81,8 @@ CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
 OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
 
 # Waiter pane: a live Herdr agent named botserver, then the host binary.
+# Skip herdr agent start when that pane is already the ready waiter; adopt reuses it.
+rm -f "$PROOF/host.sqlite"
 PANE=$(herdr tab create --cwd "$ROOT" --label botserver-host --no-focus \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
 herdr agent start botserver --kind opencode --pane "$PANE" -- --auto
@@ -103,8 +105,24 @@ env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
-# OCCUPANT_PANE is observed_pane_id for that session occupant in:
-# kelpie --json report --live
+OCCUPANT_PANE=$(kelpie --json report --live | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+found=[]
+def walk(obj):
+    if isinstance(obj, dict):
+        incs=obj.get("incarnations")
+        if incs and obj.get("public_name") and str(obj.get("public_name")).startswith("bot-"):
+            pane=(incs[0] or {}).get("observed_pane_id")
+            if pane:
+                found.append(pane)
+        for v in obj.values():
+            walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            walk(v)
+walk(d.get("result") or d)
+print(found[-1] if found else "")
+')
 HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   "$ROOT/target/debug/botcli" send --stdin \
   --database "$PROOF/host.sqlite" \
