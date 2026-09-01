@@ -1891,8 +1891,14 @@ mod tests {
 
     #[test]
     fn ingest_edit_of_queued_work_replaces_without_a_second_ask() {
-        let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            whoami(),
+        ]);
         let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
         let first = work('a', "first", None);
         let second = work('b', "second", None);
