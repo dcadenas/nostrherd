@@ -38,8 +38,7 @@ impl SqliteRepository {
              ) STRICT;
 
              CREATE TABLE IF NOT EXISTS relay_events (
-                 event_id TEXT PRIMARY KEY NOT NULL
-                     REFERENCES processed_events(event_id),
+                 event_id TEXT PRIMARY KEY NOT NULL,
                  author_pubkey TEXT NOT NULL CHECK(length(author_pubkey) = 64),
                  created_at INTEGER NOT NULL,
                  kind INTEGER NOT NULL,
@@ -149,22 +148,13 @@ impl HostRepository for SqliteRepository {
         Ok(changed == 1)
     }
 
-    fn index_unprocessed_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error> {
-        let transaction = self.connection.transaction()?;
-        let changed = transaction.execute(
-            "INSERT INTO processed_events(event_id) VALUES (?1)
-             ON CONFLICT(event_id) DO NOTHING",
-            [event.event_id.as_str()],
-        )?;
-        if changed == 0 {
-            transaction.commit()?;
-            return Ok(false);
-        }
-        transaction.execute(
+    fn index_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error> {
+        let changed = self.connection.execute(
             "INSERT INTO relay_events(
                  event_id, author_pubkey, created_at, kind, content, tags_json,
                  channel_id, target_event_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(event_id) DO NOTHING",
             params![
                 event.event_id.as_str(),
                 event.author_pubkey,
@@ -176,8 +166,28 @@ impl HostRepository for SqliteRepository {
                 event.target_event_id.as_ref().map(EventId::as_str),
             ],
         )?;
-        transaction.commit()?;
-        Ok(true)
+        Ok(changed == 1)
+    }
+
+    fn event_processed(&self, event_id: &EventId) -> Result<bool, Self::Error> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM processed_events WHERE event_id = ?1)",
+            [event_id.as_str()],
+            |row| row.get(0),
+        )
+    }
+
+    fn indexed_event(&self, event_id: &EventId) -> Result<Option<IndexedRelayEvent>, Self::Error> {
+        self.connection
+            .query_row(
+                "SELECT event_id, author_pubkey, created_at, kind, content, tags_json,
+                        channel_id, target_event_id
+                 FROM relay_events
+                 WHERE event_id = ?1",
+                [event_id.as_str()],
+                Self::read_indexed_event,
+            )
+            .optional()
     }
 
     fn indexed_events_for_channel(
@@ -497,8 +507,28 @@ mod tests {
             target_event_id: None,
         };
 
-        assert!(repository.index_unprocessed_event(&event).unwrap());
-        assert!(!repository.index_unprocessed_event(&event).unwrap());
+        assert!(repository.index_event(&event).unwrap());
+        assert!(!repository.index_event(&event).unwrap());
+        assert!(!repository.event_processed(&event.event_id).unwrap());
+        assert_eq!(
+            repository.indexed_event(&event.event_id).unwrap(),
+            Some(event.clone())
+        );
+
+        let bot_id = BotId::new("bot").expect("bot");
+        repository
+            .save_session(&session(&bot_id, "channel"))
+            .unwrap();
+        assert!(repository
+            .enqueue_unprocessed_turn(&NewTurn {
+                bot_id,
+                channel_id: "channel".to_owned(),
+                event_id: event.event_id.clone(),
+                reply_to_event_id: None,
+            })
+            .unwrap()
+            .is_some());
+        assert!(repository.event_processed(&event.event_id).unwrap());
 
         assert_eq!(
             repository.indexed_events_for_channel("channel").unwrap(),

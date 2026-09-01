@@ -3,7 +3,10 @@
 use std::fmt;
 
 use botserver_domain::{EventId, TriggerMatch};
-use nostr_sdk::prelude::{Client, Event, Filter, Kind, RelayPoolNotification, SubscriptionId};
+use nostr_sdk::prelude::{
+    Alphabet, Client, Event, Filter, Kind, RelayPoolNotification, SingleLetterTag, SubscriptionId,
+    Timestamp,
+};
 
 use crate::{HostRepository, IndexedRelayEvent};
 
@@ -149,9 +152,10 @@ impl<R: HostRepository> RelayIngest<R> {
             .collect::<Vec<_>>();
         let channel_id = tag_value(&tags, "h").map(ToOwned::to_owned);
         let target_event_id = target_event_id(&tags);
+        let author_pubkey = event.pubkey.to_hex();
         let indexed = IndexedRelayEvent {
             event_id: event_id.clone(),
-            author_pubkey: event.pubkey.to_hex(),
+            author_pubkey: author_pubkey.clone(),
             created_at: i64::try_from(event.created_at.as_secs())
                 .map_err(|_| IngestError::InvalidCreatedAt(event.created_at.as_secs()))?,
             kind: event.kind.as_u16(),
@@ -160,9 +164,12 @@ impl<R: HostRepository> RelayIngest<R> {
             channel_id: channel_id.clone(),
             target_event_id: target_event_id.clone(),
         };
-        if !self
+        self.repository
+            .index_event(&indexed)
+            .map_err(IngestError::Repository)?;
+        if self
             .repository
-            .index_unprocessed_event(&indexed)
+            .event_processed(&event_id)
             .map_err(IngestError::Repository)?
         {
             return Ok(None);
@@ -172,8 +179,15 @@ impl<R: HostRepository> RelayIngest<R> {
             CHANNEL_MESSAGE_KIND => {
                 Ok(self.message_action(event_id, channel_id, &tags, &event.content))
             }
-            MESSAGE_EDIT_KIND => self.edit_action(event_id, target_event_id, &event.content),
-            NIP09_DELETE_KIND | BUZZ_DELETE_KIND => self.delete_action(event_id, target_event_id),
+            MESSAGE_EDIT_KIND => {
+                self.edit_action(event_id, target_event_id, &author_pubkey, &event.content)
+            }
+            NIP09_DELETE_KIND | BUZZ_DELETE_KIND => self.delete_action(
+                event_id,
+                target_event_id,
+                &author_pubkey,
+                event.kind.as_u16(),
+            ),
             _ => Ok(None),
         }
     }
@@ -206,11 +220,22 @@ impl<R: HostRepository> RelayIngest<R> {
         &self,
         event_id: EventId,
         target_event_id: Option<EventId>,
+        author_pubkey: &str,
         content: &str,
     ) -> Result<Option<IngestAction>, IngestError<R::Error>> {
         let Some(target_event_id) = target_event_id else {
             return Ok(None);
         };
+        let Some(target) = self
+            .repository
+            .indexed_event(&target_event_id)
+            .map_err(IngestError::Repository)?
+        else {
+            return Ok(None);
+        };
+        if target.author_pubkey != author_pubkey {
+            return Ok(None);
+        }
         if self
             .repository
             .active_turn_for_event(&target_event_id)
@@ -219,6 +244,7 @@ impl<R: HostRepository> RelayIngest<R> {
         {
             return Ok(None);
         }
+        // An active target already proved the original event p-tagged the operator.
         let replacement =
             TriggerMatch::parse(&self.operator_pubkey, [&self.operator_pubkey], content);
         Ok(Some(IngestAction::Edit {
@@ -232,10 +258,24 @@ impl<R: HostRepository> RelayIngest<R> {
         &self,
         event_id: EventId,
         target_event_id: Option<EventId>,
+        author_pubkey: &str,
+        kind: u16,
     ) -> Result<Option<IngestAction>, IngestError<R::Error>> {
         let Some(target_event_id) = target_event_id else {
             return Ok(None);
         };
+        let Some(target) = self
+            .repository
+            .indexed_event(&target_event_id)
+            .map_err(IngestError::Repository)?
+        else {
+            return Ok(None);
+        };
+        // Buzz kind 9005 is a relay-authorized moderator tombstone. NIP-09
+        // kind 5 must be signed by the target event's author.
+        if kind == NIP09_DELETE_KIND && target.author_pubkey != author_pubkey {
+            return Ok(None);
+        }
         if self
             .repository
             .active_turn_for_event(&target_event_id)
@@ -264,21 +304,33 @@ impl RelaySubscriber {
         Self { client }
     }
 
-    /// Subscribe to the event kinds consumed by [`RelayIngest`].
+    /// Subscribe to operator mentions, known channels, and active-turn mutations.
     ///
     /// # Errors
     ///
     /// Returns an SDK error when no connected relay accepts the subscription.
-    pub async fn subscribe(&self) -> Result<(), RelaySubscribeError> {
-        let filter = Filter::new().kinds([
-            Kind::Custom(CHANNEL_MESSAGE_KIND),
-            Kind::Custom(MESSAGE_EDIT_KIND),
-            Kind::Custom(NIP09_DELETE_KIND),
-            Kind::Custom(BUZZ_DELETE_KIND),
-        ]);
+    pub async fn subscribe(
+        &self,
+        operator_pubkey: &str,
+        channel_ids: &[String],
+        active_event_ids: &[EventId],
+        since: Timestamp,
+    ) -> Result<(), RelaySubscribeError> {
+        self.subscribe_filter("botserver-messages", message_filter(operator_pubkey, since))
+            .await?;
+        if let Some(filter) = channel_filter(channel_ids, since) {
+            self.subscribe_filter("botserver-channels", filter).await?;
+        }
+        if let Some(filter) = mutation_filter(active_event_ids, since) {
+            self.subscribe_filter("botserver-mutations", filter).await?;
+        }
+        Ok(())
+    }
+
+    async fn subscribe_filter(&self, id: &str, filter: Filter) -> Result<(), RelaySubscribeError> {
         let output = self
             .client
-            .subscribe_with_id(SubscriptionId::new("botserver-ingest"), filter, None)
+            .subscribe_with_id(SubscriptionId::new(id), filter, None)
             .await?;
         if output.success.is_empty() {
             return Err(RelaySubscribeError::NoRelayAccepted);
@@ -308,7 +360,9 @@ fn tag_values<'a>(tags: &'a [Vec<String>], name: &'a str) -> impl Iterator<Item 
 }
 
 fn target_event_id(tags: &[Vec<String>]) -> Option<EventId> {
-    tag_values(tags, "e").find_map(EventId::parse_hex)
+    let mut targets = tag_values(tags, "e").filter_map(EventId::parse_hex);
+    let target = targets.next()?;
+    targets.next().is_none().then_some(target)
 }
 
 fn reply_target(tags: &[Vec<String>]) -> Option<EventId> {
@@ -320,8 +374,51 @@ fn reply_target(tags: &[Vec<String>]) -> Option<EventId> {
     })
 }
 
+fn message_filter(operator_pubkey: &str, since: Timestamp) -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(CHANNEL_MESSAGE_KIND))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), operator_pubkey)
+        .since(since)
+}
+
+fn channel_filter(channel_ids: &[String], since: Timestamp) -> Option<Filter> {
+    if channel_ids.is_empty() {
+        return None;
+    }
+    Some(
+        Filter::new()
+            .kind(Kind::Custom(CHANNEL_MESSAGE_KIND))
+            .custom_tags(
+                SingleLetterTag::lowercase(Alphabet::H),
+                channel_ids.iter().map(String::as_str),
+            )
+            .since(since),
+    )
+}
+
+fn mutation_filter(active_event_ids: &[EventId], since: Timestamp) -> Option<Filter> {
+    if active_event_ids.is_empty() {
+        return None;
+    }
+    Some(
+        Filter::new()
+            .kinds([
+                Kind::Custom(MESSAGE_EDIT_KIND),
+                Kind::Custom(NIP09_DELETE_KIND),
+                Kind::Custom(BUZZ_DELETE_KIND),
+            ])
+            .custom_tags(
+                SingleLetterTag::lowercase(Alphabet::E),
+                active_event_ids.iter().map(EventId::as_str),
+            )
+            .since(since),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use botserver_domain::BotId;
     use nostr_sdk::prelude::{EventBuilder, Keys, Tag};
 
@@ -331,6 +428,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeRepository {
         indexed: Vec<IndexedRelayEvent>,
+        processed: HashSet<EventId>,
         active_event_id: Option<EventId>,
     }
 
@@ -338,13 +436,10 @@ mod tests {
         type Error = std::convert::Infallible;
 
         fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
-            Ok(!self.indexed.iter().any(|event| &event.event_id == event_id))
+            Ok(self.processed.insert(event_id.clone()))
         }
 
-        fn index_unprocessed_event(
-            &mut self,
-            event: &IndexedRelayEvent,
-        ) -> Result<bool, Self::Error> {
+        fn index_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error> {
             if self
                 .indexed
                 .iter()
@@ -354,6 +449,21 @@ mod tests {
             }
             self.indexed.push(event.clone());
             Ok(true)
+        }
+
+        fn event_processed(&self, event_id: &EventId) -> Result<bool, Self::Error> {
+            Ok(self.processed.contains(event_id))
+        }
+
+        fn indexed_event(
+            &self,
+            event_id: &EventId,
+        ) -> Result<Option<IndexedRelayEvent>, Self::Error> {
+            Ok(self
+                .indexed
+                .iter()
+                .find(|event| &event.event_id == event_id)
+                .cloned())
         }
 
         fn indexed_events_for_channel(
@@ -447,9 +557,18 @@ mod tests {
     }
 
     fn event(kind: u16, content: &str, tags: impl IntoIterator<Item = Tag>) -> Event {
+        event_with_keys(&Keys::generate(), kind, content, tags)
+    }
+
+    fn event_with_keys(
+        keys: &Keys,
+        kind: u16,
+        content: &str,
+        tags: impl IntoIterator<Item = Tag>,
+    ) -> Event {
         EventBuilder::new(Kind::Custom(kind), content)
             .tags(tags)
-            .sign_with_keys(&Keys::generate())
+            .sign_with_keys(keys)
             .expect("event")
     }
 
@@ -504,6 +623,10 @@ mod tests {
         assert_eq!(channel_id, "channel");
         assert_eq!(reply_to_event_id.expect("reply").as_str(), reply);
         assert_eq!(trigger.request(), "inspect this");
+        ingest
+            .repository
+            .mark_event_processed(&EventId::parse_hex(&message.id.to_hex()).expect("id"))
+            .unwrap();
         assert_eq!(ingest.ingest(&message).unwrap(), None);
     }
 
@@ -511,17 +634,21 @@ mod tests {
     fn edits_and_deletes_emit_only_for_active_turns() {
         let operator = "a".repeat(64);
         let target = EventId::parse_hex(&"b".repeat(64)).expect("target");
+        let author = Keys::generate();
         let repository = FakeRepository {
-            indexed: Vec::new(),
+            indexed: vec![indexed_target(&target, &author)],
+            processed: HashSet::new(),
             active_event_id: Some(target.clone()),
         };
         let mut ingest = RelayIngest::new(&operator, repository);
-        let edit = event(
+        let edit = event_with_keys(
+            &author,
             MESSAGE_EDIT_KIND,
             "bot: replacement",
             [tag(&["h", "channel"]), tag(&["e", target.as_str()])],
         );
-        let delete = event(
+        let delete = event_with_keys(
+            &author,
             BUZZ_DELETE_KIND,
             "",
             [tag(&["h", "channel"]), tag(&["e", target.as_str()])],
@@ -551,12 +678,15 @@ mod tests {
     fn edits_that_remove_the_trigger_emit_without_replacement_work() {
         let operator = "a".repeat(64);
         let target = EventId::parse_hex(&"b".repeat(64)).expect("target");
+        let author = Keys::generate();
         let repository = FakeRepository {
-            indexed: Vec::new(),
+            indexed: vec![indexed_target(&target, &author)],
+            processed: HashSet::new(),
             active_event_id: Some(target.clone()),
         };
         let mut ingest = RelayIngest::new(operator, repository);
-        let edit = event(
+        let edit = event_with_keys(
+            &author,
             MESSAGE_EDIT_KIND,
             "human reply now",
             [tag(&["e", target.as_str()])],
@@ -569,5 +699,123 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn third_party_edits_and_nip09_deletes_are_ignored() {
+        let operator = "a".repeat(64);
+        let target = EventId::parse_hex(&"b".repeat(64)).expect("target");
+        let author = Keys::generate();
+        let repository = FakeRepository {
+            indexed: vec![indexed_target(&target, &author)],
+            processed: HashSet::new(),
+            active_event_id: Some(target.clone()),
+        };
+        let mut ingest = RelayIngest::new(operator, repository);
+        let attacker = Keys::generate();
+        let edit = event_with_keys(
+            &attacker,
+            MESSAGE_EDIT_KIND,
+            "bot: injected",
+            [tag(&["e", target.as_str()])],
+        );
+        let delete = event_with_keys(
+            &attacker,
+            NIP09_DELETE_KIND,
+            "",
+            [tag(&["e", target.as_str()])],
+        );
+        let moderator_delete = event_with_keys(
+            &attacker,
+            BUZZ_DELETE_KIND,
+            "",
+            [tag(&["e", target.as_str()])],
+        );
+
+        assert_eq!(ingest.ingest(&edit).unwrap(), None);
+        assert_eq!(ingest.ingest(&delete).unwrap(), None);
+        assert!(matches!(
+            ingest.ingest(&moderator_delete).unwrap(),
+            Some(IngestAction::Delete { .. })
+        ));
+    }
+
+    #[test]
+    fn mutations_with_multiple_targets_are_ignored() {
+        let target = EventId::parse_hex(&"b".repeat(64)).expect("target");
+        let author = Keys::generate();
+        let repository = FakeRepository {
+            indexed: vec![indexed_target(&target, &author)],
+            processed: HashSet::new(),
+            active_event_id: Some(target.clone()),
+        };
+        let mut ingest = RelayIngest::new("a".repeat(64), repository);
+        let delete = event_with_keys(
+            &author,
+            NIP09_DELETE_KIND,
+            "",
+            [tag(&["e", target.as_str()]), tag(&["e", &"c".repeat(64)])],
+        );
+
+        assert_eq!(ingest.ingest(&delete).unwrap(), None);
+    }
+
+    #[test]
+    fn stamped_self_posts_do_not_emit_triggers() {
+        let operator = "a".repeat(64);
+        let mut ingest = RelayIngest::new(&operator, FakeRepository::default());
+        let message = event_with_keys(
+            &Keys::generate(),
+            CHANNEL_MESSAGE_KIND,
+            "[bot]: bot: loop",
+            [tag(&["h", "channel"]), tag(&["p", &operator])],
+        );
+
+        assert_eq!(ingest.ingest(&message).unwrap(), None);
+    }
+
+    #[test]
+    fn subscription_filters_scope_messages_and_mutations() {
+        let operator = "a".repeat(64);
+        let active = EventId::parse_hex(&"b".repeat(64)).expect("active");
+        let since = Timestamp::from(42_u64);
+
+        let message_json = serde_json::to_value(message_filter(&operator, since)).unwrap();
+        assert_eq!(message_json["kinds"], serde_json::json!([9]));
+        assert_eq!(message_json["#p"], serde_json::json!([operator]));
+        assert_eq!(message_json["since"], 42);
+
+        let channel_json = serde_json::to_value(
+            channel_filter(&["channel-a".to_owned(), "channel-b".to_owned()], since)
+                .expect("filter"),
+        )
+        .unwrap();
+        assert_eq!(channel_json["kinds"], serde_json::json!([9]));
+        assert_eq!(
+            channel_json["#h"],
+            serde_json::json!(["channel-a", "channel-b"])
+        );
+        assert_eq!(channel_json["since"], 42);
+        assert!(channel_filter(&[], since).is_none());
+
+        let mutation_json =
+            serde_json::to_value(mutation_filter(&[active], since).expect("filter")).unwrap();
+        assert_eq!(mutation_json["kinds"], serde_json::json!([5, 9005, 40003]));
+        assert_eq!(mutation_json["#e"], serde_json::json!(["b".repeat(64)]));
+        assert_eq!(mutation_json["since"], 42);
+        assert!(mutation_filter(&[], since).is_none());
+    }
+
+    fn indexed_target(event_id: &EventId, author: &Keys) -> IndexedRelayEvent {
+        IndexedRelayEvent {
+            event_id: event_id.clone(),
+            author_pubkey: author.public_key().to_hex(),
+            created_at: 1,
+            kind: CHANNEL_MESSAGE_KIND,
+            content: "bot: original".to_owned(),
+            tags_json: "[]".to_owned(),
+            channel_id: Some("channel".to_owned()),
+            target_event_id: None,
+        }
     }
 }

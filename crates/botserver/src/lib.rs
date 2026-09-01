@@ -812,14 +812,28 @@ pub trait HostRepository {
     /// Returns an adapter error when the operation cannot be persisted.
     fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error>;
 
-    /// Atomically mark and index a previously unseen relay event.
+    /// Index a relay event without consuming its processing marker.
     ///
     /// Returns false when the event id was already processed.
     ///
     /// # Errors
     ///
     /// Returns an adapter error when the event cannot be persisted.
-    fn index_unprocessed_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error>;
+    fn index_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error>;
+
+    /// Return whether downstream turn handling completed for an event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the processing marker cannot be read.
+    fn event_processed(&self, event_id: &EventId) -> Result<bool, Self::Error>;
+
+    /// Find one indexed relay event by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the event cannot be read.
+    fn indexed_event(&self, event_id: &EventId) -> Result<Option<IndexedRelayEvent>, Self::Error>;
 
     /// Read indexed relay events for exactly one channel in chronological order.
     ///
