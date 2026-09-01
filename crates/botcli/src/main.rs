@@ -5,11 +5,9 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
-use botserver::sqlite::SqliteRepository;
-use botserver::{HostRepository, TurnRecord, TurnState};
-use botserver_domain::EventId;
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
 const OUTBOUND_PREFIX: &str = "[bot]:";
@@ -73,8 +71,9 @@ enum BotcliError {
     Arguments(String),
     Io(io::Error),
     Database(rusqlite::Error),
+    EmptyBody,
     TurnNotFound,
-    TurnNotOpen(TurnState),
+    TurnNotOpen(String),
     CoordinatesMismatch,
     AskNotActive(String),
     CommandFailed {
@@ -84,7 +83,9 @@ enum BotcliError {
     },
     InvalidKelpieReceipt(String),
     InvalidPublishReceipt(String),
-    StateChanged,
+    StateChanged {
+        event_id: String,
+    },
 }
 
 impl fmt::Display for BotcliError {
@@ -93,6 +94,7 @@ impl fmt::Display for BotcliError {
             Self::Arguments(message) => formatter.write_str(message),
             Self::Io(error) => write!(formatter, "I/O failed: {error}"),
             Self::Database(error) => write!(formatter, "host database failed: {error}"),
+            Self::EmptyBody => formatter.write_str("message body is empty"),
             Self::TurnNotFound => formatter.write_str("the ask has no persisted turn"),
             Self::TurnNotOpen(state) => write!(formatter, "the turn is not open ({state:?})"),
             Self::CoordinatesMismatch => {
@@ -112,7 +114,10 @@ impl fmt::Display for BotcliError {
             Self::InvalidPublishReceipt(reason) => {
                 write!(formatter, "invalid publish receipt: {reason}")
             }
-            Self::StateChanged => formatter.write_str("the turn state changed during publication"),
+            Self::StateChanged { event_id } => write!(
+                formatter,
+                "relay accepted event {event_id}, but the turn state changed before completion"
+            ),
         }
     }
 }
@@ -123,6 +128,7 @@ impl std::error::Error for BotcliError {
             Self::Io(error) => Some(error),
             Self::Database(error) => Some(error),
             Self::Arguments(_)
+            | Self::EmptyBody
             | Self::TurnNotFound
             | Self::TurnNotOpen(_)
             | Self::CoordinatesMismatch
@@ -130,7 +136,7 @@ impl std::error::Error for BotcliError {
             | Self::CommandFailed { .. }
             | Self::InvalidKelpieReceipt(_)
             | Self::InvalidPublishReceipt(_)
-            | Self::StateChanged => None,
+            | Self::StateChanged { .. } => None,
         }
     }
 }
@@ -180,12 +186,15 @@ impl CommandRunner for ProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        child
+        let write_result = child
             .stdin
             .take()
             .expect("piped stdin is available")
-            .write_all(stdin)?;
+            .write_all(stdin);
         let output = child.wait_with_output()?;
+        if output.status.success() {
+            write_result?;
+        }
         Ok(Output {
             success: output.status.success(),
             status: output.status.to_string(),
@@ -196,17 +205,55 @@ impl CommandRunner for ProcessRunner {
 }
 
 trait TurnRepository {
-    fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<TurnRecord>, rusqlite::Error>;
+    fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<StoredTurn>, rusqlite::Error>;
     fn mark_posted(&mut self, ask_id: &str) -> Result<bool, rusqlite::Error>;
 }
 
-impl TurnRepository for SqliteRepository {
-    fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<TurnRecord>, rusqlite::Error> {
-        HostRepository::turn_by_ask_id(self, ask_id)
+#[derive(Debug, Clone)]
+struct StoredTurn {
+    channel_id: String,
+    reply_to_event_id: Option<String>,
+    state: String,
+}
+
+#[derive(Debug)]
+struct ExistingRepository {
+    connection: Connection,
+}
+
+impl ExistingRepository {
+    fn open(path: &PathBuf) -> rusqlite::Result<Self> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        Ok(Self { connection })
+    }
+}
+
+impl TurnRepository for ExistingRepository {
+    fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<StoredTurn>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT s.channel_id, t.reply_to_event_id, t.state
+                 FROM turns AS t
+                 JOIN sessions AS s ON s.id = t.session_id
+                 WHERE t.ask_id = ?1",
+                [ask_id],
+                |row| {
+                    Ok(StoredTurn {
+                        channel_id: row.get(0)?,
+                        reply_to_event_id: row.get(1)?,
+                        state: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
     }
 
     fn mark_posted(&mut self, ask_id: &str) -> Result<bool, rusqlite::Error> {
-        self.set_turn_state(ask_id, TurnState::Posted)
+        let changed = self.connection.execute(
+            "UPDATE turns SET state = 'posted' WHERE ask_id = ?1 AND state = 'open'",
+            params![ask_id],
+        )?;
+        Ok(changed == 1)
     }
 }
 
@@ -252,7 +299,7 @@ fn execute() -> Result<Execution, BotcliError> {
     let mut repository = arguments
         .database
         .as_ref()
-        .map(SqliteRepository::open)
+        .map(ExistingRepository::open)
         .transpose()?;
     publish(&arguments, &body, repository.as_mut(), &mut ProcessRunner).map(Execution::Receipt)
 }
@@ -263,6 +310,9 @@ fn read_body(arguments: &SendArgs) -> Result<Vec<u8>, BotcliError> {
         io::stdin().read_to_end(&mut body)?;
     } else if let Some(path) = &arguments.file {
         body = std::fs::read(path)?;
+    }
+    if body.is_empty() {
+        return Err(BotcliError::EmptyBody);
     }
     Ok(body)
 }
@@ -291,7 +341,7 @@ fn publish(
             .expect("clap requires a database with an ask id")
             .mark_posted(ask_id)?
         {
-            return Err(BotcliError::StateChanged);
+            return Err(BotcliError::StateChanged { event_id });
         }
         run_final(runner, ask_id)?;
     }
@@ -303,12 +353,13 @@ fn publish(
     Ok(receipt.into())
 }
 
-fn validate_turn(arguments: &SendArgs, turn: &TurnRecord) -> Result<(), BotcliError> {
-    if turn.state != TurnState::Open {
-        return Err(BotcliError::TurnNotOpen(turn.state));
+fn validate_turn(arguments: &SendArgs, turn: &StoredTurn) -> Result<(), BotcliError> {
+    if turn.state != "open" {
+        return Err(BotcliError::TurnNotOpen(turn.state.clone()));
     }
-    let persisted_reply = turn.reply_to_event_id.as_ref().map(EventId::as_str);
-    if turn.channel_id != arguments.channel || persisted_reply != arguments.reply_to.as_deref() {
+    if turn.channel_id != arguments.channel
+        || turn.reply_to_event_id.as_deref() != arguments.reply_to.as_deref()
+    {
         return Err(BotcliError::CoordinatesMismatch);
     }
     Ok(())
@@ -414,26 +465,25 @@ fn ensure_success(program: &'static str, output: &Output) -> Result<(), BotcliEr
 mod tests {
     use std::collections::VecDeque;
 
-    use botserver_domain::{BotId, EventId};
-
     use super::*;
 
     #[derive(Debug)]
     struct FakeRepository {
-        turn: TurnRecord,
+        turn: StoredTurn,
+        ask_id: String,
         marked_posted: bool,
     }
 
     impl TurnRepository for FakeRepository {
-        fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<TurnRecord>, rusqlite::Error> {
-            Ok((self.turn.ask_id.as_deref() == Some(ask_id)).then(|| self.turn.clone()))
+        fn turn_by_ask_id(&self, ask_id: &str) -> Result<Option<StoredTurn>, rusqlite::Error> {
+            Ok((self.ask_id == ask_id).then(|| self.turn.clone()))
         }
 
         fn mark_posted(&mut self, ask_id: &str) -> Result<bool, rusqlite::Error> {
-            if self.turn.ask_id.as_deref() != Some(ask_id) || self.turn.state != TurnState::Open {
+            if self.ask_id != ask_id || self.turn.state != "open" {
                 return Ok(false);
             }
-            self.turn.state = TurnState::Posted;
+            self.turn.state = "posted".to_owned();
             self.marked_posted = true;
             Ok(true)
         }
@@ -473,15 +523,19 @@ mod tests {
         }
     }
 
-    fn turn(state: TurnState) -> TurnRecord {
-        TurnRecord {
-            sequence: 1,
-            bot_id: BotId::new("bot").expect("bot id"),
+    fn turn(state: &str) -> StoredTurn {
+        StoredTurn {
             channel_id: send_args().channel,
-            event_id: EventId::parse_hex(&"c".repeat(64)).expect("event id"),
-            ask_id: Some("ask-id".to_owned()),
-            reply_to_event_id: EventId::parse_hex(&"a".repeat(64)),
-            state,
+            reply_to_event_id: Some("a".repeat(64)),
+            state: state.to_owned(),
+        }
+    }
+
+    fn repository(state: &str) -> FakeRepository {
+        FakeRepository {
+            turn: turn(state),
+            ask_id: "ask-id".to_owned(),
+            marked_posted: false,
         }
     }
 
@@ -512,10 +566,7 @@ mod tests {
 
     #[test]
     fn publishes_stamped_body_then_marks_posted_and_resolves_final() {
-        let mut repository = FakeRepository {
-            turn: turn(TurnState::Open),
-            marked_posted: false,
-        };
+        let mut repository = repository("open");
         let mut runner = FakeRunner {
             outputs: VecDeque::from([
                 active_ask(),
@@ -578,10 +629,7 @@ mod tests {
 
     #[test]
     fn cancelled_ask_never_reaches_envchain() {
-        let mut repository = FakeRepository {
-            turn: turn(TurnState::Open),
-            marked_posted: false,
-        };
+        let mut repository = repository("open");
         let mut runner = FakeRunner {
             outputs: VecDeque::from([output(
                 true,
@@ -600,10 +648,7 @@ mod tests {
 
     #[test]
     fn failed_publish_keeps_turn_open_and_does_not_reply() {
-        let mut repository = FakeRepository {
-            turn: turn(TurnState::Open),
-            marked_posted: false,
-        };
+        let mut repository = repository("open");
         let mut runner = FakeRunner {
             outputs: VecDeque::from([active_ask(), output(false, b"")]),
             calls: Vec::new(),
@@ -625,16 +670,13 @@ mod tests {
             }
         ));
         assert_eq!(runner.calls.len(), 2);
-        assert_eq!(repository.turn.state, TurnState::Open);
+        assert_eq!(repository.turn.state, "open");
         assert!(!repository.marked_posted);
     }
 
     #[test]
     fn unaccepted_publish_receipt_keeps_turn_open() {
-        let mut repository = FakeRepository {
-            turn: turn(TurnState::Open),
-            marked_posted: false,
-        };
+        let mut repository = repository("open");
         let mut runner = FakeRunner {
             outputs: VecDeque::from([
                 active_ask(),
@@ -655,16 +697,13 @@ mod tests {
         .expect_err("an unaccepted receipt is not success");
 
         assert!(matches!(error, BotcliError::InvalidPublishReceipt(_)));
-        assert_eq!(repository.turn.state, TurnState::Open);
+        assert_eq!(repository.turn.state, "open");
         assert_eq!(runner.calls.len(), 2);
     }
 
     #[test]
     fn failed_final_keeps_posted_state_to_prevent_duplicate_send() {
-        let mut repository = FakeRepository {
-            turn: turn(TurnState::Open),
-            marked_posted: false,
-        };
+        let mut repository = repository("open");
         let mut runner = FakeRunner {
             outputs: VecDeque::from([
                 active_ask(),
@@ -692,15 +731,12 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(repository.turn.state, TurnState::Posted);
+        assert_eq!(repository.turn.state, "posted");
     }
 
     #[test]
     fn posted_turn_cannot_publish_twice() {
-        let mut repository = FakeRepository {
-            turn: turn(TurnState::Posted),
-            marked_posted: false,
-        };
+        let mut repository = repository("posted");
         let mut runner = FakeRunner {
             outputs: VecDeque::new(),
             calls: Vec::new(),
@@ -714,7 +750,7 @@ mod tests {
         )
         .expect_err("posted turn is terminal");
 
-        assert!(matches!(error, BotcliError::TurnNotOpen(TurnState::Posted)));
+        assert!(matches!(error, BotcliError::TurnNotOpen(state) if state == "posted"));
         assert!(runner.calls.is_empty());
     }
 
@@ -722,10 +758,7 @@ mod tests {
     fn mismatched_coordinates_are_rejected_before_external_calls() {
         let mut request = send_args();
         request.reply_to = Some("d".repeat(64));
-        let mut repository = FakeRepository {
-            turn: turn(TurnState::Open),
-            marked_posted: false,
-        };
+        let mut repository = repository("open");
         let mut runner = FakeRunner {
             outputs: VecDeque::new(),
             calls: Vec::new(),
@@ -814,5 +847,29 @@ mod tests {
             "botserver",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn file_body_is_read_and_empty_body_is_rejected() {
+        let path = std::env::temp_dir().join(format!("botcli-file-body-{}", std::process::id()));
+        std::fs::write(&path, b"from file").expect("write fixture");
+        let mut arguments = send_args();
+        arguments.stdin = false;
+        arguments.file = Some(path.clone());
+
+        assert_eq!(read_body(&arguments).expect("read body"), b"from file");
+
+        std::fs::write(&path, b"").expect("empty fixture");
+        assert!(matches!(read_body(&arguments), Err(BotcliError::EmptyBody)));
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn opening_a_missing_database_does_not_create_it() {
+        let path = std::env::temp_dir().join(format!("botcli-missing-db-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        assert!(ExistingRepository::open(&path).is_err());
+        assert!(!path.exists());
     }
 }
