@@ -129,8 +129,10 @@ impl<R: HostRepository> RelayIngest<R> {
 
     /// Index one verified Nostr event and return an actor action when needed.
     ///
-    /// Replayed event ids return `Ok(None)`. Ordinary kind 9 channel messages
-    /// are indexed but do not emit an action.
+    /// Replayed event ids return `Ok(None)` after downstream processing. Ordinary
+    /// kind 9 channel messages are indexed but do not emit an action. Consumers
+    /// atomically persist a trigger candidate; after handling an edit or delete,
+    /// they mark that mutation event processed.
     ///
     /// # Errors
     ///
@@ -167,6 +169,8 @@ impl<R: HostRepository> RelayIngest<R> {
         self.repository
             .index_event(&indexed)
             .map_err(IngestError::Repository)?;
+        // Indexing and processing are separate so actions remain replayable
+        // until the actor persists their corresponding state change.
         if self
             .repository
             .event_processed(&event_id)
@@ -196,6 +200,12 @@ impl<R: HostRepository> RelayIngest<R> {
     #[must_use]
     pub fn into_repository(self) -> R {
         self.repository
+    }
+
+    /// Borrow the repository to atomically persist an emitted action.
+    #[must_use]
+    pub fn repository_mut(&mut self) -> &mut R {
+        &mut self.repository
     }
 
     fn message_action(
@@ -306,9 +316,15 @@ impl RelaySubscriber {
 
     /// Subscribe to operator mentions, known channels, and active-turn mutations.
     ///
+    /// Call this again whenever `channel_ids` or `active_event_ids` changes.
+    /// Empty sets close the corresponding prior subscription. `since` is an
+    /// inclusive persisted cursor, not the current wall clock.
+    ///
     /// # Errors
     ///
-    /// Returns an SDK error when no connected relay accepts the subscription.
+    /// Returns an SDK error when no connected relay accepts a requested
+    /// subscription. Earlier filters can already be live when a later filter
+    /// fails; callers should treat an error as fatal and replace the client.
     pub async fn subscribe(
         &self,
         operator_pubkey: &str,
@@ -318,13 +334,27 @@ impl RelaySubscriber {
     ) -> Result<(), RelaySubscribeError> {
         self.subscribe_filter("botserver-messages", message_filter(operator_pubkey, since))
             .await?;
-        if let Some(filter) = channel_filter(channel_ids, since) {
-            self.subscribe_filter("botserver-channels", filter).await?;
-        }
-        if let Some(filter) = mutation_filter(active_event_ids, since) {
-            self.subscribe_filter("botserver-mutations", filter).await?;
-        }
+        self.update_filter("botserver-channels", channel_filter(channel_ids, since))
+            .await?;
+        self.update_filter(
+            "botserver-mutations",
+            mutation_filter(active_event_ids, since),
+        )
+        .await?;
         Ok(())
+    }
+
+    async fn update_filter(
+        &self,
+        id: &str,
+        filter: Option<Filter>,
+    ) -> Result<(), RelaySubscribeError> {
+        if let Some(filter) = filter {
+            self.subscribe_filter(id, filter).await
+        } else {
+            self.client.unsubscribe(&SubscriptionId::new(id)).await;
+            Ok(())
+        }
     }
 
     async fn subscribe_filter(&self, id: &str, filter: Filter) -> Result<(), RelaySubscribeError> {
@@ -464,6 +494,10 @@ mod tests {
                 .iter()
                 .find(|event| &event.event_id == event_id)
                 .cloned())
+        }
+
+        fn latest_indexed_at(&self) -> Result<Option<i64>, Self::Error> {
+            Ok(self.indexed.iter().map(|event| event.created_at).max())
         }
 
         fn indexed_events_for_channel(

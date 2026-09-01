@@ -814,7 +814,7 @@ pub trait HostRepository {
 
     /// Index a relay event without consuming its processing marker.
     ///
-    /// Returns false when the event id was already processed.
+    /// Returns false when the event id was already indexed.
     ///
     /// # Errors
     ///
@@ -834,6 +834,13 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the event cannot be read.
     fn indexed_event(&self, event_id: &EventId) -> Result<Option<IndexedRelayEvent>, Self::Error>;
+
+    /// Return the newest indexed relay timestamp for an inclusive replay cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the index cannot be read.
+    fn latest_indexed_at(&self) -> Result<Option<i64>, Self::Error>;
 
     /// Read indexed relay events for exactly one channel in chronological order.
     ///

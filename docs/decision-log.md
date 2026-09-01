@@ -191,7 +191,6 @@ D-numbers it implements. Before coding, the agent MUST update from
 `origin/master` (not an arbitrary topic-branch pull). If HEAD differs
 from the baseline, it MUST edit the issue body (scope, acceptance,
 deps) and the baseline SHA. A comment alone is not enough.
-
 ## D22. botcli is send, stdin body, JSON receipt
 
 Status: accepted
@@ -200,3 +199,26 @@ Status: accepted
 command is `send`. Body is `--stdin` or `--file` only. Default stdout
 is a JSON receipt. Closing the Kelpie ask after a successful post is
 an implementation side effect, not the occupant-facing verb.
+## D23. Ingest enforces Buzz mutation contracts
+
+Status: accepted
+
+Message edits (kind 40003) and NIP-09 deletes (kind 5) MUST be signed by
+the indexed target event's author. Buzz moderator tombstones (kind 9005)
+are accepted from a different author because the Buzz relay authorizes
+the event author, channel owner/admin, or owning human before storing the
+tombstone. This trust applies only to the configured Buzz relay.
+
+Each edit or delete MUST identify exactly one valid target EventId with
+an `e` tag. Events with zero or multiple valid targets are indexed but
+MUST NOT mutate a Turn, matching Buzz relay validation.
+
+## D24. Relay subscriptions are scoped and refreshed
+
+Status: accepted
+
+Ingest uses separate filters for operator `p`-tag discovery, known-channel
+`h`-tag traffic, and active-turn mutation `e` tags. Every filter carries
+an inclusive persisted `since` cursor. The host refreshes subscriptions
+when known channels or active EventIds change; an empty set closes its
+corresponding subscription rather than widening it.

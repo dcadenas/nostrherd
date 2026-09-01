@@ -190,6 +190,13 @@ impl HostRepository for SqliteRepository {
             .optional()
     }
 
+    fn latest_indexed_at(&self) -> Result<Option<i64>, Self::Error> {
+        self.connection
+            .query_row("SELECT MAX(created_at) FROM relay_events", [], |row| {
+                row.get(0)
+            })
+    }
+
     fn indexed_events_for_channel(
         &self,
         channel_id: &str,
@@ -514,6 +521,7 @@ mod tests {
             repository.indexed_event(&event.event_id).unwrap(),
             Some(event.clone())
         );
+        assert_eq!(repository.latest_indexed_at().unwrap(), Some(42));
 
         let bot_id = BotId::new("bot").expect("bot");
         repository
