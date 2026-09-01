@@ -34,11 +34,13 @@ Invariants and their tests: `docs/invariants.md`.
 | 11 Long work | `flow_11_one_ask_while_the_occupant_works`, `spec_flow_11_one_stamped_reply_then_final` | not landed (`dcadenas/botserver#20`) |
 | 12 Desktop | `flow_12_host_does_not_publish_presence_or_typing` | not landed (`dcadenas/botserver#20`) |
 
-Live columns are issues 18–20. This issue does not run the relay.
+Live columns are issues 18–20. Occupant start/ask from the running host
+(`dcadenas/botserver#17`) uses the local relay; it is not the flow 2 live
+proof.
 
 ## Live local relay
 
-Follow `skills/local-relay/SKILL.md`. This issue does not require it.
+Follow `skills/local-relay/SKILL.md`. Issue 17 requires it.
 
 ```bash
 ./tools/local-relay up

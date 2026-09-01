@@ -6,13 +6,18 @@ use std::pin::pin;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use botserver::actor::{persist_ingest, ActorError, TriggerOutcome};
+#[cfg(test)]
+use botserver::actor::persist_ingest;
+#[cfg(test)]
+use botserver::actor::TriggerOutcome;
+use botserver::actor::{ActorError, BotActor};
 use botserver::config::{BotRegistry, ConfigError};
+use botserver::herdr::{current_pane, HerdrError, HerdrPaneAllocator};
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
 use botserver::sqlite::SqliteRepository;
-use botserver::HostRepository;
+use botserver::{AdoptedWaiter, HostRepository, KelpieClient, KelpieError};
 use botserver_domain::{Bot, EventId};
 use clap::Parser;
 use futures::StreamExt;
@@ -70,7 +75,10 @@ enum HostError {
     Relay(nostr_sdk::error::Error),
     Subscribe(RelaySubscribeError),
     Ingest(IngestError<rusqlite::Error>),
+    Herdr(HerdrError),
+    Kelpie(KelpieError),
     Actor(ActorError<rusqlite::Error>),
+    NoBots,
     NotificationClosed,
 }
 
@@ -85,7 +93,10 @@ impl fmt::Display for HostError {
             Self::Relay(error) => write!(formatter, "relay client failed: {error}"),
             Self::Subscribe(error) => write!(formatter, "{error}"),
             Self::Ingest(error) => write!(formatter, "{error}"),
+            Self::Herdr(error) => write!(formatter, "{error}"),
+            Self::Kelpie(error) => write!(formatter, "{error}"),
             Self::Actor(error) => write!(formatter, "{error}"),
+            Self::NoBots => formatter.write_str("bot config has no bots"),
             Self::NotificationClosed => formatter.write_str("relay notification channel closed"),
         }
     }
@@ -100,8 +111,13 @@ impl std::error::Error for HostError {
             Self::Relay(error) => Some(error),
             Self::Subscribe(error) => Some(error),
             Self::Ingest(error) => Some(error),
+            Self::Herdr(error) => Some(error),
+            Self::Kelpie(error) => Some(error),
             Self::Actor(error) => Some(error),
-            Self::MissingEnv(_) | Self::InvalidOperatorKey | Self::NotificationClosed => None,
+            Self::MissingEnv(_)
+            | Self::InvalidOperatorKey
+            | Self::NoBots
+            | Self::NotificationClosed => None,
         }
     }
 }
@@ -136,6 +152,18 @@ impl From<IngestError<rusqlite::Error>> for HostError {
     }
 }
 
+impl From<HerdrError> for HostError {
+    fn from(error: HerdrError) -> Self {
+        Self::Herdr(error)
+    }
+}
+
+impl From<KelpieError> for HostError {
+    fn from(error: KelpieError) -> Self {
+        Self::Kelpie(error)
+    }
+}
+
 impl From<ActorError<rusqlite::Error>> for HostError {
     fn from(error: ActorError<rusqlite::Error>) -> Self {
         Self::Actor(error)
@@ -164,6 +192,7 @@ fn ingest_event_id(action: &IngestAction) -> &EventId {
     }
 }
 
+#[cfg(test)]
 fn dispatch_ingest(
     bots: &[Bot],
     repository: &mut SqliteRepository,
@@ -178,13 +207,21 @@ fn dispatch_ingest(
 }
 
 fn observe_event(
-    bots: &[Bot],
+    actor: &mut BotActor<SqliteRepository, HerdrPaneAllocator>,
+    kelpie: &KelpieClient,
+    waiter: &AdoptedWaiter<'_>,
     ingest: &mut RelayIngest<SqliteRepository>,
     event: &Event,
 ) -> Result<(), HostError> {
     if let Some(action) = ingest.ingest(event)? {
         let event_id = ingest_event_id(&action).clone();
-        let outcome = dispatch_ingest(bots, ingest.repository_mut(), &action)?;
+        let outcome = match actor.handle_ingest(kelpie, waiter, &action, "") {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                eprintln!("occupant dispatch failed {} {error}", event_id.as_str());
+                return Ok(());
+            }
+        };
         match action {
             IngestAction::TurnCandidate { .. } => {
                 eprintln!("observed trigger {} {outcome:?}", event_id.as_str());
@@ -210,10 +247,18 @@ async fn refresh_subscription(
 
 async fn serve(
     operator: OperatorEnv,
-    bots: Vec<Bot>,
+    bot: Bot,
     repository: SqliteRepository,
+    database: &Path,
 ) -> Result<(), HostError> {
     let operator_pubkey = operator.keys.public_key().to_hex();
+    let kelpie = KelpieClient::default();
+    let waiter_pane = current_pane()?;
+    let waiter = kelpie.adopt_waiter(&waiter_pane.pane_id, &waiter_pane.terminal_id)?;
+    let mut actor = BotActor::new(bot, repository, HerdrPaneAllocator::default());
+    if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
+        eprintln!("queued occupant resume failed: {error}");
+    }
     let client = Client::builder()
         .authenticator(SignerAuthenticator::new(operator.keys))
         .build();
@@ -221,7 +266,11 @@ async fn serve(
     client.connect().and_wait(CONNECT_TIMEOUT).await;
     let subscriber = RelaySubscriber::new(client);
     let mut notifications = pin!(subscriber.notifications());
-    let mut ingest = RelayIngest::new(operator_pubkey.clone(), String::new(), repository);
+    let mut ingest = RelayIngest::new(
+        operator_pubkey.clone(),
+        String::new(),
+        SqliteRepository::open(database)?,
+    );
     let mut refresh = tokio::time::interval(SUBSCRIPTION_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut announced = false;
@@ -230,7 +279,7 @@ async fn serve(
         tokio::select! {
             notification = notifications.next() => match notification {
                 Some(ClientNotification::Event { event, .. }) => {
-                    observe_event(&bots, &mut ingest, &event)?;
+                    observe_event(&mut actor, &kelpie, &waiter, &mut ingest, &event)?;
                 }
                 Some(ClientNotification::Shutdown) => return Ok(()),
                 Some(ClientNotification::Message { .. }) => {}
@@ -277,7 +326,7 @@ async fn serve(
                     Ok(events) => {
                         last_retry_error = None;
                         for event in events {
-                            observe_event(&bots, &mut ingest, &event)?;
+                            observe_event(&mut actor, &kelpie, &waiter, &mut ingest, &event)?;
                         }
                     }
                     Err(error) => {
@@ -299,11 +348,12 @@ fn run(args: &Args) -> Result<(), HostError> {
         return Ok(());
     }
     let operator = OperatorEnv::from_env()?;
+    let bot = registry.bots().first().cloned().ok_or(HostError::NoBots)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(HostError::Runtime)?
-        .block_on(serve(operator, registry.bots().to_vec(), repository))
+        .block_on(serve(operator, bot, repository, &args.database))
 }
 
 fn main() -> ExitCode {
@@ -369,6 +419,7 @@ mod tests {
     struct EnvRestore {
         key: Option<String>,
         url: Option<String>,
+        pane: Option<String>,
     }
 
     impl EnvRestore {
@@ -376,6 +427,7 @@ mod tests {
             Self {
                 key: std::env::var("BUZZ_PRIVATE_KEY").ok(),
                 url: std::env::var("BUZZ_RELAY_URL").ok(),
+                pane: std::env::var("HERDR_PANE_ID").ok(),
             }
         }
     }
@@ -384,6 +436,7 @@ mod tests {
         fn drop(&mut self) {
             restore_var("BUZZ_PRIVATE_KEY", self.key.as_deref());
             restore_var("BUZZ_RELAY_URL", self.url.as_deref());
+            restore_var("HERDR_PANE_ID", self.pane.as_deref());
         }
     }
 
@@ -587,6 +640,48 @@ mod tests {
         ]))
         .expect_err("missing url");
         assert_eq!(error.to_string(), "missing BUZZ_RELAY_URL");
+    }
+
+    #[test]
+    fn runtime_requires_a_configured_bot() {
+        let _lock = lock_env();
+        let _restore = EnvRestore::capture();
+        let keys = Keys::generate();
+        std::env::set_var("BUZZ_PRIVATE_KEY", keys.secret_key().to_secret_hex());
+        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
+        let config = temp_path("empty").with_extension("toml");
+        fs::write(&config, "bots = []").expect("write");
+        let database = temp_path("host").with_extension("sqlite");
+        let error = run(&Args::parse_from([
+            "botserver",
+            "--config",
+            config.to_str().expect("utf8"),
+            "--database",
+            database.to_str().expect("utf8"),
+        ]))
+        .expect_err("no bots");
+        assert_eq!(error.to_string(), "bot config has no bots");
+    }
+
+    #[test]
+    fn runtime_requires_waiter_pane() {
+        let _lock = lock_env();
+        let _restore = EnvRestore::capture();
+        let keys = Keys::generate();
+        std::env::set_var("BUZZ_PRIVATE_KEY", keys.secret_key().to_secret_hex());
+        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
+        std::env::remove_var("HERDR_PANE_ID");
+        let config = write_config("bot");
+        let database = temp_path("host").with_extension("sqlite");
+        let error = run(&Args::parse_from([
+            "botserver",
+            "--config",
+            config.to_str().expect("utf8"),
+            "--database",
+            database.to_str().expect("utf8"),
+        ]))
+        .expect_err("missing pane");
+        assert!(error.to_string().contains("missing HERDR_PANE_ID"));
     }
 
     #[test]

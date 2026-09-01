@@ -14,3 +14,7 @@ EOF
 ```
 Host coordinates may also be flags the ask spells out. Body is stdin
 only.
+
+<!-- botserver-place-snapshots -->
+Read `.botserver/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.
+<!-- /botserver-place-snapshots -->

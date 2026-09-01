@@ -222,7 +222,7 @@ where
                         .map_err(ActorError::Repository)?;
                     return Ok(TriggerOutcome::Declined);
                 }
-                self.handle_trigger(
+                match self.handle_trigger(
                     kelpie,
                     waiter,
                     &TriggerWork {
@@ -232,7 +232,15 @@ where
                         reply_to_event_id: reply_to_event_id.clone(),
                         nostr_body: trigger.request().to_owned(),
                     },
-                )
+                ) {
+                    Err(ActorError::UnnameableSession) => {
+                        self.repository
+                            .mark_event_processed(event_id)
+                            .map_err(ActorError::Repository)?;
+                        Ok(TriggerOutcome::Declined)
+                    }
+                    other => other,
+                }
             }
             crate::relay::IngestAction::Edit {
                 event_id,
@@ -1723,6 +1731,44 @@ mod tests {
             .expect("turns")
             .is_empty());
         assert!(repository.event_processed(&event).expect("processed"));
+    }
+
+    #[test]
+    fn handle_ingest_acks_an_unnameable_channel_without_kelpie() {
+        let (mut actor, kelpie, runner, panes) = actor([adopt()]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let event = event_id('a');
+        let action = crate::relay::IngestAction::TurnCandidate {
+            event_id: event.clone(),
+            channel_id: "not-a-uuid".to_owned(),
+            reply_to_event_id: None,
+            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], "bot: hi")
+                .expect("trigger"),
+        };
+
+        assert_eq!(
+            actor
+                .handle_ingest(&kelpie, &waiter, &action, "")
+                .expect("ingest"),
+            TriggerOutcome::Declined
+        );
+        assert!(actor.repository.event_processed(&event).expect("processed"));
+        assert!(actor
+            .repository
+            .turns_for_session(actor.bot().id(), "not-a-uuid")
+            .expect("turns")
+            .is_empty());
+        assert_eq!(
+            runner
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .filter(|call| call.0.get(1).is_some_and(|verb| verb != "adopt"))
+                .count(),
+            0
+        );
+        assert!(panes.calls.lock().expect("panes").is_empty());
     }
 
     #[test]
