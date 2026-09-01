@@ -114,15 +114,21 @@ where
 #[derive(Debug)]
 pub struct RelayIngest<R> {
     operator_pubkey: String,
+    relay_pubkey: String,
     repository: R,
 }
 
 impl<R: HostRepository> RelayIngest<R> {
     /// Create an ingest classifier for one operator.
     #[must_use]
-    pub fn new(operator_pubkey: impl Into<String>, repository: R) -> Self {
+    pub fn new(
+        operator_pubkey: impl Into<String>,
+        relay_pubkey: impl Into<String>,
+        repository: R,
+    ) -> Self {
         Self {
             operator_pubkey: operator_pubkey.into(),
+            relay_pubkey: relay_pubkey.into(),
             repository,
         }
     }
@@ -154,10 +160,32 @@ impl<R: HostRepository> RelayIngest<R> {
             .collect::<Vec<_>>();
         let channel_id = tag_value(&tags, "h").map(ToOwned::to_owned);
         let target_event_id = target_event_id(&tags);
-        let author_pubkey = event.pubkey.to_hex();
+        let author = effective_author(&event.pubkey.to_hex(), &self.relay_pubkey, &tags);
+        let action = match event.kind.as_u16() {
+            CHANNEL_MESSAGE_KIND => Ok(self.message_action(
+                event_id.clone(),
+                channel_id.clone(),
+                &tags,
+                &author,
+                &event.content,
+            )),
+            MESSAGE_EDIT_KIND => self.edit_action(
+                event_id.clone(),
+                target_event_id.clone(),
+                &author.pubkey,
+                &event.content,
+            ),
+            NIP09_DELETE_KIND | BUZZ_DELETE_KIND => self.delete_action(
+                event_id.clone(),
+                target_event_id.clone(),
+                &author.pubkey,
+                event.kind.as_u16(),
+            ),
+            _ => Ok(None),
+        }?;
         let indexed = IndexedRelayEvent {
             event_id: event_id.clone(),
-            author_pubkey: author_pubkey.clone(),
+            author_pubkey: author.pubkey,
             created_at: i64::try_from(event.created_at.as_secs())
                 .map_err(|_| IngestError::InvalidCreatedAt(event.created_at.as_secs()))?,
             kind: event.kind.as_u16(),
@@ -166,34 +194,20 @@ impl<R: HostRepository> RelayIngest<R> {
             channel_id: channel_id.clone(),
             target_event_id: target_event_id.clone(),
         };
+        let processed = self
+            .repository
+            .event_processed(&event_id)
+            .map_err(IngestError::Repository)?;
         self.repository
-            .index_event(&indexed)
+            .index_event(&indexed, action.is_some() && !processed)
             .map_err(IngestError::Repository)?;
         // Indexing and processing are separate so actions remain replayable
         // until the actor persists their corresponding state change.
-        if self
-            .repository
-            .event_processed(&event_id)
-            .map_err(IngestError::Repository)?
-        {
+        if processed {
             return Ok(None);
         }
 
-        match event.kind.as_u16() {
-            CHANNEL_MESSAGE_KIND => {
-                Ok(self.message_action(event_id, channel_id, &tags, &event.content))
-            }
-            MESSAGE_EDIT_KIND => {
-                self.edit_action(event_id, target_event_id, &author_pubkey, &event.content)
-            }
-            NIP09_DELETE_KIND | BUZZ_DELETE_KIND => self.delete_action(
-                event_id,
-                target_event_id,
-                &author_pubkey,
-                event.kind.as_u16(),
-            ),
-            _ => Ok(None),
-        }
+        Ok(action)
     }
 
     /// Return the repository after ingest shutdown.
@@ -213,10 +227,19 @@ impl<R: HostRepository> RelayIngest<R> {
         event_id: EventId,
         channel_id: Option<String>,
         tags: &[Vec<String>],
+        author: &EffectiveAuthor,
         content: &str,
     ) -> Option<IngestAction> {
         let channel_id = channel_id?;
-        let p_tags = tag_values(tags, "p");
+        let mut skipped_attribution = false;
+        let p_tags = tag_values(tags, "p").filter(|pubkey| {
+            if !skipped_attribution && author.attribution_p_tag.as_deref() == Some(*pubkey) {
+                skipped_attribution = true;
+                false
+            } else {
+                true
+            }
+        });
         let trigger = TriggerMatch::parse(&self.operator_pubkey, p_tags, content)?;
         Some(IngestAction::TurnCandidate {
             event_id,
@@ -389,6 +412,45 @@ fn tag_values<'a>(tags: &'a [Vec<String>], name: &'a str) -> impl Iterator<Item 
     })
 }
 
+#[derive(Debug)]
+struct EffectiveAuthor {
+    pubkey: String,
+    attribution_p_tag: Option<String>,
+}
+
+fn effective_author(
+    signing_pubkey: &str,
+    relay_pubkey: &str,
+    tags: &[Vec<String>],
+) -> EffectiveAuthor {
+    if signing_pubkey != relay_pubkey {
+        return EffectiveAuthor {
+            pubkey: signing_pubkey.to_owned(),
+            attribution_p_tag: None,
+        };
+    }
+    if let Some(actor) = tag_values(tags, "actor").find(|value| is_pubkey(value)) {
+        return EffectiveAuthor {
+            pubkey: actor.to_owned(),
+            attribution_p_tag: None,
+        };
+    }
+    if let Some(author) = tag_values(tags, "p").find(|value| is_pubkey(value)) {
+        return EffectiveAuthor {
+            pubkey: author.to_owned(),
+            attribution_p_tag: Some(author.to_owned()),
+        };
+    }
+    EffectiveAuthor {
+        pubkey: signing_pubkey.to_owned(),
+        attribution_p_tag: None,
+    }
+}
+
+fn is_pubkey(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
 fn target_event_id(tags: &[Vec<String>]) -> Option<EventId> {
     let mut targets = tag_values(tags, "e").filter_map(EventId::parse_hex);
     let target = targets.next()?;
@@ -458,6 +520,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeRepository {
         indexed: Vec<IndexedRelayEvent>,
+        pending: HashSet<EventId>,
         processed: HashSet<EventId>,
         active_event_id: Option<EventId>,
     }
@@ -466,19 +529,26 @@ mod tests {
         type Error = std::convert::Infallible;
 
         fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
+            self.pending.remove(event_id);
             Ok(self.processed.insert(event_id.clone()))
         }
 
-        fn index_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error> {
-            if self
+        fn index_event(
+            &mut self,
+            event: &IndexedRelayEvent,
+            pending_action: bool,
+        ) -> Result<bool, Self::Error> {
+            let exists = self
                 .indexed
                 .iter()
-                .any(|known| known.event_id == event.event_id)
-            {
-                return Ok(false);
+                .any(|known| known.event_id == event.event_id);
+            if !exists {
+                self.indexed.push(event.clone());
             }
-            self.indexed.push(event.clone());
-            Ok(true)
+            if pending_action {
+                self.pending.insert(event.event_id.clone());
+            }
+            Ok(!exists)
         }
 
         fn event_processed(&self, event_id: &EventId) -> Result<bool, Self::Error> {
@@ -496,8 +566,23 @@ mod tests {
                 .cloned())
         }
 
-        fn latest_indexed_at(&self) -> Result<Option<i64>, Self::Error> {
-            Ok(self.indexed.iter().map(|event| event.created_at).max())
+        fn relay_replay_since(&self) -> Result<Option<i64>, Self::Error> {
+            let oldest_pending = self
+                .indexed
+                .iter()
+                .filter(|event| {
+                    self.pending.contains(&event.event_id)
+                        && !self.processed.contains(&event.event_id)
+                })
+                .map(|event| event.created_at)
+                .min();
+            Ok(oldest_pending.or_else(|| {
+                self.indexed
+                    .iter()
+                    .map(|event| event.created_at)
+                    .max()
+                    .map(|latest| latest.saturating_sub(900).max(0))
+            }))
         }
 
         fn indexed_events_for_channel(
@@ -610,9 +695,14 @@ mod tests {
         Tag::parse(parts.iter().copied()).expect("tag")
     }
 
+    fn relay_pubkey() -> String {
+        "f".repeat(64)
+    }
+
     #[test]
     fn ordinary_messages_are_indexed_without_emitting() {
-        let mut ingest = RelayIngest::new("a".repeat(64), FakeRepository::default());
+        let mut ingest =
+            RelayIngest::new("a".repeat(64), relay_pubkey(), FakeRepository::default());
         let message = event(CHANNEL_MESSAGE_KIND, "ordinary", [tag(&["h", "channel"])]);
 
         assert_eq!(ingest.ingest(&message).unwrap(), None);
@@ -622,7 +712,8 @@ mod tests {
 
     #[test]
     fn unsupported_event_kinds_are_ignored() {
-        let mut ingest = RelayIngest::new("a".repeat(64), FakeRepository::default());
+        let mut ingest =
+            RelayIngest::new("a".repeat(64), relay_pubkey(), FakeRepository::default());
         let reaction = event(7, "+", [tag(&["h", "channel"])]);
 
         assert_eq!(ingest.ingest(&reaction).unwrap(), None);
@@ -633,7 +724,7 @@ mod tests {
     fn triggers_emit_once_with_channel_and_reply_coordinates() {
         let operator = "a".repeat(64);
         let reply = "b".repeat(64);
-        let mut ingest = RelayIngest::new(&operator, FakeRepository::default());
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), FakeRepository::default());
         let message = event(
             CHANNEL_MESSAGE_KIND,
             "@daniel bot: inspect this",
@@ -665,16 +756,78 @@ mod tests {
     }
 
     #[test]
+    fn relay_signed_actor_can_edit_its_trigger() {
+        let operator = "a".repeat(64);
+        let actor = "c".repeat(64);
+        let relay = Keys::generate();
+        let relay_pubkey = relay.public_key().to_hex();
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey, FakeRepository::default());
+        let message = event_with_keys(
+            &relay,
+            CHANNEL_MESSAGE_KIND,
+            "bot: original",
+            [
+                tag(&["h", "channel"]),
+                tag(&["actor", &actor]),
+                tag(&["p", &operator]),
+            ],
+        );
+        let target = EventId::parse_hex(&message.id.to_hex()).expect("target");
+
+        assert!(matches!(
+            ingest.ingest(&message).unwrap(),
+            Some(IngestAction::TurnCandidate { .. })
+        ));
+        assert_eq!(
+            ingest
+                .repository
+                .indexed_event(&target)
+                .unwrap()
+                .expect("indexed")
+                .author_pubkey,
+            actor
+        );
+        ingest.repository.active_event_id = Some(target.clone());
+        let edit = event_with_keys(
+            &relay,
+            MESSAGE_EDIT_KIND,
+            "bot: replacement",
+            [tag(&["actor", &actor]), tag(&["e", target.as_str()])],
+        );
+        assert!(matches!(
+            ingest.ingest(&edit).unwrap(),
+            Some(IngestAction::Edit { .. })
+        ));
+    }
+
+    #[test]
+    fn relay_attribution_p_tag_is_not_an_operator_mention() {
+        let operator = "a".repeat(64);
+        let relay = Keys::generate();
+        let relay_pubkey = relay.public_key().to_hex();
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey, FakeRepository::default());
+        let message = event_with_keys(
+            &relay,
+            CHANNEL_MESSAGE_KIND,
+            "bot: human message",
+            [tag(&["h", "channel"]), tag(&["p", &operator])],
+        );
+
+        assert_eq!(ingest.ingest(&message).unwrap(), None);
+    }
+
+    #[test]
     fn edits_and_deletes_emit_only_for_active_turns() {
         let operator = "a".repeat(64);
         let target = EventId::parse_hex(&"b".repeat(64)).expect("target");
         let author = Keys::generate();
         let repository = FakeRepository {
             indexed: vec![indexed_target(&target, &author)],
+            pending: HashSet::new(),
             processed: HashSet::new(),
             active_event_id: Some(target.clone()),
         };
-        let mut ingest = RelayIngest::new(&operator, repository);
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), repository);
         let edit = event_with_keys(
             &author,
             MESSAGE_EDIT_KIND,
@@ -715,10 +868,11 @@ mod tests {
         let author = Keys::generate();
         let repository = FakeRepository {
             indexed: vec![indexed_target(&target, &author)],
+            pending: HashSet::new(),
             processed: HashSet::new(),
             active_event_id: Some(target.clone()),
         };
-        let mut ingest = RelayIngest::new(operator, repository);
+        let mut ingest = RelayIngest::new(operator, relay_pubkey(), repository);
         let edit = event_with_keys(
             &author,
             MESSAGE_EDIT_KIND,
@@ -742,10 +896,11 @@ mod tests {
         let author = Keys::generate();
         let repository = FakeRepository {
             indexed: vec![indexed_target(&target, &author)],
+            pending: HashSet::new(),
             processed: HashSet::new(),
             active_event_id: Some(target.clone()),
         };
-        let mut ingest = RelayIngest::new(operator, repository);
+        let mut ingest = RelayIngest::new(operator, relay_pubkey(), repository);
         let attacker = Keys::generate();
         let edit = event_with_keys(
             &attacker,
@@ -780,10 +935,11 @@ mod tests {
         let author = Keys::generate();
         let repository = FakeRepository {
             indexed: vec![indexed_target(&target, &author)],
+            pending: HashSet::new(),
             processed: HashSet::new(),
             active_event_id: Some(target.clone()),
         };
-        let mut ingest = RelayIngest::new("a".repeat(64), repository);
+        let mut ingest = RelayIngest::new("a".repeat(64), relay_pubkey(), repository);
         let delete = event_with_keys(
             &author,
             NIP09_DELETE_KIND,
@@ -797,7 +953,7 @@ mod tests {
     #[test]
     fn stamped_self_posts_do_not_emit_triggers() {
         let operator = "a".repeat(64);
-        let mut ingest = RelayIngest::new(&operator, FakeRepository::default());
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), FakeRepository::default());
         let message = event_with_keys(
             &Keys::generate(),
             CHANNEL_MESSAGE_KIND,

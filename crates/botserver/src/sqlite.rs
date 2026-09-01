@@ -56,6 +56,11 @@ impl SqliteRepository {
              CREATE INDEX IF NOT EXISTS relay_events_target
                  ON relay_events(target_event_id);
 
+             CREATE TABLE IF NOT EXISTS pending_ingest_events (
+                 event_id TEXT PRIMARY KEY NOT NULL
+                     REFERENCES relay_events(event_id)
+             ) STRICT;
+
              CREATE TABLE IF NOT EXISTS sessions (
                  id INTEGER PRIMARY KEY,
                  bot_id TEXT NOT NULL,
@@ -140,16 +145,27 @@ impl HostRepository for SqliteRepository {
     type Error = rusqlite::Error;
 
     fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
-        let changed = self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
             "INSERT INTO processed_events(event_id) VALUES (?1)
              ON CONFLICT(event_id) DO NOTHING",
             [event_id.as_str()],
         )?;
+        transaction.execute(
+            "DELETE FROM pending_ingest_events WHERE event_id = ?1",
+            [event_id.as_str()],
+        )?;
+        transaction.commit()?;
         Ok(changed == 1)
     }
 
-    fn index_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error> {
-        let changed = self.connection.execute(
+    fn index_event(
+        &mut self,
+        event: &IndexedRelayEvent,
+        pending_action: bool,
+    ) -> Result<bool, Self::Error> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
             "INSERT INTO relay_events(
                  event_id, author_pubkey, created_at, kind, content, tags_json,
                  channel_id, target_event_id
@@ -166,6 +182,14 @@ impl HostRepository for SqliteRepository {
                 event.target_event_id.as_ref().map(EventId::as_str),
             ],
         )?;
+        if pending_action {
+            transaction.execute(
+                "INSERT INTO pending_ingest_events(event_id) VALUES (?1)
+                 ON CONFLICT(event_id) DO NOTHING",
+                [event.event_id.as_str()],
+            )?;
+        }
+        transaction.commit()?;
         Ok(changed == 1)
     }
 
@@ -190,11 +214,22 @@ impl HostRepository for SqliteRepository {
             .optional()
     }
 
-    fn latest_indexed_at(&self) -> Result<Option<i64>, Self::Error> {
-        self.connection
-            .query_row("SELECT MAX(created_at) FROM relay_events", [], |row| {
-                row.get(0)
-            })
+    fn relay_replay_since(&self) -> Result<Option<i64>, Self::Error> {
+        self.connection.query_row(
+            "SELECT COALESCE(
+                 (
+                     SELECT MIN(e.created_at)
+                     FROM pending_ingest_events AS pending
+                     JOIN relay_events AS e ON e.event_id = pending.event_id
+                     LEFT JOIN processed_events AS processed
+                         ON processed.event_id = pending.event_id
+                     WHERE processed.event_id IS NULL
+                 ),
+                 MAX(0, (SELECT MAX(created_at) FROM relay_events) - 900)
+             )",
+            [],
+            |row| row.get(0),
+        )
     }
 
     fn indexed_events_for_channel(
@@ -229,6 +264,10 @@ impl HostRepository for SqliteRepository {
             return Ok(None);
         }
 
+        transaction.execute(
+            "DELETE FROM pending_ingest_events WHERE event_id = ?1",
+            [turn.event_id.as_str()],
+        )?;
         let record = insert_queued_turn(&transaction, turn)?;
         transaction.commit()?;
         Ok(Some(record))
@@ -503,10 +542,11 @@ mod tests {
         let mut repository =
             SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
                 .expect("repository");
+        assert_eq!(repository.relay_replay_since().unwrap(), None);
         let event = IndexedRelayEvent {
             event_id: event_id('a'),
             author_pubkey: "b".repeat(64),
-            created_at: 42,
+            created_at: 1_000,
             kind: 9,
             content: "hello".to_owned(),
             tags_json: r#"[["h","channel"]]"#.to_owned(),
@@ -514,14 +554,18 @@ mod tests {
             target_event_id: None,
         };
 
-        assert!(repository.index_event(&event).unwrap());
-        assert!(!repository.index_event(&event).unwrap());
+        assert!(repository.index_event(&event, true).unwrap());
+        assert!(!repository.index_event(&event, true).unwrap());
         assert!(!repository.event_processed(&event.event_id).unwrap());
         assert_eq!(
             repository.indexed_event(&event.event_id).unwrap(),
             Some(event.clone())
         );
-        assert_eq!(repository.latest_indexed_at().unwrap(), Some(42));
+        let mut newer_ordinary = event.clone();
+        newer_ordinary.event_id = event_id('c');
+        newer_ordinary.created_at = 2_000;
+        assert!(repository.index_event(&newer_ordinary, false).unwrap());
+        assert_eq!(repository.relay_replay_since().unwrap(), Some(1_000));
 
         let bot_id = BotId::new("bot").expect("bot");
         repository
@@ -537,10 +581,11 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(repository.event_processed(&event.event_id).unwrap());
+        assert_eq!(repository.relay_replay_since().unwrap(), Some(1_100));
 
         assert_eq!(
             repository.indexed_events_for_channel("channel").unwrap(),
-            vec![event]
+            vec![event, newer_ordinary]
         );
         assert!(repository
             .indexed_events_for_channel("different-channel")

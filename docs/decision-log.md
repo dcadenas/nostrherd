@@ -204,9 +204,12 @@ an implementation side effect, not the occupant-facing verb.
 Status: accepted
 
 Message edits (kind 40003) and NIP-09 deletes (kind 5) MUST be signed by
-the indexed target event's author. Buzz moderator tombstones (kind 9005)
-are accepted from a different author because the Buzz relay authorizes
-the event author, channel owner/admin, or owning human before storing the
+the indexed target event's effective author. For events signed by the
+configured Buzz relay, effective author follows Buzz: the `actor` tag,
+then the first `p` tag as a legacy fallback. That attribution `p` tag is
+not also an operator mention. Buzz moderator tombstones (kind 9005) are
+accepted from a different author because the Buzz relay authorizes the
+event author, channel owner/admin, or owning human before storing the
 tombstone. This trust applies only to the configured Buzz relay.
 
 Each edit or delete MUST identify exactly one valid target EventId with
@@ -219,6 +222,9 @@ Status: accepted
 
 Ingest uses separate filters for operator `p`-tag discovery, known-channel
 `h`-tag traffic, and active-turn mutation `e` tags. Every filter carries
-an inclusive persisted `since` cursor. The host refreshes subscriptions
-when known channels or active EventIds change; an empty set closes its
-corresponding subscription rather than widening it.
+an inclusive persisted `since` cursor. The cursor starts at the oldest
+unprocessed actionable event; with none pending it overlaps the newest
+indexed timestamp by Buzz's 15-minute accepted clock drift. The host
+refreshes subscriptions when known channels or active EventIds change;
+an empty set closes its corresponding subscription rather than widening
+it.

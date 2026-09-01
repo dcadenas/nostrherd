@@ -819,7 +819,11 @@ pub trait HostRepository {
     /// # Errors
     ///
     /// Returns an adapter error when the event cannot be persisted.
-    fn index_event(&mut self, event: &IndexedRelayEvent) -> Result<bool, Self::Error>;
+    fn index_event(
+        &mut self,
+        event: &IndexedRelayEvent,
+        pending_action: bool,
+    ) -> Result<bool, Self::Error>;
 
     /// Return whether downstream turn handling completed for an event.
     ///
@@ -835,12 +839,12 @@ pub trait HostRepository {
     /// Returns an adapter error when the event cannot be read.
     fn indexed_event(&self, event_id: &EventId) -> Result<Option<IndexedRelayEvent>, Self::Error>;
 
-    /// Return the newest indexed relay timestamp for an inclusive replay cursor.
+    /// Return a safe inclusive relay replay cursor.
     ///
     /// # Errors
     ///
     /// Returns an adapter error when the index cannot be read.
-    fn latest_indexed_at(&self) -> Result<Option<i64>, Self::Error>;
+    fn relay_replay_since(&self) -> Result<Option<i64>, Self::Error>;
 
     /// Read indexed relay events for exactly one channel in chronological order.
     ///
