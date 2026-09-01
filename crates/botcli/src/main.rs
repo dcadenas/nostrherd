@@ -4,6 +4,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser, Subcommand};
@@ -11,6 +12,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
 const OUTBOUND_PREFIX: &str = "[bot]:";
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(about = "Publish stamped Nostr messages as the operator")]
@@ -83,8 +85,9 @@ enum BotcliError {
     },
     InvalidKelpieReceipt(String),
     InvalidPublishReceipt(String),
-    StateChanged {
+    PostPublish {
         event_id: String,
+        failure: String,
     },
 }
 
@@ -114,9 +117,9 @@ impl fmt::Display for BotcliError {
             Self::InvalidPublishReceipt(reason) => {
                 write!(formatter, "invalid publish receipt: {reason}")
             }
-            Self::StateChanged { event_id } => write!(
+            Self::PostPublish { event_id, failure } => write!(
                 formatter,
-                "relay accepted event {event_id}, but the turn state changed before completion"
+                "relay accepted event {event_id}; do not retry this send; completion failed: {failure}"
             ),
         }
     }
@@ -136,7 +139,7 @@ impl std::error::Error for BotcliError {
             | Self::CommandFailed { .. }
             | Self::InvalidKelpieReceipt(_)
             | Self::InvalidPublishReceipt(_)
-            | Self::StateChanged { .. } => None,
+            | Self::PostPublish { .. } => None,
         }
     }
 }
@@ -224,6 +227,7 @@ struct ExistingRepository {
 impl ExistingRepository {
     fn open(path: &PathBuf) -> rusqlite::Result<Self> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         Ok(Self { connection })
     }
 }
@@ -337,13 +341,23 @@ fn publish(
     let stamped = stamp(body);
     let event_id = run_publish(runner, arguments, &stamped)?;
     if let Some(ask_id) = &arguments.ask_id {
-        if !repository
+        let marked_posted = repository
             .expect("clap requires a database with an ask id")
-            .mark_posted(ask_id)?
-        {
-            return Err(BotcliError::StateChanged { event_id });
+            .mark_posted(ask_id)
+            .map_err(|error| BotcliError::PostPublish {
+                event_id: event_id.clone(),
+                failure: error.to_string(),
+            })?;
+        if !marked_posted {
+            return Err(BotcliError::PostPublish {
+                event_id,
+                failure: "the turn state changed before it could be marked posted".to_owned(),
+            });
         }
-        run_final(runner, ask_id)?;
+        run_final(runner, ask_id).map_err(|error| BotcliError::PostPublish {
+            event_id: event_id.clone(),
+            failure: error.to_string(),
+        })?;
     }
 
     let mut receipt = serde_json::Map::from_iter([("event_id".to_owned(), event_id.into())]);
@@ -464,8 +478,16 @@ fn ensure_success(program: &'static str, output: &Output) -> Result<(), BotcliEr
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use botserver::sqlite::SqliteRepository;
+    use botserver::{HostRepository, NewTurn, SessionRecord, TurnState};
+    use botserver_domain::{BotId, EventId};
 
     use super::*;
+
+    static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Debug)]
     struct FakeRepository {
@@ -562,6 +584,18 @@ mod tests {
             true,
             br#"{"id":"request","result":{"state":"in_progress"}}"#,
         )
+    }
+
+    fn temp_path(label: &str) -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let sequence = NEXT_TEMP_PATH.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "botcli-{label}-{}-{timestamp}-{sequence}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -726,10 +760,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            BotcliError::CommandFailed {
-                program: "kelpie",
-                ..
-            }
+            BotcliError::PostPublish { event_id, failure }
+                if event_id == "published" && failure.contains("kelpie")
         ));
         assert_eq!(repository.turn.state, "posted");
     }
@@ -851,7 +883,7 @@ mod tests {
 
     #[test]
     fn file_body_is_read_and_empty_body_is_rejected() {
-        let path = std::env::temp_dir().join(format!("botcli-file-body-{}", std::process::id()));
+        let path = temp_path("file-body");
         std::fs::write(&path, b"from file").expect("write fixture");
         let mut arguments = send_args();
         arguments.stdin = false;
@@ -866,10 +898,59 @@ mod tests {
 
     #[test]
     fn opening_a_missing_database_does_not_create_it() {
-        let path = std::env::temp_dir().join(format!("botcli-missing-db-{}", std::process::id()));
+        let path = temp_path("missing-db");
         let _ = std::fs::remove_file(&path);
 
         assert!(ExistingRepository::open(&path).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn repository_statements_match_the_host_schema() {
+        let path = temp_path("host-schema");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let reply_to = EventId::parse_hex(&"a".repeat(64)).expect("reply event id");
+        {
+            let mut host = SqliteRepository::open(&path).expect("host repository");
+            host.save_session(&SessionRecord {
+                bot_id: bot_id.clone(),
+                channel_id: channel_id.to_owned(),
+                session_name: "bot-channel".to_owned(),
+                occupant_logical_id: Some("occupant".to_owned()),
+                renew_id: None,
+            })
+            .expect("save session");
+            host.enqueue_turn(&NewTurn {
+                bot_id: bot_id.clone(),
+                channel_id: channel_id.to_owned(),
+                event_id: EventId::parse_hex(&"b".repeat(64)).expect("trigger event id"),
+                reply_to_event_id: Some(reply_to.clone()),
+            })
+            .expect("enqueue turn");
+            host.open_next_turn(&bot_id, channel_id, "ask-id")
+                .expect("open turn");
+        }
+
+        let mut repository = ExistingRepository::open(&path).expect("botcli repository");
+        let turn = TurnRepository::turn_by_ask_id(&repository, "ask-id")
+            .expect("read turn")
+            .expect("persisted turn");
+        assert_eq!(turn.channel_id, channel_id);
+        assert_eq!(turn.reply_to_event_id.as_deref(), Some(reply_to.as_str()));
+        assert_eq!(turn.state, "open");
+        assert!(repository.mark_posted("ask-id").expect("mark posted"));
+        drop(repository);
+
+        let host = SqliteRepository::open(&path).expect("reopen host repository");
+        assert_eq!(
+            host.turn_by_ask_id("ask-id")
+                .expect("read host turn")
+                .expect("host turn")
+                .state,
+            TurnState::Posted
+        );
+        drop(host);
+        std::fs::remove_file(path).expect("remove database");
     }
 }
