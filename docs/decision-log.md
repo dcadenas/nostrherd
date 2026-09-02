@@ -14,10 +14,14 @@ per bot, and not one shared god-object.
 
 Status: accepted
 
-`botserver` is a single adopted Herdr occupant and the waiter of every
-ask. Session occupants are `bot-<place>` (or `<botid>-<place>`).
-Receipts multiplex on ask id in SQLite. A waiter pane per bot is
-deferred.
+The host waiter is one pane-less socket LogicalAgent named `botserver`,
+created with `waiter.register` (idempotent). It receives on a
+reconnecting `inbox.claim` and resolves with `inbox.ack`. There is no
+fake pane occupant. Occupant envelopes still use `from=botserver`, never
+a relay pubkey and never `operator`. `--from operator` is sender
+attribution only; the waiting agent stays `botserver`. Session occupants
+are `bot-<place>` (or `<botid>-<place>`). Receipts multiplex on ask id
+in SQLite.
 
 ## D3. SQLite is host state, not the relay
 

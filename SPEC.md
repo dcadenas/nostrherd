@@ -37,13 +37,12 @@ selected by convention, posting with a visible bot stamp.
 - Give the occupant the operator nsec.
 - Multiplex two bots onto one session name.
 - Token-count renew (v1 is time).
-- A pane-less waiter (Kelpie forbids it).
 - Parsing relay markup as Kelpie `from=`.
 
 ## System overview
 
 ```text
-relay  ->  botserver (host occupant, waiter)
+relay  ->  botserver (reconnecting inbox client, waiter)
              per-bot actor
                sqlite  (processed events, sessions, turns)
                corpus repo path

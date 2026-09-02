@@ -8,7 +8,7 @@ this file and SPEC disagree.
 | I1 | Two bots MUST NOT share a session name | `session_name_tries_more_of_uuid_after_a_prefix_collision`, `session_names_disambiguate_when_bot_and_display_collide`, `session_names_include_the_bot_id` |
 | I2 | A session for place A MUST NOT be given history from place B | `snapshot_omits_other_channels_including_dms` |
 | I3 | Replaying a processed `EventId` MUST NOT open a second turn | `processed_events_are_idempotent` |
-| I4 | Kelpie `from=` for this host is only `botserver` | `adopts_exact_pane_as_botserver`, `ask_is_owned_by_waiter_and_passes_body_on_stdin` |
+| I4 | Kelpie `from=` for this host is only `botserver` | `names_socket_waiter_botserver`, `ask_is_owned_by_waiter_and_passes_body_on_stdin` |
 | I5 | A trigger is an operator `p`-tag plus first token `bot:` after an optional mention | `trigger_requires_operator_p_tag`, `trigger_allows_one_leading_mention`, `trigger_rejects_non_prefix_and_inexact_tokens` |
 | I6 | An empty request after `bot:` MUST NOT open a Turn | `empty_trigger_request_is_not_asked` |
 | I7 | Turn states are parsed tokens; there is no `publishing` state | `turn_state_parses_known_tokens_only` |

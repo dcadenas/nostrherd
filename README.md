@@ -10,7 +10,7 @@ publishes through `botcli`.
 
 ## Binaries
 
-- `botserver` — host occupant (Kelpie waiter `botserver`) plus per-bot actors
+- `botserver` — host process (Kelpie waiter `botserver`) plus per-bot actors
 - `botcli` — occupant tool: publish, then `kelpie reply --final`
 
 `botcli send` reads generated text from stdin or a file, never from a body
