@@ -54,7 +54,7 @@ with leftover `botcli`. Occupant steps below match the current path
 
 ## Live local relay
 
-Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, and 41 require it.
+Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, and 43 require it.
 
 Issue 41 names new occupants from Buzz place display. Create a stream
 with `--name eng`, trigger it, then:
@@ -908,6 +908,7 @@ kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
 
+<<<<<<< HEAD
 ### Ask context delta (issue 40)
 
 An unprefixed line between two `{id}:` triggers must appear in the
@@ -953,6 +954,60 @@ env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
 kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
+
+### Two bots, two tokens (issue 43)
+
+Two `[[bots]]` both run. `bot: hello` and `pr: hello` in one channel
+are two sessions. Use throwaway corpora, not `~/code/daniel-bot`.
+Unit proof: `inbound_tokens_route_to_the_matching_bot`,
+`inbound_tokens_queue_separate_sessions_for_each_bot`.
+
+```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is43
+mkdir -p "$PROOF/bot" "$PROOF/pr"
+cp -a "$ROOT/corpus/example-bot/." "$PROOF/bot/"
+cp -a "$ROOT/corpus/example-bot/." "$PROOF/pr/"
+./tools/local-relay up
+cargo build -p botserver
+
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$PROOF/bot"
+kind = "opencode"
+[[bots]]
+id = "pr"
+corpus = "$PROOF/pr"
+kind = "opencode"
+EOF
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
+  --name botserver-is43 --type stream --visibility open > "$PROOF/channel.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
+  "$PROOF/channel.json" "$PROOF/channel.id"
+CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
+
+rm -f "$PROOF/host.sqlite"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
+  >"$PROOF/host.log" 2>&1 &
+HOST_PID=$!
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'pr: hello'
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT bot_id, session_name FROM sessions WHERE channel_id='$CHANNEL' ORDER BY bot_id;"
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
+```
+
+Expect two session rows (`bot` and `pr`). Occupants still MUST NOT get
+the nsec. Outbound stamp stays `[bot]:`.
 
 Wrap the host with envchain. Do not pass `--envchain` (D29):
 

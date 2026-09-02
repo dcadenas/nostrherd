@@ -130,6 +130,26 @@ mod tests {
     }
 
     #[test]
+    fn registry_loads_every_configured_bot() {
+        let registry = BotRegistry::from_toml(
+            r#"
+            [[bots]]
+            id = "bot"
+            corpus = "/corpus/bot"
+            kind = "opencode"
+            [[bots]]
+            id = "pr"
+            corpus = "/corpus/pr"
+            kind = "opencode"
+            "#,
+        )
+        .expect("registry");
+        assert_eq!(registry.bots().len(), 2);
+        assert_eq!(registry.bots()[0].inbound_trigger(), "bot:");
+        assert_eq!(registry.bots()[1].inbound_trigger(), "pr:");
+    }
+
+    #[test]
     fn registry_rejects_duplicate_ids() {
         let error = BotRegistry::from_toml(
             r#"

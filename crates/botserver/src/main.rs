@@ -15,14 +15,14 @@ use botserver::actor::TriggerOutcome;
 use botserver::actor::{ActorError, BotActor};
 use botserver::config::{BotRegistry, ConfigError};
 use botserver::herdr::{HerdrError, HerdrPaneAllocator};
-use botserver::inbox::{default_socket, spawn_inbox};
-use botserver::outbox::{BuzzPublisher, InboxAction};
+use botserver::inbox::{default_socket, spawn_inbox, HostInbox, InboxDelivery};
+use botserver::outbox::{BuzzPublisher, InboxAction, InFlightReaction};
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
 use botserver::sqlite::SqliteRepository;
 use botserver::{HostRepository, HostWaiter, KelpieClient, KelpieError, WAITER_IDEMPOTENCY_KEY};
-use botserver_domain::{Bot, EventId};
+use botserver_domain::{Bot, BotId, EventId};
 use clap::Parser;
 use futures::StreamExt;
 use nostr_sdk::prelude::{Client, ClientNotification, Event, Keys, SignerAuthenticator, Timestamp};
@@ -253,13 +253,48 @@ fn ingest_event_id(action: &IngestAction) -> &EventId {
     }
 }
 
+fn action_bot_id(
+    repository: &SqliteRepository,
+    action: &IngestAction,
+) -> Result<Option<BotId>, HostError> {
+    match action {
+        IngestAction::TurnCandidate { bot_id, .. } => Ok(Some(bot_id.clone())),
+        IngestAction::Edit {
+            target_event_id, ..
+        }
+        | IngestAction::Delete {
+            target_event_id, ..
+        } => Ok(repository
+            .active_turn_for_event(target_event_id)?
+            .map(|turn| turn.bot_id)),
+    }
+}
+
+fn actor_for_bot<'a>(
+    actors: &'a mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
+    bot_id: &BotId,
+) -> Option<&'a mut BotActor<SqliteRepository, HerdrPaneAllocator>> {
+    actors.iter_mut().find(|actor| actor.bot().id() == bot_id)
+}
+
 #[cfg(test)]
 fn dispatch_ingest(
     bots: &[Bot],
     repository: &mut SqliteRepository,
     action: &IngestAction,
 ) -> Result<TriggerOutcome, HostError> {
-    if let (IngestAction::TurnCandidate { .. }, Some(bot)) = (action, bots.first()) {
+    let bot = match action {
+        IngestAction::TurnCandidate { bot_id, .. } => bots.iter().find(|bot| bot.id() == bot_id),
+        IngestAction::Edit {
+            target_event_id, ..
+        }
+        | IngestAction::Delete {
+            target_event_id, ..
+        } => repository
+            .active_turn_for_event(target_event_id)?
+            .and_then(|turn| bots.iter().find(|bot| bot.id() == &turn.bot_id)),
+    };
+    if let Some(bot) = bot {
         Ok(persist_ingest(bot, repository, action, "")?)
     } else {
         repository.mark_event_processed(ingest_event_id(action))?;
@@ -303,7 +338,7 @@ async fn channel_display_for(
 }
 
 async fn observe_event(
-    actor: &mut BotActor<SqliteRepository, HerdrPaneAllocator>,
+    actors: &mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
     kelpie: &KelpieClient,
     waiter: &HostWaiter<'_>,
     ingest: &mut RelayIngest<SqliteRepository>,
@@ -313,6 +348,14 @@ async fn observe_event(
 ) -> Result<(), HostError> {
     if let Some(action) = ingest.ingest(event)? {
         let event_id = ingest_event_id(&action).clone();
+        let Some(bot_id) = action_bot_id(ingest.repository_mut(), &action)? else {
+            ingest.repository_mut().mark_event_processed(&event_id)?;
+            return Ok(());
+        };
+        let Some(actor) = actor_for_bot(actors, &bot_id) else {
+            ingest.repository_mut().mark_event_processed(&event_id)?;
+            return Ok(());
+        };
         let display = channel_display_for(actor, subscriber, operator_pubkey, &action).await;
         let outcome = match actor.handle_ingest(kelpie, waiter, &action, &display) {
             Ok(outcome) => outcome,
@@ -384,7 +427,7 @@ async fn fetch_stored_events(
 }
 
 async fn poll_relay(
-    actor: &mut BotActor<SqliteRepository, HerdrPaneAllocator>,
+    actors: &mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
     kelpie: &KelpieClient,
     waiter: &HostWaiter<'_>,
     ingest: &mut RelayIngest<SqliteRepository>,
@@ -392,12 +435,15 @@ async fn poll_relay(
     operator_pubkey: &str,
     poll: &mut RelayPoll,
 ) -> Result<(), HostError> {
-    let scope = match actor.pending_scope() {
-        Ok(scope) => scope,
-        Err(error) => {
-            note_retry(&mut poll.last_retry_error, error.to_string());
-            return Ok(());
-        }
+    let scope = match actors.first() {
+        None => return Ok(()),
+        Some(actor) => match actor.pending_scope() {
+            Ok(scope) => scope,
+            Err(error) => {
+                note_retry(&mut poll.last_retry_error, error.to_string());
+                return Ok(());
+            }
+        },
     };
     if !poll.announced
         || scope.channel_ids != poll.last_channel_ids
@@ -460,7 +506,7 @@ async fn poll_relay(
     poll.last_retry_error = None;
     for event in events {
         observe_event(
-            actor,
+            actors,
             kelpie,
             waiter,
             ingest,
@@ -471,20 +517,71 @@ async fn poll_relay(
         .await?;
     }
     if poll.last_queued_resume.elapsed() >= RESUME_QUEUED_EVERY {
-        if let Err(error) = actor.resume_queued(kelpie, waiter) {
-            eprintln!("queued occupant resume failed: {error}");
+        for actor in actors.iter_mut() {
+            if let Err(error) = actor.resume_queued(kelpie, waiter) {
+                eprintln!("queued occupant resume failed: {error}");
+            }
         }
         poll.last_queued_resume = Instant::now();
     }
     Ok(())
 }
 
-async fn serve(
-    operator: OperatorEnv,
-    bot: Bot,
-    repository: SqliteRepository,
+fn start_actors(
+    bots: Vec<Bot>,
     database: &Path,
+    kelpie: &KelpieClient,
+    waiter: &HostWaiter<'_>,
+    publisher: BuzzPublisher,
+) -> Result<Vec<BotActor<SqliteRepository, HerdrPaneAllocator>>, HostError> {
+    let reactions: Arc<dyn InFlightReaction> = Arc::new(publisher);
+    let mut actors = bots
+        .into_iter()
+        .map(|bot| {
+            SqliteRepository::open(database).map(|repository| {
+                BotActor::new(bot, repository, HerdrPaneAllocator::default())
+                    .with_reactions(Arc::clone(&reactions))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for actor in &mut actors {
+        if let Err(error) = actor.resume_queued(kelpie, waiter) {
+            eprintln!("queued occupant resume failed: {error}");
+        }
+    }
+    Ok(actors)
+}
+
+fn handle_host_delivery(
+    actors: &mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
+    kelpie: &KelpieClient,
+    waiter: &HostWaiter<'_>,
+    publisher: BuzzPublisher,
+    inbox: &mut HostInbox,
+    delivery: &InboxDelivery,
 ) -> Result<(), HostError> {
+    let action = match actors.first_mut() {
+        Some(actor) => actor.handle_occupant_delivery(kelpie, waiter, &publisher, delivery),
+        None => return Err(HostError::NoBots),
+    };
+    match action {
+        Ok(InboxAction::Ack) => {
+            if let Some(ask_id) = delivery.reply_to() {
+                for actor in actors.iter_mut() {
+                    if let Err(error) = actor.resume_if_posted(kelpie, waiter, ask_id) {
+                        eprintln!("queued occupant resume failed: {error}");
+                    }
+                }
+            }
+            inbox.ack(delivery.message_id());
+        }
+        Ok(InboxAction::Hold) => {}
+        Err(error) => eprintln!("occupant delivery failed: {error}"),
+    }
+    Ok(())
+}
+
+async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result<(), HostError> {
     let operator_pubkey = operator.keys.public_key().to_hex();
     let kelpie = KelpieClient::default();
     let waiter = register_host_waiter(&kelpie, database)?;
@@ -493,12 +590,16 @@ async fn serve(
         waiter.identity().logical_agent_id().to_owned(),
     );
     let publisher = BuzzPublisher;
-    let inbound_trigger = bot.inbound_trigger().to_owned();
-    let mut actor = BotActor::new(bot, repository, HerdrPaneAllocator::default())
-        .with_reactions(Arc::new(publisher));
-    if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
-        eprintln!("queued occupant resume failed: {error}");
-    }
+    let mut actors = start_actors(bots, database, &kelpie, &waiter, publisher)?;
+    let inbound_triggers = actors
+        .iter()
+        .map(|actor| {
+            (
+                actor.bot().id().clone(),
+                actor.bot().inbound_trigger().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
     let client = Client::builder()
         .authenticator(SignerAuthenticator::new(operator.keys))
         .build();
@@ -511,7 +612,7 @@ async fn serve(
         String::new(),
         SqliteRepository::open(database)?,
     )
-    .with_inbound_trigger(inbound_trigger);
+    .with_inbound_triggers(inbound_triggers);
     let mut refresh = tokio::time::interval(SUBSCRIPTION_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut poll = RelayPoll {
@@ -526,7 +627,7 @@ async fn serve(
             notification = notifications.next() => match notification {
                 Some(ClientNotification::Event { event, .. }) => {
                     observe_event(
-                        &mut actor,
+                        &mut actors,
                         &kelpie,
                         &waiter,
                         &mut ingest,
@@ -541,7 +642,7 @@ async fn serve(
             },
             _ = refresh.tick() => {
                 poll_relay(
-                    &mut actor,
+                    &mut actors,
                     &kelpie,
                     &waiter,
                     &mut ingest,
@@ -550,17 +651,22 @@ async fn serve(
                     &mut poll,
                 )
                 .await?;
-                if let Err(error) = actor.retry_outbound(&kelpie, &waiter, &publisher) {
-                    eprintln!("outbound retry failed: {error}");
+                for actor in &mut actors {
+                    if let Err(error) = actor.retry_outbound(&kelpie, &waiter, &publisher) {
+                        eprintln!("outbound retry failed: {error}");
+                    }
                 }
             }
             delivery = inbox.recv() => match delivery {
                 Some(delivery) => {
-                    match actor.handle_occupant_delivery(&kelpie, &waiter, &publisher, &delivery) {
-                        Ok(InboxAction::Ack) => inbox.ack(delivery.message_id()),
-                        Ok(InboxAction::Hold) => {}
-                        Err(error) => eprintln!("occupant delivery failed: {error}"),
-                    }
+                    handle_host_delivery(
+                        &mut actors,
+                        &kelpie,
+                        &waiter,
+                        publisher,
+                        &mut inbox,
+                        &delivery,
+                    )?;
                 }
                 None => return Err(HostError::InboxClosed),
             }
@@ -574,21 +680,16 @@ fn run(args: &Args) -> Result<(), HostError> {
         return Ok(());
     }
     let operator = OperatorEnv::from_env()?;
-    let bots = registry.bots();
-    let bot = bots.first().cloned().ok_or(HostError::NoBots)?;
-    if bots.len() > 1 {
-        let extra = bots[1..]
-            .iter()
-            .map(|bot| bot.id().as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        eprintln!("using first bot {}; ignoring {extra}", bot.id().as_str());
+    let bots = registry.bots().to_vec();
+    if bots.is_empty() {
+        return Err(HostError::NoBots);
     }
+    drop(repository);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(HostError::Runtime)?
-        .block_on(serve(operator, bot, repository, &args.database))
+        .block_on(serve(operator, bots, &args.database))
 }
 
 fn main() -> ExitCode {
@@ -630,19 +731,21 @@ mod tests {
     }
 
     fn write_config(id: &str) -> PathBuf {
+        write_bots_config(&[id])
+    }
+
+    fn write_bots_config(ids: &[&str]) -> PathBuf {
         let path = temp_path("config").with_extension("toml");
-        fs::write(
-            &path,
-            format!(
-                r#"
-                [[bots]]
-                id = "{id}"
-                corpus = "/corpus/{id}"
-                kind = "opencode"
-                "#
-            ),
-        )
-        .expect("write config");
+        let mut body = String::new();
+        for id in ids {
+            body.push_str("[[bots]]\n");
+            body.push_str("id = \"");
+            body.push_str(id);
+            body.push_str("\"\ncorpus = \"/corpus/");
+            body.push_str(id);
+            body.push_str("\"\nkind = \"opencode\"\n");
+        }
+        fs::write(&path, body).expect("write config");
         path
     }
 
@@ -683,16 +786,19 @@ mod tests {
         }
     }
 
-    fn trigger_action(content: &str) -> IngestAction {
+    fn trigger_action(bot_id: &str, event_char: char, content: &str) -> IngestAction {
+        let inbound = format!("{bot_id}:");
         IngestAction::TurnCandidate {
-            event_id: botserver_domain::EventId::parse_hex(&"a".repeat(64)).expect("event"),
+            bot_id: BotId::new(bot_id).expect("id"),
+            event_id: botserver_domain::EventId::parse_hex(&event_char.to_string().repeat(64))
+                .expect("event"),
             channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
             reply_to_event_id: None,
             trigger: botserver_domain::TriggerMatch::parse(
                 "operator",
                 "someone-else",
                 ["operator"],
-                "bot:",
+                &inbound,
                 content,
             )
             .expect("trigger"),
@@ -704,7 +810,7 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let (registry, mut repository) = load_host(&config, &database).expect("load");
-        let action = trigger_action("bot: hello");
+        let action = trigger_action("bot", 'a', "bot: hello");
 
         assert_eq!(
             dispatch_ingest(registry.bots(), &mut repository, &action).expect("dispatch"),
@@ -721,12 +827,64 @@ mod tests {
     }
 
     #[test]
+    fn inbound_tokens_queue_separate_sessions_for_each_bot() {
+        let config = write_bots_config(&["bot", "pr"]);
+        let database = temp_path("host").with_extension("sqlite");
+        let (registry, mut repository) = load_host(&config, &database).expect("load");
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+
+        assert_eq!(
+            dispatch_ingest(
+                registry.bots(),
+                &mut repository,
+                &trigger_action("bot", 'a', "bot: hello")
+            )
+            .expect("bot"),
+            TriggerOutcome::Queued
+        );
+        assert_eq!(
+            dispatch_ingest(
+                registry.bots(),
+                &mut repository,
+                &trigger_action("pr", 'e', "pr: hello")
+            )
+            .expect("pr"),
+            TriggerOutcome::Queued
+        );
+
+        let bot = registry.get(&BotId::new("bot").expect("id")).expect("bot");
+        let pr = registry.get(&BotId::new("pr").expect("id")).expect("pr");
+        assert_eq!(
+            repository
+                .turns_for_session(bot.id(), channel)
+                .expect("bot turns")
+                .len(),
+            1
+        );
+        assert_eq!(
+            repository
+                .turns_for_session(pr.id(), channel)
+                .expect("pr turns")
+                .len(),
+            1
+        );
+        let bot_session = repository.session(bot.id(), channel).expect("bot session");
+        let pr_session = repository.session(pr.id(), channel).expect("pr session");
+        let bot_session = bot_session.expect("bot bound");
+        let pr_session = pr_session.expect("pr bound");
+        assert_ne!(bot_session.session_name, pr_session.session_name);
+        assert!(bot_session.session_name.starts_with("bot-"));
+        assert!(pr_session.session_name.starts_with("pr-"));
+    }
+
+    #[test]
     fn unnameable_channel_is_acknowledged_without_a_turn() {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let (registry, mut repository) = load_host(&config, &database).expect("load");
         let event_id = botserver_domain::EventId::parse_hex(&"d".repeat(64)).expect("event");
         let action = IngestAction::TurnCandidate {
+            bot_id: BotId::new("bot").expect("id"),
             event_id: event_id.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
@@ -882,7 +1040,7 @@ mod tests {
         dispatch_ingest(
             registry.bots(),
             &mut repository,
-            &trigger_action("bot: hello"),
+            &trigger_action("bot", 'a', "bot: hello"),
         )
         .expect("dispatch");
         drop(repository);
