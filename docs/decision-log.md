@@ -332,8 +332,8 @@ Personal host wrap uses envchain namespace `botserver` with
 `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL`. Occupants do not wrap a
 publish binary. That namespace is distinct from throwaway
 `botserver-proof` / `botserver-proof-peer` (D23 live-test relay). Do
-not point `BUZZ_RELAY_URL` at a production relay. Commands:
-`docs/operator-runbook.md`.
+not point `BUZZ_RELAY_URL` at a production relay. The operator runbook
+still describes leftover `botcli` until a later issue.
 
 ## D31. Host publishes; occupant only kelpie final
 
@@ -358,6 +358,12 @@ triggers. `ignore_self` still blocks retrigger.
 I10 is a host MUST: a late occupant final on a cancelled ask MUST NOT
 publish.
 
+Shipping README, operator-runbook, `docs/testing.md`, and
+`corpus/example-bot` still describe leftover `botcli`. This revision
+does not rewrite them: the host at this SHA still publishes that way,
+and flipping occupant recipes would break D23 proofs before a later
+host-publish issue lands.
+
 ## D32. Occupant self-renews
 
 Status: accepted
@@ -365,7 +371,8 @@ Status: accepted
 Amends D27. Snapshot files stay. The occupant arms its own wall-clock
 renew. The host MUST NOT arm occupant renew with `--sender-id` of
 waiter `botserver`, so this inbox only sees channel asks the host
-created.
+created. Host runtime at this SHA still arms that way; a later issue
+removes it. `renew_id` remains until then.
 
 ## D33. Inbox ACK after the host decides
 

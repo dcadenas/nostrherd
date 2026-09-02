@@ -87,9 +87,10 @@ pubkey (D2).
 
 The occupant is an ordinary Kelpie peer of waiter `botserver`. Snapshot
 and renew stay. It MUST answer a trigger ask with `kelpie reply --final`
-and unstamped prose. It MUST NOT stamp `[bot]:`, MUST NOT call the
-relay, and MUST NOT receive the operator nsec. Cancel MUST NOT be used
-for a successful answer.
+and unstamped prose. The final body MUST come from `--stdin` or
+`--file`, never from a shell-expanded argument. It MUST NOT stamp
+`[bot]:`, MUST NOT call the relay, and MUST NOT receive the operator
+nsec. Cancel MUST NOT be used for a successful answer.
 
 The occupant self-renews. The host MUST NOT arm occupant renew with
 `--sender-id` of waiter `botserver`, so this inbox only sees channel
