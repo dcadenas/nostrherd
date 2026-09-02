@@ -474,7 +474,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use botserver::HostRepository;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+    use nostr_sdk::prelude::ToBech32;
 
     use super::*;
 
@@ -683,6 +684,66 @@ mod tests {
         ]))
         .expect_err("invalid config");
         assert!(error.to_string().contains("invalid bot config"));
+    }
+
+    #[test]
+    fn botserver_parser_rejects_envchain() {
+        assert!(Args::try_parse_from([
+            "botserver",
+            "--config",
+            "bots.toml",
+            "--database",
+            "host.sqlite",
+            "--envchain",
+            "botserver",
+        ])
+        .is_err());
+        assert!(!Args::command()
+            .render_long_help()
+            .to_string()
+            .contains("envchain"));
+    }
+
+    #[test]
+    fn operator_env_reads_buzz_private_key_and_relay_url() {
+        let _lock = lock_env();
+        let _restore = EnvRestore::capture();
+        let keys = Keys::generate();
+        let secret = keys.secret_key().to_secret_hex();
+        let relay_url = "ws://127.0.0.1:13001";
+        std::env::set_var("BUZZ_PRIVATE_KEY", &secret);
+        std::env::set_var("BUZZ_RELAY_URL", relay_url);
+
+        let operator = OperatorEnv::from_env().expect("read env");
+        assert_eq!(operator.relay_url, relay_url);
+        assert_eq!(operator.keys.public_key(), keys.public_key());
+    }
+
+    #[test]
+    fn sqlite_does_not_persist_an_nsec() {
+        let _lock = lock_env();
+        let _restore = EnvRestore::capture();
+        let keys = Keys::generate();
+        let secret = keys.secret_key().to_bech32().expect("nsec");
+        std::env::set_var("BUZZ_PRIVATE_KEY", &secret);
+        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
+        OperatorEnv::from_env().expect("read env");
+
+        let config = write_config("bot");
+        let database = temp_path("host").with_extension("sqlite");
+        let (registry, mut repository) = load_host(&config, &database).expect("load");
+        dispatch_ingest(
+            registry.bots(),
+            &mut repository,
+            &trigger_action("bot: hello"),
+        )
+        .expect("dispatch");
+        drop(repository);
+
+        let bytes = fs::read(&database).expect("sqlite bytes");
+        let haystack = String::from_utf8_lossy(&bytes);
+        assert!(!haystack.contains(&secret));
+        assert!(!haystack.contains("nsec1"));
     }
 
     #[test]

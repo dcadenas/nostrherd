@@ -1149,4 +1149,79 @@ mod tests {
             .unwrap();
         assert!(repository.claim_turn_for_publish("ask-1").unwrap());
     }
+
+    #[test]
+    fn sqlite_schema_has_no_nsec_columns() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        repository
+            .enqueue_turn(&turn(&bot_id, channel_id, 'a'))
+            .unwrap();
+        repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: event_id('a'),
+                    author_pubkey: "b".repeat(64),
+                    created_at: 1_000,
+                    kind: 9,
+                    content: "bot: hello".to_owned(),
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(channel_id.to_owned()),
+                    target_event_id: None,
+                },
+                false,
+            )
+            .unwrap();
+
+        let tables: Vec<String> = repository
+            .connection
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for table in tables {
+            let mut info = repository
+                .connection
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns: Vec<String> = info
+                .query_map([], |row| row.get(1))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            for column in columns {
+                let lower = column.to_ascii_lowercase();
+                assert!(
+                    !lower.contains("nsec")
+                        && !lower.contains("secret")
+                        && !lower.contains("private"),
+                    "{column}"
+                );
+            }
+            let mut rows = repository
+                .connection
+                .prepare(&format!("SELECT * FROM {table}"))
+                .unwrap();
+            let width = rows.column_count();
+            let mut query = rows.query([]).unwrap();
+            while let Some(row) = query.next().unwrap() {
+                for index in 0..width {
+                    if let rusqlite::types::ValueRef::Text(text) = row.get_ref(index).unwrap() {
+                        let value = String::from_utf8_lossy(text);
+                        assert!(!value.contains("nsec1"), "{value}");
+                    }
+                }
+            }
+        }
+    }
 }

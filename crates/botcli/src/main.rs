@@ -69,6 +69,7 @@ enum BotcliError {
     Arguments(String),
     Io(io::Error),
     Database(rusqlite::Error),
+    MissingEnv(&'static str),
     EmptyBody,
     TurnNotFound,
     TurnNotOpen(String),
@@ -91,6 +92,7 @@ impl fmt::Display for BotcliError {
             Self::Arguments(message) => formatter.write_str(message),
             Self::Io(error) => write!(formatter, "I/O failed: {error}"),
             Self::Database(error) => write!(formatter, "host database failed: {error}"),
+            Self::MissingEnv(name) => write!(formatter, "missing {name}"),
             Self::EmptyBody => formatter.write_str("message body is empty"),
             Self::TurnNotFound => formatter.write_str("the ask has no persisted turn"),
             Self::TurnNotOpen(state) => write!(formatter, "the turn is not open ({state:?})"),
@@ -119,6 +121,7 @@ impl std::error::Error for BotcliError {
             Self::Io(error) => Some(error),
             Self::Database(error) => Some(error),
             Self::Arguments(_)
+            | Self::MissingEnv(_)
             | Self::EmptyBody
             | Self::TurnNotFound
             | Self::TurnNotOpen(_)
@@ -306,6 +309,7 @@ fn execute() -> Result<Execution, BotcliError> {
     let Cli {
         command: Commands::Send(arguments),
     } = cli;
+    require_buzz_env()?;
     let body = read_body(&arguments)?;
     let mut repository = arguments
         .database
@@ -313,6 +317,20 @@ fn execute() -> Result<Execution, BotcliError> {
         .map(ExistingRepository::open)
         .transpose()?;
     publish(&arguments, &body, repository.as_mut(), &mut ProcessRunner).map(Execution::Receipt)
+}
+
+fn require_buzz_env() -> Result<(), BotcliError> {
+    required_env("BUZZ_PRIVATE_KEY")?;
+    required_env("BUZZ_RELAY_URL")?;
+    Ok(())
+}
+
+fn required_env(name: &'static str) -> Result<String, BotcliError> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or(BotcliError::MissingEnv(name))
 }
 
 fn read_body(arguments: &SendArgs) -> Result<Vec<u8>, BotcliError> {
@@ -475,15 +493,52 @@ fn ensure_success(program: &'static str, output: &Output) -> Result<(), BotcliEr
 mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use botserver::sqlite::SqliteRepository;
     use botserver::{HostRepository, NewTurn, SessionRecord, TurnState};
     use botserver_domain::{BotId, EventId};
+    use clap::CommandFactory;
 
     use super::*;
 
     static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    struct EnvRestore {
+        key: Option<String>,
+        url: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn capture() -> Self {
+            Self {
+                key: std::env::var("BUZZ_PRIVATE_KEY").ok(),
+                url: std::env::var("BUZZ_RELAY_URL").ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            restore_var("BUZZ_PRIVATE_KEY", self.key.as_deref());
+            restore_var("BUZZ_RELAY_URL", self.url.as_deref());
+        }
+    }
+
+    fn restore_var(name: &str, value: Option<&str>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
 
     #[derive(Debug)]
     struct FakeRepository {
@@ -882,6 +937,40 @@ mod tests {
             "botserver",
         ])
         .is_err());
+        assert!(!Cli::command()
+            .render_long_help()
+            .to_string()
+            .contains("envchain"));
+    }
+
+    #[test]
+    fn botcli_reads_buzz_private_key_and_relay_url() {
+        let _lock = lock_env();
+        let _restore = EnvRestore::capture();
+        let secret = "nsec1throwawaybotserveris26inprocess";
+        let relay_url = "ws://127.0.0.1:13001";
+        std::env::set_var("BUZZ_PRIVATE_KEY", secret);
+        std::env::set_var("BUZZ_RELAY_URL", relay_url);
+
+        assert_eq!(required_env("BUZZ_PRIVATE_KEY").expect("key"), secret);
+        assert_eq!(required_env("BUZZ_RELAY_URL").expect("url"), relay_url);
+        require_buzz_env().expect("buzz env");
+    }
+
+    #[test]
+    fn botcli_requires_buzz_env_names() {
+        let _lock = lock_env();
+        let _restore = EnvRestore::capture();
+        std::env::remove_var("BUZZ_PRIVATE_KEY");
+        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
+        let error = require_buzz_env().expect_err("missing key");
+        assert_eq!(error.to_string(), "missing BUZZ_PRIVATE_KEY");
+        assert!(!format!("{error:?}").contains("nsec"));
+
+        std::env::set_var("BUZZ_PRIVATE_KEY", "nsec1throwawaybotserveris26inprocess");
+        std::env::remove_var("BUZZ_RELAY_URL");
+        let error = require_buzz_env().expect_err("missing url");
+        assert_eq!(error.to_string(), "missing BUZZ_RELAY_URL");
     }
 
     #[test]
