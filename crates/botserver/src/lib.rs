@@ -419,7 +419,6 @@ impl KelpieClient {
         logical_agent_id: &str,
         incarnation_id: &str,
         snapshot_relpath: &str,
-        sender_id: &str,
     ) -> Result<String, KelpieError> {
         let resume = occupant_renew_resume(snapshot_relpath);
         let output = self.invoke(
@@ -430,8 +429,6 @@ impl KelpieClient {
                 logical_agent_id,
                 "--recipient-incarnation",
                 incarnation_id,
-                "--sender-id",
-                sender_id,
                 "--prepare-prompt",
                 OCCUPANT_RENEW_PREPARE,
                 "--prompt",
@@ -1105,12 +1102,7 @@ mod tests {
         let snapshot = ".botserver/places/bot-foobar.md";
 
         let renew_id = client
-            .arm_occupant_renew(
-                "occupant-agent",
-                "occupant-incarnation",
-                snapshot,
-                "waiter-agent",
-            )
+            .arm_occupant_renew("occupant-agent", "occupant-incarnation", snapshot)
             .expect("renew");
 
         assert_eq!(renew_id, "renew-1");
@@ -1124,10 +1116,7 @@ mod tests {
             .0
             .windows(2)
             .any(|pair| pair == ["--recipient-incarnation", "occupant-incarnation"]));
-        assert!(calls[0]
-            .0
-            .windows(2)
-            .any(|pair| pair == ["--sender-id", "waiter-agent"]));
+        assert!(!calls[0].0.iter().any(|argument| argument == "--sender-id"));
         assert!(calls[0]
             .0
             .windows(2)
@@ -1322,6 +1311,7 @@ pub mod actor;
 pub mod config;
 pub mod herdr;
 pub mod inbox;
+pub mod outbox;
 pub mod relay;
 pub mod snapshot;
 pub mod sqlite;
@@ -1611,4 +1601,32 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the turns cannot be read.
     fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error>;
+
+    /// Persist an outbound attempt without overwriting an accepted event id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the attempt cannot be persisted.
+    fn save_outbound_attempt(
+        &mut self,
+        attempt: &crate::outbox::OutboundAttempt,
+    ) -> Result<(), Self::Error>;
+
+    /// Load a durable outbound attempt by ask id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the attempt cannot be read.
+    fn outbound_attempt(
+        &self,
+        ask_id: &str,
+    ) -> Result<Option<crate::outbox::OutboundAttempt>, Self::Error>;
+
+    /// Record the accepted outbound event id for a retry-safe republish.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the id cannot be persisted.
+    fn mark_outbound_accepted(&mut self, ask_id: &str, event_id: &str)
+        -> Result<bool, Self::Error>;
 }

@@ -113,8 +113,8 @@ triggers. `ignore_self` still blocks retrigger.
 The leftover `botcli` crate is not the occupant path (D4/D22 retracted).
 It remains until a later removal issue.
 
-Crash-safe outbox (durable outbound attempt, same event id on retry) is
-a later issue.
+The host persists a durable outbound attempt before publish. Retry of
+an accepted send uses that same outbound event id (D28).
 
 ## Inbox
 

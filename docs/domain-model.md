@@ -29,7 +29,9 @@ Work owed for one triggering Nostr event. Holds: event id, Kelpie ask
 id, `TurnState` (`queued`, `open`, `posted`, `failed`, `cancelled`).
 Completing a turn is occupant `kelpie reply --final`, then host
 publish, then `inbox.ack`, not cancel. Publish reservation is a claim,
-not a state (D28).
+not a state (D28). The host keeps a durable outbound attempt (body,
+channel, trigger EventId, mention, accepted event id) so retry cannot
+mint a second `[bot]:`.
 
 ## Values
 

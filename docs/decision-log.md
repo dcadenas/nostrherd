@@ -306,8 +306,9 @@ cancel MUST UPDATE only `queued` rows or `open` rows whose claim is
 clear. A claimed turn is treated as already landing: later edits and
 deletes of that EventId are ignored (D14 after publish). A failed
 publish MUST clear the claim so retry can proceed. Do not add a
-`publishing` TurnState. Crash-safe outbox (same event id on retry) is
-a later issue.
+`publishing` TurnState. After relay accept the host stores the outbound
+event id on the attempt so a crash retries that same event, not a
+second `[bot]:`.
 
 ## D29. envchain wraps the process; binaries only read env
 
@@ -372,8 +373,8 @@ Status: accepted
 Amends D27. Snapshot files stay. The occupant arms its own wall-clock
 renew. The host MUST NOT arm occupant renew with `--sender-id` of
 waiter `botserver`, so this inbox only sees channel asks the host
-created. Host runtime at this SHA still arms that way; a later issue
-removes it. `renew_id` remains until then.
+created. The host may still schedule the policy on the occupant's
+incarnation. `renew_id` remains the stored policy id.
 
 ## D33. Inbox ACK after the host decides
 

@@ -810,6 +810,28 @@ mod tests {
         fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error> {
             unreachable!()
         }
+
+        fn save_outbound_attempt(
+            &mut self,
+            _attempt: &crate::outbox::OutboundAttempt,
+        ) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        fn outbound_attempt(
+            &self,
+            _ask_id: &str,
+        ) -> Result<Option<crate::outbox::OutboundAttempt>, Self::Error> {
+            unreachable!()
+        }
+
+        fn mark_outbound_accepted(
+            &mut self,
+            _ask_id: &str,
+            _event_id: &str,
+        ) -> Result<bool, Self::Error> {
+            unreachable!()
+        }
     }
 
     fn event(kind: u16, content: &str, tags: impl IntoIterator<Item = Tag>) -> Event {

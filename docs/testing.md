@@ -11,6 +11,10 @@ cargo test --all-targets
 `crates/botserver/src/spec_flows.rs` is in-process acceptance of SPEC
 flows 1–12. It is not a live relay proof.
 
+`crates/botserver/src/outbox.rs` and `inbox.rs` prove host publish on
+kelpie final, ACK-after-decide, and crash-safe retry of the same
+outbound event. That is not a live relay proof.
+
 `TriggerMatch` and `TurnTransition` are parsed types in
 `crates/domain`. Illegal trigger text and illegal turn changes are
 `None`, not stringly-typed later.

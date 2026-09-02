@@ -43,8 +43,21 @@ impl fmt::Display for BotId {
 /// Inbound trigger token required by D9.
 pub const INBOUND_TRIGGER: &str = "bot:";
 
-/// Outbound stamp applied by `botcli`.
+/// Outbound stamp applied by the host.
 pub const OUTBOUND_PREFIX: &str = "[bot]:";
+
+/// Prefix occupant prose with `[bot]:` once.
+#[must_use]
+pub fn stamp_outbound(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.starts_with(OUTBOUND_PREFIX) {
+        trimmed.to_owned()
+    } else if trimmed.is_empty() {
+        OUTBOUND_PREFIX.to_owned()
+    } else {
+        format!("{OUTBOUND_PREFIX} {trimmed}")
+    }
+}
 
 /// Configured personality mapped to one in-process actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,6 +568,13 @@ mod tests {
                 "unexpected trigger: {body}"
             );
         }
+    }
+
+    #[test]
+    fn stamp_outbound_prefixes_once() {
+        assert_eq!(stamp_outbound("hello"), "[bot]: hello");
+        assert_eq!(stamp_outbound("  [bot]: already  "), "[bot]: already");
+        assert_eq!(stamp_outbound("[bot]:already"), "[bot]:already");
     }
 
     #[test]
