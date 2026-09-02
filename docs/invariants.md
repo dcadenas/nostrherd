@@ -6,7 +6,7 @@ this file and SPEC disagree.
 | # | Invariant | Test |
 | --- | --- | --- |
 | I1 | Two bots MUST NOT share a session name | `session_name_tries_more_of_uuid_after_a_prefix_collision`, `session_names_disambiguate_when_bot_and_display_collide`, `session_names_include_the_bot_id` |
-| I2 | A session for place A MUST NOT be given history from place B | `snapshot_omits_other_channels_including_dms` |
+| I2 | A session for place A MUST NOT be given history from place B | `snapshot_omits_other_channels_including_dms`, `later_ask_includes_unread_same_channel_delta` |
 | I3 | Replaying a processed `EventId` MUST NOT open a second turn | `processed_events_are_idempotent` |
 | I4 | Kelpie `from=` for this host is only `botserver` | `names_socket_waiter_botserver`, `ask_is_owned_by_waiter_and_passes_body_on_stdin` |
 | I5 | A trigger is first token `{bot-id}:` after an optional mention, plus either an operator `p`-tag or operator authorship | `trigger_requires_operator_p_tag_unless_operator_authored`, `trigger_allows_one_leading_mention`, `trigger_rejects_non_prefix_and_inexact_tokens`, `operator_authored_bot_colon_without_self_p_tag_emits`, `peer_authored_bot_colon_without_operator_p_tag_is_indexed_only`, `inbound_trigger_token_is_the_configured_bot_id`, `bot_uses_id_as_inbound_trigger_and_rejects_empty_kind` |

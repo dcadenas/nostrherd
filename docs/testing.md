@@ -20,6 +20,10 @@ live relay proof.
 `crates/domain`. Illegal trigger text and illegal turn changes are
 `None`, not stringly-typed later.
 
+Ask body shape (request, then capped Context) is proved by
+`crates/botserver/src/ask_body.rs` and
+`ask_context_includes_unprefixed_line_between_triggers`.
+
 Invariants and their tests: `docs/invariants.md`.
 
 ## SPEC flow matrix
@@ -50,7 +54,7 @@ with leftover `botcli`. Occupant steps below match the current path
 
 ## Live local relay
 
-Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, and 41 require it.
+Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, and 41 require it.
 
 Issue 41 names new occupants from Buzz place display. Create a stream
 with `--name eng`, trigger it, then:
@@ -900,6 +904,52 @@ late final after delete
 EOF
 sleep 3
 bot_stamped "$DELETE"
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
+```
+
+### Ask context delta (issue 40)
+
+An unprefixed line between two `{id}:` triggers must appear in the
+second ask's Context. Do not print nsecs, pubkeys, or event ids.
+
+```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is40
+mkdir -p "$PROOF"
+./tools/local-relay up
+cargo build -p botserver
+
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$ROOT/corpus/example-bot"
+kind = "opencode"
+EOF
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
+  --name botserver-is40 --type stream --visibility open > "$PROOF/channel.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
+  "$PROOF/channel.json" "$PROOF/channel.id"
+CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
+
+rm -f "$PROOF/host.sqlite"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
+HOST_PID=$!
+
+# First trigger, occupant replies, then an unprefixed line, then a second trigger.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
+# Wait for open turn; kelpie reply --final; then:
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'and the PR?'
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: later'
+# Read the occupant pane. Expect the second ask request "later" and a
+# Context section containing "and the PR?".
 kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```

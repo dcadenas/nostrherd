@@ -665,6 +665,8 @@ mod tests {
                 session_name: "bot-foobar".to_owned(),
                 occupant_logical_id: Some("occupant-agent".to_owned()),
                 renew_id: None,
+                ask_context_event_id: None,
+                ask_context_created_at: None,
             })
             .unwrap();
         repository
