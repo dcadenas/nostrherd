@@ -82,6 +82,7 @@ enum HostError {
     Actor(ActorError<rusqlite::Error>),
     NoBots,
     NotificationClosed,
+    InboxClosed,
 }
 
 impl fmt::Display for HostError {
@@ -100,6 +101,7 @@ impl fmt::Display for HostError {
             Self::Actor(error) => write!(formatter, "{error}"),
             Self::NoBots => formatter.write_str("bot config has no bots"),
             Self::NotificationClosed => formatter.write_str("relay notification channel closed"),
+            Self::InboxClosed => formatter.write_str("kelpie inbox closed"),
         }
     }
 }
@@ -119,7 +121,8 @@ impl std::error::Error for HostError {
             Self::MissingEnv(_)
             | Self::InvalidOperatorKey
             | Self::NoBots
-            | Self::NotificationClosed => None,
+            | Self::NotificationClosed
+            | Self::InboxClosed => None,
         }
     }
 }
@@ -440,7 +443,7 @@ async fn serve(
                     }
                 }
                 Some(_) => {}
-                None => eprintln!("kelpie inbox closed"),
+                None => return Err(HostError::InboxClosed),
             }
         }
     }

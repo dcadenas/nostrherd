@@ -551,23 +551,19 @@ CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
 OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
 
 rm -f "$PROOF/host.sqlite"
-envchain botserver-proof "$ROOT/target/debug/botserver" \
-  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
+HOST_PID=$!
 
-# Expect: report lists waiter botserver with no observed pane. Occupant from= is botserver.
-kelpie --json report --live
-
-env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
-  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
-ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
-  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
-OCCUPANT_PANE=$(kelpie --json report --live | python3 -c 'import json,sys
+occupant_pane() {
+  kelpie --json report --live | python3 -c 'import json,sys
 d=json.load(sys.stdin)
+want=sys.argv[1]
 found=[]
 def walk(obj):
     if isinstance(obj, dict):
         incs=obj.get("incarnations")
-        if incs and obj.get("public_name") and str(obj.get("public_name")).startswith("bot-"):
+        if incs and obj.get("public_name")==want:
             pane=(incs[0] or {}).get("observed_pane_id")
             if pane:
                 found.append(pane)
@@ -578,7 +574,18 @@ def walk(obj):
             walk(v)
 walk(d.get("result") or d)
 print(found[-1] if found else "")
-')
+' "$1"
+}
+
+# Expect: report lists waiter botserver with no observed pane.
+kelpie --json report --live
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
+ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
+SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$CHANNEL';")
+OCCUPANT_PANE=$(occupant_pane "$SNAME")
 HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   "$ROOT/target/debug/botcli" send --stdin \
   --database "$PROOF/host.sqlite" \
@@ -586,7 +593,44 @@ HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   --channel "$CHANNEL" <<'EOF'
 hello from example-bot
 EOF
-# Expect: one [bot]: body. kelpie pending for the occupant is empty after ACK.
+# Expect: one [bot]: body. kelpie pending "$SNAME" is empty after ACK.
+kelpie --json pending "$SNAME"
+
+# Drop-host: second trigger, kill host, occupant replies, pending stays open.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: drop-host'
+ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
+kill "$HOST_PID"
+OCCUPANT_PANE=$(occupant_pane "$SNAME")
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
+  "$ROOT/target/debug/botcli" send --stdin \
+  --database "$PROOF/host.sqlite" \
+  --ask-id "$ASK_ID" \
+  --channel "$CHANNEL" <<'EOF'
+after host drop
+EOF
+# Expect: kelpie pending "$SNAME" still lists the ask.
+kelpie --json pending "$SNAME"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
+HOST_PID=$!
+# Expect: pending empties after inbox.ack on reconnect.
+kelpie --json pending "$SNAME"
+
+# Delete before publish: trigger, delete, unposted turn cancelled.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
+  > "$PROOF/delete-trigger.json"
+python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
+  "$PROOF/delete-trigger.json" "$PROOF/delete-trigger.id"
+sleep 2
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete \
+  --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" > "$PROOF/delete.json"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' ORDER BY t.sequence;"
+kill "$HOST_PID"
 ```
 
 Wrap binaries with envchain. Do not pass `--envchain` (D29):

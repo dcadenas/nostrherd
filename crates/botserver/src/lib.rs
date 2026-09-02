@@ -404,6 +404,7 @@ impl KelpieClient {
         logical_agent_id: &str,
         incarnation_id: &str,
         snapshot_relpath: &str,
+        sender_id: &str,
     ) -> Result<String, KelpieError> {
         let resume = occupant_renew_resume(snapshot_relpath);
         let output = self.invoke(
@@ -414,6 +415,8 @@ impl KelpieClient {
                 logical_agent_id,
                 "--recipient-incarnation",
                 incarnation_id,
+                "--sender-id",
+                sender_id,
                 "--prepare-prompt",
                 OCCUPANT_RENEW_PREPARE,
                 "--prompt",
@@ -1074,7 +1077,12 @@ mod tests {
         let snapshot = ".botserver/places/bot-foobar.md";
 
         let renew_id = client
-            .arm_occupant_renew("occupant-agent", "occupant-incarnation", snapshot)
+            .arm_occupant_renew(
+                "occupant-agent",
+                "occupant-incarnation",
+                snapshot,
+                "waiter-agent",
+            )
             .expect("renew");
 
         assert_eq!(renew_id, "renew-1");
@@ -1088,6 +1096,10 @@ mod tests {
             .0
             .windows(2)
             .any(|pair| pair == ["--recipient-incarnation", "occupant-incarnation"]));
+        assert!(calls[0]
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--sender-id", "waiter-agent"]));
         assert!(calls[0]
             .0
             .windows(2)

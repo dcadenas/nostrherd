@@ -530,6 +530,7 @@ where
                     .map_err(ActorError::Repository)?;
                 self.try_arm_renew(
                     kelpie,
+                    waiter,
                     occupant.logical_agent_id(),
                     occupant.incarnation_id(),
                     &snapshot_relpath,
@@ -582,6 +583,7 @@ where
                 .map_err(ActorError::Repository)?;
             self.try_arm_renew(
                 kelpie,
+                waiter,
                 occupant.logical_agent_id(),
                 occupant.incarnation_id(),
                 &snapshot_relpath,
@@ -594,6 +596,7 @@ where
             ) {
                 self.try_arm_renew(
                     kelpie,
+                    waiter,
                     &logical_id,
                     &incarnation_id,
                     &snapshot_relpath,
@@ -666,14 +669,18 @@ where
     fn try_arm_renew(
         &mut self,
         kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
         logical_id: &str,
         incarnation_id: &str,
         snapshot_relpath: &str,
         session: &mut SessionRecord,
     ) -> Result<(), ActorError<R::Error>> {
-        if let Ok(renew_id) =
-            kelpie.arm_occupant_renew(logical_id, incarnation_id, snapshot_relpath)
-        {
+        if let Ok(renew_id) = kelpie.arm_occupant_renew(
+            logical_id,
+            incarnation_id,
+            snapshot_relpath,
+            waiter.identity().logical_agent_id(),
+        ) {
             session.renew_id = Some(renew_id);
             self.repository
                 .save_session(session)
