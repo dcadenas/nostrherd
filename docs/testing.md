@@ -908,7 +908,6 @@ kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
 
-<<<<<<< HEAD
 ### Ask context delta (issue 40)
 
 An unprefixed line between two `{id}:` triggers must appear in the
