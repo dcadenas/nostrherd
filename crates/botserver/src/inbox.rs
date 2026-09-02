@@ -94,6 +94,7 @@ pub struct InboxConn {
     reader: BufReader<UnixStream>,
     next_id: u64,
     pending: VecDeque<Value>,
+    partial: String,
 }
 
 impl InboxConn {
@@ -117,6 +118,7 @@ impl InboxConn {
             reader,
             next_id: 1,
             pending: VecDeque::new(),
+            partial: String::new(),
         };
         let claimed = conn.read_json()?;
         if claimed.pointer("/result/claimed").and_then(Value::as_bool) != Some(true) {
@@ -142,6 +144,17 @@ impl InboxConn {
     ///
     /// Returns an error when Kelpie rejects the ACK or the connection drops.
     pub fn ack(&mut self, message_id: &str) -> Result<(), KelpieError> {
+        self.stream
+            .set_read_timeout(None)
+            .map_err(KelpieError::from)?;
+        let result = self.ack_inner(message_id);
+        let _ = self
+            .stream
+            .set_read_timeout(Some(Duration::from_millis(100)));
+        result
+    }
+
+    fn ack_inner(&mut self, message_id: &str) -> Result<(), KelpieError> {
         let id = format!("ack-{}", self.next_id);
         self.next_id += 1;
         let request = serde_json::json!({
@@ -283,17 +296,25 @@ impl InboxConn {
         if let Some(pending) = self.pending.pop_front() {
             return Ok(pending);
         }
-        let mut line = String::new();
-        let read = self
-            .reader
-            .read_line(&mut line)
-            .map_err(KelpieError::from)?;
-        if read == 0 || !line.ends_with('\n') {
-            return Err(KelpieError::from(io::Error::from(
+        match self.reader.read_line(&mut self.partial) {
+            Ok(0) => Err(KelpieError::from(io::Error::from(
                 io::ErrorKind::UnexpectedEof,
-            )));
+            ))),
+            Ok(_) if self.partial.ends_with('\n') => {
+                let line = std::mem::take(&mut self.partial);
+                serde_json::from_str(line.trim_end()).map_err(|error| json_error(&error))
+            }
+            Ok(_) => Err(KelpieError::from(io::Error::from(
+                io::ErrorKind::UnexpectedEof,
+            ))),
+            Err(error)
+                if error.kind() == io::ErrorKind::TimedOut
+                    || error.kind() == io::ErrorKind::WouldBlock =>
+            {
+                Err(KelpieError::from(error))
+            }
+            Err(error) => Err(KelpieError::from(error)),
         }
-        serde_json::from_str(line.trim_end()).map_err(|error| json_error(&error))
     }
 }
 

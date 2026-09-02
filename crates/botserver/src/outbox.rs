@@ -27,6 +27,7 @@ pub struct OutboundAttempt {
     pub reply_to_event_id: EventId,
     pub mention: String,
     pub outbound_event_id: Option<String>,
+    pub dispatched: bool,
 }
 
 /// Failure while classifying or publishing an occupant final.
@@ -69,6 +70,8 @@ pub enum PublishError {
     CommandFailed { status: String, stderr: String },
     /// Buzz returned a receipt the host cannot retry safely.
     InvalidReceipt(String),
+    /// Buzz exited 0 so the relay accepted; the id could not be recorded.
+    AcceptedUnrecorded(String),
 }
 
 impl fmt::Display for PublishError {
@@ -79,7 +82,21 @@ impl fmt::Display for PublishError {
                 write!(formatter, "buzz exited with {status}: {stderr}")
             }
             Self::InvalidReceipt(reason) => write!(formatter, "invalid buzz receipt: {reason}"),
+            Self::AcceptedUnrecorded(reason) => {
+                write!(formatter, "relay accepted; not retrying: {reason}")
+            }
         }
+    }
+}
+
+impl PublishError {
+    /// Command and I/O failures may retry. An accepted send must not.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_) | Self::CommandFailed { .. } | Self::InvalidReceipt(_)
+        )
     }
 }
 
@@ -87,7 +104,9 @@ impl std::error::Error for PublishError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::CommandFailed { .. } | Self::InvalidReceipt(_) => None,
+            Self::CommandFailed { .. } | Self::InvalidReceipt(_) | Self::AcceptedUnrecorded(_) => {
+                None
+            }
         }
     }
 }
@@ -109,6 +128,12 @@ pub trait OutboundPublisher {
     ///
     /// Returns an error when the relay does not accept the event.
     fn publish(&self, attempt: &OutboundAttempt) -> Result<String, Self::Error>;
+
+    /// Return whether this error may call send again.
+    fn retryable(error: &Self::Error) -> bool {
+        let _ = error;
+        true
+    }
 }
 
 /// Host wrapper around `buzz messages send` that records the accepted id.
@@ -147,16 +172,18 @@ impl OutboundPublisher for BuzzPublisher {
             .expect("piped stdin is available")
             .write_all(stamp_outbound(&attempt.body).as_bytes());
         let output = child.wait_with_output()?;
-        if output.status.success() {
-            write_result?;
-        } else {
+        if !output.status.success() {
+            let _ = write_result;
             return Err(PublishError::CommandFailed {
                 status: output.status.to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             });
         }
-        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|error| PublishError::InvalidReceipt(error.to_string()))?;
+        let _ = write_result;
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                PublishError::AcceptedUnrecorded(format!("unreadable receipt: {error}"))
+            })?;
         if receipt.get("accepted").and_then(serde_json::Value::as_bool) != Some(true) {
             return Err(PublishError::InvalidReceipt(
                 "relay did not accept the event".to_owned(),
@@ -167,7 +194,11 @@ impl OutboundPublisher for BuzzPublisher {
             .and_then(serde_json::Value::as_str)
             .and_then(EventId::parse_hex)
             .map(|event_id| event_id.as_str().to_owned())
-            .ok_or_else(|| PublishError::InvalidReceipt("missing event_id".to_owned()))
+            .ok_or_else(|| PublishError::AcceptedUnrecorded("missing event_id".to_owned()))
+    }
+
+    fn retryable(error: &Self::Error) -> bool {
+        error.is_retryable()
     }
 }
 
@@ -233,7 +264,7 @@ where
     P: OutboundPublisher,
 {
     let Some(ask_id) = delivery.reply_to() else {
-        return Ok(InboxAction::Hold);
+        return Ok(InboxAction::Ack);
     };
     let turn = repository
         .turn_by_ask_id(ask_id)
@@ -249,17 +280,23 @@ where
         }
         Decision::AckWithoutPublish => Ok(InboxAction::Ack),
         Decision::Publish { body } => match turn {
-            Some(turn) => publish_final(repository, publisher, &turn, &body),
+            Some(turn) => complete_outbound(repository, publisher, notice, &turn, Some(&body)),
             None => Ok(InboxAction::Hold),
         },
     }
 }
 
-fn publish_final<R, P>(
+/// Finish publish for an open turn, using a stored attempt when `body` is None.
+///
+/// # Errors
+///
+/// Returns an error when persistence or a retryable publish fails.
+pub fn complete_outbound<R, P>(
     repository: &mut R,
     publisher: &P,
+    notice: &mut impl FnMut(&str),
     turn: &TurnRecord,
-    body: &str,
+    body: Option<&str>,
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
 where
     R: HostRepository,
@@ -277,42 +314,77 @@ where
         .map_err(OutboxError::Repository)?
         .unwrap_or_else(|| OutboundAttempt {
             ask_id: ask_id.to_owned(),
-            body: body.to_owned(),
+            body: body.unwrap_or("").to_owned(),
             channel_id: turn.channel_id.clone(),
             reply_to_event_id: turn.event_id.clone(),
             mention,
             outbound_event_id: None,
+            dispatched: false,
         });
-    if attempt.outbound_event_id.is_none() {
-        body.clone_into(&mut attempt.body);
+    if attempt.outbound_event_id.is_none() && !attempt.dispatched {
+        if let Some(body) = body {
+            body.clone_into(&mut attempt.body);
+        }
         attempt.channel_id.clone_from(&turn.channel_id);
         attempt.reply_to_event_id.clone_from(&turn.event_id);
     }
     repository
         .save_outbound_attempt(&attempt)
         .map_err(OutboxError::Repository)?;
-    if attempt.outbound_event_id.is_none() {
-        let claimed = repository
-            .claim_turn_for_publish(ask_id)
+    if attempt.outbound_event_id.is_some() {
+        let _ = repository
+            .set_turn_state(ask_id, TurnState::Posted)
             .map_err(OutboxError::Repository)?;
-        let still_open = repository
-            .turn_by_ask_id(ask_id)
-            .map_err(OutboxError::Repository)?
-            .is_some_and(|turn| turn.state == TurnState::Open);
-        if !claimed && !still_open {
+        return Ok(InboxAction::Ack);
+    }
+    if attempt.dispatched {
+        notice(&format!(
+            "not retrying outbound for ask {ask_id}; send already invoked"
+        ));
+        let _ = repository
+            .set_turn_state(ask_id, TurnState::Failed)
+            .map_err(OutboxError::Repository)?;
+        return Ok(InboxAction::Ack);
+    }
+    let claimed = repository
+        .claim_turn_for_publish(ask_id)
+        .map_err(OutboxError::Repository)?;
+    let still_open = repository
+        .turn_by_ask_id(ask_id)
+        .map_err(OutboxError::Repository)?
+        .is_some_and(|turn| turn.state == TurnState::Open);
+    if !claimed && !still_open {
+        return Ok(InboxAction::Ack);
+    }
+    attempt.dispatched = true;
+    repository
+        .save_outbound_attempt(&attempt)
+        .map_err(OutboxError::Repository)?;
+    match publisher.publish(&attempt) {
+        Ok(event_id) => {
+            if !repository
+                .mark_outbound_accepted(ask_id, &event_id)
+                .map_err(OutboxError::Repository)?
+            {
+                notice(&format!(
+                    "outbound event id for ask {ask_id} did not replace a prior id"
+                ));
+            }
+        }
+        Err(error) if !P::retryable(&error) => {
+            notice(&format!(
+                "accepted outbound for ask {ask_id} without a stored id"
+            ));
+            let _ = repository
+                .set_turn_state(ask_id, TurnState::Posted)
+                .map_err(OutboxError::Repository)?;
             return Ok(InboxAction::Ack);
         }
-        match publisher.publish(&attempt) {
-            Ok(event_id) => {
-                repository
-                    .mark_outbound_accepted(ask_id, &event_id)
-                    .map_err(OutboxError::Repository)?;
-                attempt.outbound_event_id = Some(event_id);
-            }
-            Err(error) => {
-                let _ = repository.release_publish_claim(ask_id);
-                return Err(OutboxError::Publish(error));
-            }
+        Err(error) => {
+            attempt.dispatched = false;
+            let _ = repository.save_outbound_attempt(&attempt);
+            let _ = repository.release_publish_claim(ask_id);
+            return Err(OutboxError::Publish(error));
         }
     }
     let _ = repository
@@ -537,6 +609,7 @@ mod tests {
                 reply_to_event_id: event_id('a'),
                 mention: "c".repeat(64),
                 outbound_event_id: Some("d".repeat(64)),
+                dispatched: true,
             })
             .unwrap();
         repository.claim_turn_for_publish("ask-1").unwrap();
@@ -552,6 +625,60 @@ mod tests {
         assert_eq!(
             repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
             TurnState::Posted
+        );
+    }
+
+    #[test]
+    fn crash_after_dispatch_without_id_does_not_publish_again() {
+        let (mut repository, publisher) = open_repo();
+        repository
+            .save_outbound_attempt(&OutboundAttempt {
+                ask_id: "ask-1".to_owned(),
+                body: "hello".to_owned(),
+                channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
+                reply_to_event_id: event_id('a'),
+                mention: "c".repeat(64),
+                outbound_event_id: None,
+                dispatched: true,
+            })
+            .unwrap();
+        repository.claim_turn_for_publish("ask-1").unwrap();
+        let mut notices = Vec::new();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut |notice| notices.push(notice.to_owned()),
+            &delivery("final", "ask-1", "hello"),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Failed
+        );
+        assert_eq!(notices.len(), 1);
+    }
+
+    #[test]
+    fn missing_reply_to_acks_without_publish() {
+        let (mut repository, publisher) = open_repo();
+        let delivery = crate::inbox::parse_delivery(&serde_json::json!({
+            "method": "inbox.delivery",
+            "params": {
+                "message_id": "msg-1",
+                "kind": "tell",
+                "body": "hi"
+            }
+        }))
+        .expect("delivery");
+        let action = handle_delivery(&mut repository, &publisher, &mut notices(), &delivery)
+            .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Open
         );
     }
 

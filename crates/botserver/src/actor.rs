@@ -333,6 +333,74 @@ where
         Ok(action)
     }
 
+    /// Retry unfinished outbound attempts after a dropped inbox delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence or publish fails.
+    pub fn retry_outbound<Pub: OutboundPublisher>(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        publisher: &Pub,
+    ) -> Result<(), ActorError<R::Error>>
+    where
+        R::Error: fmt::Display,
+        Pub::Error: fmt::Display,
+    {
+        let sessions = self
+            .repository
+            .sessions_with_pending_turns()
+            .map_err(ActorError::Repository)?;
+        let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        for session in sessions {
+            if session.bot_id != *self.bot.id() {
+                continue;
+            }
+            let turns = self
+                .repository
+                .turns_for_session(&session.bot_id, &session.channel_id)
+                .map_err(ActorError::Repository)?;
+            for turn in turns {
+                if turn.state != TurnState::Open {
+                    continue;
+                }
+                let Some(ask_id) = turn.ask_id.as_deref() else {
+                    continue;
+                };
+                if self
+                    .repository
+                    .outbound_attempt(ask_id)
+                    .map_err(ActorError::Repository)?
+                    .is_none()
+                {
+                    continue;
+                }
+                let action = outbox::complete_outbound(
+                    &mut self.repository,
+                    publisher,
+                    &mut notice,
+                    &turn,
+                    None,
+                )
+                .map_err(|error| match error {
+                    OutboxError::Repository(error) => ActorError::Repository(error),
+                    OutboxError::Publish(error) => ActorError::Outbox(error.to_string()),
+                })?;
+                if action == InboxAction::Ack
+                    && self
+                        .repository
+                        .turn_by_ask_id(ask_id)
+                        .map_err(ActorError::Repository)?
+                        .is_some_and(|turn| turn.state == TurnState::Posted)
+                {
+                    self.resume_queued(kelpie, waiter)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Drain the next queued turn after an in-flight turn is posted.
     ///
     /// # Errors

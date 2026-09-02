@@ -491,6 +491,9 @@ async fn serve(
                     &mut poll,
                 )
                 .await?;
+                if let Err(error) = actor.retry_outbound(&kelpie, &waiter, &publisher) {
+                    eprintln!("outbound retry failed: {error}");
+                }
             }
             delivery = inbox.recv() => match delivery {
                 Some(delivery) => {

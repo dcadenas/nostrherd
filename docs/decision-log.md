@@ -306,9 +306,10 @@ cancel MUST UPDATE only `queued` rows or `open` rows whose claim is
 clear. A claimed turn is treated as already landing: later edits and
 deletes of that EventId are ignored (D14 after publish). A failed
 publish MUST clear the claim so retry can proceed. Do not add a
-`publishing` TurnState. After relay accept the host stores the outbound
-event id on the attempt so a crash retries that same event, not a
-second `[bot]:`.
+`publishing` TurnState. The host records `dispatched` before calling send. After relay accept it
+stores the outbound event id. A crash after dispatch without an id does
+not call send again, so retry cannot mint a second `[bot]:`. `buzz
+messages send` has no prebuilt-id flag; this wrap is the retry boundary.
 
 ## D29. envchain wraps the process; binaries only read env
 
@@ -359,12 +360,10 @@ triggers. `ignore_self` still blocks retrigger.
 I10 is a host MUST: a late occupant final on a cancelled ask MUST NOT
 publish.
 
-Shipping README, operator-runbook, `docs/testing.md`,
-`corpus/example-bot`, and the D23 live-test proof harness still describe
-leftover `botcli`. This revision does not rewrite them: the shipping
-publish path is still occupant-side `botcli`, and flipping occupant
-recipes would break D23 live-test proofs before a later host-publish
-issue lands.
+The host is the shipping publish path. Shipping README, operator-runbook,
+`docs/testing.md`, `corpus/example-bot`, and the D23 live-test proof
+harness still describe leftover `botcli`. Occupant send recipes stay
+until a later removal issue so those live proofs are not flipped here.
 
 ## D32. Occupant self-renews
 
