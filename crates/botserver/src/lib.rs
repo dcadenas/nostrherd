@@ -1308,6 +1308,7 @@ mod tests {
     }
 }
 pub mod actor;
+pub mod ask_body;
 pub mod config;
 pub mod herdr;
 pub mod inbox;
@@ -1347,6 +1348,8 @@ pub struct SessionRecord {
     pub session_name: String,
     pub occupant_logical_id: Option<String>,
     pub renew_id: Option<String>,
+    pub ask_context_event_id: Option<EventId>,
+    pub ask_context_created_at: Option<i64>,
 }
 
 /// Coordinates needed to persist a queued turn.

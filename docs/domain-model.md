@@ -21,7 +21,8 @@ A live conversation lane for one bot in one Buzz **channel UUID**
 (including DMs). Name is derived, e.g. `bot-foobar`. Threads are not
 sessions (D10).
 Holds: place id, occupant Kelpie logical id when bound, renew id when
-armed.
+armed, and the ask-context cursor (last stuffed event id /
+created_at).
 
 ### Turn
 

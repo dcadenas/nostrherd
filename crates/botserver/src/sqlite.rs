@@ -84,15 +84,19 @@ impl SqliteRepository {
                      REFERENCES relay_events(event_id)
              ) STRICT;
 
-             CREATE TABLE IF NOT EXISTS sessions (
-                 id INTEGER PRIMARY KEY,
-                 bot_id TEXT NOT NULL,
-                 channel_id TEXT NOT NULL,
-                 session_name TEXT NOT NULL UNIQUE,
-                 occupant_logical_id TEXT,
-                 renew_id TEXT,
-                 UNIQUE(bot_id, channel_id)
-             ) STRICT;
+              CREATE TABLE IF NOT EXISTS sessions (
+                  id INTEGER PRIMARY KEY,
+                  bot_id TEXT NOT NULL,
+                  channel_id TEXT NOT NULL,
+                  session_name TEXT NOT NULL UNIQUE,
+                  occupant_logical_id TEXT,
+                  renew_id TEXT,
+                  ask_context_event_id TEXT CHECK(
+                      ask_context_event_id IS NULL OR length(ask_context_event_id) = 64
+                  ),
+                  ask_context_created_at INTEGER,
+                  UNIQUE(bot_id, channel_id)
+              ) STRICT;
 
              CREATE TABLE IF NOT EXISTS turns (
                  sequence INTEGER PRIMARY KEY,
@@ -145,6 +149,14 @@ impl SqliteRepository {
             &connection,
             "ALTER TABLE outbound_attempts ADD COLUMN dispatched INTEGER NOT NULL DEFAULT 0",
         )?;
+        add_column_if_missing(
+            &connection,
+            "ALTER TABLE sessions ADD COLUMN ask_context_event_id TEXT",
+        )?;
+        add_column_if_missing(
+            &connection,
+            "ALTER TABLE sessions ADD COLUMN ask_context_created_at INTEGER",
+        )?;
         Ok(Self { connection })
     }
 
@@ -166,6 +178,23 @@ impl SqliteRepository {
                 .transpose()?,
             state: TurnState::parse(&state)
                 .ok_or_else(|| invalid_value(6, "invalid turn state"))?,
+        })
+    }
+
+    fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
+        let stored_bot_id: String = row.get(0)?;
+        let event_id: Option<String> = row.get(5)?;
+        Ok(SessionRecord {
+            bot_id: parse_bot_id(&stored_bot_id, 0)?,
+            channel_id: row.get(1)?,
+            session_name: row.get(2)?,
+            occupant_logical_id: row.get(3)?,
+            renew_id: row.get(4)?,
+            ask_context_event_id: event_id
+                .as_deref()
+                .map(|value| parse_event_id(value, 5))
+                .transpose()?,
+            ask_context_created_at: row.get(6)?,
         })
     }
 
@@ -347,18 +376,23 @@ impl HostRepository for SqliteRepository {
     fn save_session(&mut self, session: &SessionRecord) -> Result<(), Self::Error> {
         self.connection.execute(
             "INSERT INTO sessions(
-                 bot_id, channel_id, session_name, occupant_logical_id, renew_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5)
+                 bot_id, channel_id, session_name, occupant_logical_id, renew_id,
+                 ask_context_event_id, ask_context_created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(bot_id, channel_id) DO UPDATE SET
                  session_name = excluded.session_name,
                  occupant_logical_id = excluded.occupant_logical_id,
-                 renew_id = excluded.renew_id",
+                 renew_id = excluded.renew_id,
+                 ask_context_event_id = excluded.ask_context_event_id,
+                 ask_context_created_at = excluded.ask_context_created_at",
             params![
                 session.bot_id.as_str(),
                 session.channel_id,
                 session.session_name,
                 session.occupant_logical_id,
                 session.renew_id,
+                session.ask_context_event_id.as_ref().map(EventId::as_str),
+                session.ask_context_created_at,
             ],
         )?;
         Ok(())
@@ -371,19 +405,11 @@ impl HostRepository for SqliteRepository {
     ) -> Result<Option<SessionRecord>, Self::Error> {
         self.connection
             .query_row(
-                "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id
+                "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id,
+                        ask_context_event_id, ask_context_created_at
                  FROM sessions WHERE bot_id = ?1 AND channel_id = ?2",
                 params![bot_id.as_str(), channel_id],
-                |row| {
-                    let stored_bot_id: String = row.get(0)?;
-                    Ok(SessionRecord {
-                        bot_id: parse_bot_id(&stored_bot_id, 0)?,
-                        channel_id: row.get(1)?,
-                        session_name: row.get(2)?,
-                        occupant_logical_id: row.get(3)?,
-                        renew_id: row.get(4)?,
-                    })
-                },
+                Self::read_session,
             )
             .optional()
     }
@@ -391,19 +417,11 @@ impl HostRepository for SqliteRepository {
     fn session_by_name(&self, session_name: &str) -> Result<Option<SessionRecord>, Self::Error> {
         self.connection
             .query_row(
-                "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id
+                "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id,
+                        ask_context_event_id, ask_context_created_at
                  FROM sessions WHERE session_name = ?1",
                 [session_name],
-                |row| {
-                    let stored_bot_id: String = row.get(0)?;
-                    Ok(SessionRecord {
-                        bot_id: parse_bot_id(&stored_bot_id, 0)?,
-                        channel_id: row.get(1)?,
-                        session_name: row.get(2)?,
-                        occupant_logical_id: row.get(3)?,
-                        renew_id: row.get(4)?,
-                    })
-                },
+                Self::read_session,
             )
             .optional()
     }
@@ -663,24 +681,14 @@ impl HostRepository for SqliteRepository {
     fn sessions_with_pending_turns(&self) -> Result<Vec<SessionRecord>, Self::Error> {
         let mut statement = self.connection.prepare(
             "SELECT DISTINCT s.bot_id, s.channel_id, s.session_name,
-                    s.occupant_logical_id, s.renew_id
+                    s.occupant_logical_id, s.renew_id,
+                    s.ask_context_event_id, s.ask_context_created_at
              FROM sessions AS s
              JOIN turns AS t ON t.session_id = s.id
              WHERE t.state IN ('queued', 'open')
              ORDER BY s.bot_id, s.channel_id",
         )?;
-        let sessions = statement
-            .query_map([], |row| {
-                let bot_id: String = row.get(0)?;
-                Ok(SessionRecord {
-                    bot_id: parse_bot_id(&bot_id, 0)?,
-                    channel_id: row.get(1)?,
-                    session_name: row.get(2)?,
-                    occupant_logical_id: row.get(3)?,
-                    renew_id: row.get(4)?,
-                })
-            })?
-            .collect();
+        let sessions = statement.query_map([], Self::read_session)?.collect();
         sessions
     }
 
@@ -830,6 +838,8 @@ mod tests {
             session_name: format!("{bot_id}-channel"),
             occupant_logical_id: Some("logical-agent-id".to_owned()),
             renew_id: Some("renew-id".to_owned()),
+            ask_context_event_id: None,
+            ask_context_created_at: None,
         }
     }
 
@@ -928,6 +938,10 @@ mod tests {
         repository.save_session(&expected).unwrap();
 
         expected.renew_id = Some("replacement-renew-id".to_owned());
+        repository.save_session(&expected).unwrap();
+
+        expected.ask_context_event_id = Some(event_id('c'));
+        expected.ask_context_created_at = Some(42);
         repository.save_session(&expected).unwrap();
 
         assert_eq!(

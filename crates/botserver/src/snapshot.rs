@@ -26,6 +26,18 @@ pub fn place_snapshot_relpath(session_name: &str) -> Option<String> {
     snapshot_file_stem(session_name).map(|name| format!(".botserver/places/{name}.md"))
 }
 
+/// One indexed event as a snapshot or ask-context line.
+#[must_use]
+pub fn render_indexed_event_line(event: &IndexedRelayEvent) -> String {
+    format!(
+        "- created_at={} kind={} author={}\n  {}\n",
+        event.created_at,
+        event.kind,
+        event.author_pubkey,
+        event.content.replace('\n', "\n  ")
+    )
+}
+
 /// Render last-N-days events for exactly one channel.
 #[must_use]
 pub fn render_place_snapshot(
@@ -51,14 +63,7 @@ pub fn render_place_snapshot(
             body.push_str("## Events\n\n");
             wrote_event = true;
         }
-        let _ = write!(
-            body,
-            "- created_at={} kind={} author={}\n  {}\n",
-            event.created_at,
-            event.kind,
-            event.author_pubkey,
-            event.content.replace('\n', "\n  ")
-        );
+        let _ = write!(body, "{}", render_indexed_event_line(event));
     }
     if !wrote_event {
         body.push_str("No indexed events in this window.\n");

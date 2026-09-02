@@ -11,9 +11,13 @@ use nostr_sdk::prelude::{Client, Event, EventBuilder, FinalizeEvent, Keys, Kind,
 use serde_json::Value;
 
 use crate::actor::{BotActor, OccupantPane, OccupantPaneAllocator, TriggerOutcome};
+use crate::ask_body::ask_body_request;
 use crate::relay::{IngestAction, RelayIngest, RelaySubscriber};
 use crate::sqlite::SqliteRepository;
-use crate::{CommandOutput, CommandRunner, HostRepository, KelpieClient, TurnState, WAITER_NAME};
+use crate::{
+    CommandOutput, CommandRunner, HostRepository, IndexedRelayEvent, KelpieClient, TurnState,
+    WAITER_NAME,
+};
 
 const FOOBAR: &str = "ab12cd34-5678-90ab-cdef-0123456789ab";
 const ENG: &str = "cd34ef56-7890-12ab-cdef-34567890abcd";
@@ -263,6 +267,20 @@ impl Harness {
     }
 }
 
+fn ask_requests(harness: &Harness) -> Vec<String> {
+    harness
+        .ask_bodies()
+        .iter()
+        .map(|body| ask_body_request(std::str::from_utf8(body).expect("utf8")).to_owned())
+        .collect()
+}
+
+fn ask_has_context(body: &[u8]) -> bool {
+    std::str::from_utf8(body)
+        .expect("utf8")
+        .contains("## Context")
+}
+
 fn session_name(
     actor: &BotActor<SqliteRepository, Arc<FakePanes>>,
     channel: &str,
@@ -326,7 +344,8 @@ fn flow_02_first_call_starts_bot_foobar_and_asks() {
     assert_eq!(turns[0].state, TurnState::Open);
     assert_eq!(turns[0].ask_id.as_deref(), Some("ask-1"));
     assert_eq!(turns[0].event_id.as_str(), message.id.to_hex());
-    assert_eq!(harness.ask_bodies(), vec![b"hello".to_vec()]);
+    assert_eq!(ask_requests(&harness), vec!["hello".to_owned()]);
+    assert!(ask_has_context(&harness.ask_bodies()[0]));
     assert_eq!(
         harness.panes.calls.lock().expect("panes")[0].0,
         "bot-foobar"
@@ -412,9 +431,91 @@ fn flow_04_second_call_reuses_the_same_occupant() {
         1
     );
     assert_eq!(
-        harness.ask_bodies().last().map(Vec::as_slice),
-        Some(&b"later"[..])
+        ask_requests(&harness).last().map(String::as_str),
+        Some("later")
     );
+    assert!(ask_has_context(harness.ask_bodies().last().expect("ask")));
+}
+
+#[test]
+fn ask_context_includes_unprefixed_line_between_triggers() {
+    let harness = Harness::new([
+        adopt(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+        whoami(),
+        asked("ask-2"),
+    ]);
+    let first = trigger_event(FOOBAR, "@daniel bot: hello", None);
+    let first_action = harness.ingest(&first).expect("first");
+    let mut actor = harness.actor();
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
+    actor
+        .handle_ingest(&harness.kelpie, &waiter, &first_action, "Foobar")
+        .expect("first");
+    actor
+        .repository
+        .set_turn_state("ask-1", TurnState::Posted)
+        .expect("posted");
+
+    let follow_up = ordinary_event(FOOBAR, "and the PR?");
+    assert_eq!(harness.ingest(&follow_up), None);
+    let first_created = actor
+        .repository
+        .indexed_event(&turns(&actor, FOOBAR)[0].event_id)
+        .expect("first event")
+        .expect("indexed")
+        .created_at;
+    actor
+        .repository
+        .index_event(
+            &IndexedRelayEvent {
+                event_id: EventId::parse_hex(&"c".repeat(64)).expect("event"),
+                author_pubkey: "b".repeat(64),
+                created_at: first_created + 1,
+                kind: 9,
+                content: "and the PR?".to_owned(),
+                tags_json: "[]".to_owned(),
+                channel_id: Some(FOOBAR.to_owned()),
+                target_event_id: None,
+            },
+            false,
+        )
+        .expect("later unprefixed");
+    actor
+        .repository
+        .index_event(
+            &IndexedRelayEvent {
+                event_id: EventId::parse_hex(&"d".repeat(64)).expect("event"),
+                author_pubkey: "b".repeat(64),
+                created_at: first_created + 1,
+                kind: 9,
+                content: "secret dm".to_owned(),
+                tags_json: "[]".to_owned(),
+                channel_id: Some(DM.to_owned()),
+                target_event_id: None,
+            },
+            false,
+        )
+        .expect("other place");
+
+    let second = trigger_event(FOOBAR, "@daniel bot: later", None);
+    let second_action = harness.ingest(&second).expect("second");
+    assert_eq!(
+        actor
+            .handle_ingest(&harness.kelpie, &waiter, &second_action, "Foobar")
+            .expect("second"),
+        TriggerOutcome::Asked
+    );
+    let bodies = harness.ask_bodies();
+    let text = std::str::from_utf8(bodies.last().expect("ask")).expect("utf8");
+    assert_eq!(ask_body_request(text), "later");
+    assert!(text.contains("## Context"));
+    assert!(text.contains("Untrusted indexed channel text"));
+    assert!(text.contains("and the PR?"));
+    assert!(!text.contains("secret dm"));
 }
 
 #[test]
@@ -548,9 +649,10 @@ fn flow_08_busy_queues_the_second_turn() {
     );
     assert_eq!(turns(&actor, FOOBAR)[1].ask_id.as_deref(), Some("ask-2"));
     assert_eq!(
-        harness.ask_bodies().last().map(Vec::as_slice),
-        Some(&b"second"[..])
+        ask_requests(&harness).last().map(String::as_str),
+        Some("second")
     );
+    assert!(ask_has_context(harness.ask_bodies().last().expect("ask")));
 }
 
 #[test]
@@ -656,9 +758,10 @@ fn flow_10_edit_answers_latest_text_and_delete_abandons() {
     assert_eq!(turns(&actor, FOOBAR)[0].state, TurnState::Cancelled);
     assert_eq!(turns(&actor, FOOBAR)[1].state, TurnState::Open);
     assert_eq!(
-        harness.ask_bodies().last().map(Vec::as_slice),
-        Some(&b"latest"[..])
+        ask_requests(&harness).last().map(String::as_str),
+        Some("latest")
     );
+    assert!(ask_has_context(harness.ask_bodies().last().expect("ask")));
 
     let delete = event_with_keys(&author, 5, "", [tag(&["h", FOOBAR]), tag(&["e", &target])]);
     let delete_action = harness.ingest(&delete).expect("delete");

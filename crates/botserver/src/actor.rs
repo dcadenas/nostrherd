@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use botserver_domain::{Bot, EventId, SessionName};
 
+use crate::ask_body::{render_ask_body, AskContextCursor};
 use crate::inbox::InboxDelivery;
 use crate::outbox::{
     self, InFlightReaction, InboxAction, NoopInFlightReaction, OutboundPublisher, OutboxError,
@@ -781,12 +782,43 @@ where
             .filter(|turn| turn.state == TurnState::Queued)
             .min_by_key(|turn| turn.sequence)
             .ok_or(ActorError::UnnameableSession)?;
+        let events = self
+            .repository
+            .indexed_events_for_channel(channel_id)
+            .map_err(ActorError::Repository)?;
+        let trigger_created_at = match self
+            .repository
+            .indexed_event(&queued.event_id)
+            .map_err(ActorError::Repository)?
+        {
+            Some(event) => event.created_at,
+            None => unix_now().map_err(ActorError::Snapshot)?,
+        };
+        let cursor = match (
+            session.ask_context_event_id.clone(),
+            session.ask_context_created_at,
+        ) {
+            (Some(event_id), Some(created_at)) => Some(AskContextCursor {
+                event_id,
+                created_at,
+            }),
+            _ => None,
+        };
+        let rendered = render_ask_body(
+            nostr_body,
+            &session.session_name,
+            channel_id,
+            cursor.as_ref(),
+            &queued.event_id,
+            trigger_created_at,
+            &events,
+        );
         let idempotency_key = format!("{}:{}", queued.event_id.as_str(), queued.sequence);
         let receipt = waiter
             .ask_named(
                 &session.session_name,
                 session.occupant_logical_id.as_deref(),
-                nostr_body,
+                &rendered.body,
                 &idempotency_key,
             )
             .map_err(ActorError::Kelpie)?;
@@ -802,6 +834,11 @@ where
             .ok_or_else(|| ActorError::TurnNotOpened {
                 ask_id: receipt.message_id().to_owned(),
             })?;
+        session.ask_context_event_id = Some(rendered.cursor.event_id);
+        session.ask_context_created_at = Some(rendered.cursor.created_at);
+        self.repository
+            .save_session(&session)
+            .map_err(ActorError::Repository)?;
         Ok(())
     }
 
@@ -980,6 +1017,8 @@ fn ensure_bot_session<R: HostRepository>(
         session_name: name.as_str().to_owned(),
         occupant_logical_id: None,
         renew_id: None,
+        ask_context_event_id: None,
+        ask_context_created_at: None,
     };
     repository
         .save_session(&session)
@@ -1272,7 +1311,8 @@ mod tests {
                 + 1],
             format!("{}:1", trigger.event_id.as_str())
         );
-        assert_eq!(calls[4].1, trigger.nostr_body.as_bytes());
+        assert_eq!(ask_request(&calls[4].1), trigger.nostr_body);
+        assert!(ask_has_context(&calls[4].1));
         assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
         assert_eq!(WAITER_NAME, "botserver");
     }
@@ -1318,6 +1358,16 @@ mod tests {
             .expect("session")
             .expect("bound");
         assert_eq!(session.session_name, "bot-foobar");
+    }
+
+    fn ask_request(body: &[u8]) -> &str {
+        crate::ask_body::ask_body_request(std::str::from_utf8(body).expect("utf8"))
+    }
+
+    fn ask_has_context(body: &[u8]) -> bool {
+        std::str::from_utf8(body)
+            .expect("utf8")
+            .contains("## Context")
     }
 
     fn ask_count(runner: &Arc<FakeRunner>) -> usize {
@@ -1429,7 +1479,7 @@ mod tests {
         assert_eq!(calls.iter().filter(|call| call.0[1] == "start").count(), 1);
         assert_eq!(calls.iter().filter(|call| call.0[1] == "renew").count(), 1);
         assert_eq!(calls.iter().filter(|call| call.0[1] == "ask").count(), 2);
-        assert_eq!(calls.last().expect("ask").1, b"bot: second");
+        assert_eq!(ask_request(&calls.last().expect("ask").1), "bot: second");
     }
 
     #[test]
@@ -1679,6 +1729,8 @@ mod tests {
                 session_name: "bot-aaa".to_owned(),
                 occupant_logical_id: Some("occupant-agent".to_owned()),
                 renew_id: None,
+                ask_context_event_id: None,
+                ask_context_created_at: None,
             })
             .expect("first session");
         actor
@@ -1702,6 +1754,8 @@ mod tests {
                 session_name: "bot-foobar".to_owned(),
                 occupant_logical_id: Some("occupant-agent".to_owned()),
                 renew_id: None,
+                ask_context_event_id: None,
+                ask_context_created_at: None,
             })
             .expect("second session");
         actor
@@ -1739,8 +1793,8 @@ mod tests {
         assert_eq!(ask_count(&runner), 1);
         assert_eq!(start_count(&runner), 0);
         assert_eq!(
-            runner.calls.lock().expect("calls").last().expect("ask").1,
-            b"second"
+            ask_request(&runner.calls.lock().expect("calls").last().expect("ask").1),
+            "second"
         );
     }
 
@@ -1812,6 +1866,8 @@ mod tests {
                     session_name: format!("bot-{display}"),
                     occupant_logical_id: Some("occupant-agent".to_owned()),
                     renew_id: None,
+                    ask_context_event_id: None,
+                    ask_context_created_at: None,
                 })
                 .expect("session");
             let event = event_id(character);
@@ -1850,7 +1906,7 @@ mod tests {
         );
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls.iter().filter(|call| call.0[1] == "ask").count(), 1);
-        assert_eq!(calls.last().expect("ask").1, b"second");
+        assert_eq!(ask_request(&calls.last().expect("ask").1), "second");
     }
 
     #[test]
@@ -2221,8 +2277,8 @@ mod tests {
         assert_eq!(turns[1].state, TurnState::Open);
         assert_eq!(turns[1].ask_id.as_deref(), Some("ask-2"));
         assert_eq!(
-            runner.calls.lock().expect("calls").last().expect("ask").1,
-            b"second"
+            ask_request(&runner.calls.lock().expect("calls").last().expect("ask").1),
+            "second"
         );
     }
 
@@ -2280,7 +2336,7 @@ mod tests {
                 .0[2],
             "ask-1"
         );
-        assert_eq!(calls.last().expect("ask").1, b"latest");
+        assert_eq!(ask_request(&calls.last().expect("ask").1), "latest");
         assert!(actor
             .repository
             .event_processed(&edit_id)
@@ -2495,8 +2551,8 @@ mod tests {
         assert_eq!(turns[2].state, TurnState::Queued);
         assert_eq!(turns[2].event_id, first.event_id);
         assert_eq!(
-            runner.calls.lock().expect("calls").last().expect("ask").1,
-            b"second"
+            ask_request(&runner.calls.lock().expect("calls").last().expect("ask").1),
+            "second"
         );
     }
 

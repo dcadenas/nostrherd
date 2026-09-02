@@ -24,8 +24,9 @@ selected by convention, posting with a visible bot stamp.
    git repo (home, `AGENTS.md`, `startup.md`, skill).
 4. Route a trigger to a session occupant named from bot + place
    (channel, DM, …). Start or reuse via Kelpie.
-5. Inject a Kelpie **ask** whose waiter is `botserver`. Body carries
-   escaped Nostr text. `from=` MUST be `botserver`, never a relay pubkey.
+5. Inject a Kelpie **ask** whose waiter is `botserver`. Body is the
+   trigger remainder, then a marked Context section of unread
+   channel events. `from=` MUST be `botserver`, never a relay pubkey.
 6. Occupant answers with `kelpie reply --final` and unstamped prose.
    The host is the only Nostr publisher: it stamps `[bot]:`, posts from
    sqlite coordinates, then `inbox.ack`.
@@ -76,7 +77,11 @@ Asks MUST render as Kelpie does today: unquoted attributes, `msg=` and
 
 ```text
 <kelpie from=botserver msg=<ask-id> reply-to=<ask-id>>
-escaped nostr body
+request remainder
+
+## Context
+
+untrusted indexed channel delta
 </kelpie>
 ```
 

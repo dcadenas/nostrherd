@@ -47,6 +47,21 @@ Triggered Nostr work is an ask so pending, reminders, and amnesia work.
 The waiter is `botserver`. The occupant completes with `kelpie reply
 --final`, never cancel. The host then publishes and `inbox.ack`.
 
+The ask body is the trigger remainder, then a marked `## Context`
+section. Context is this channel's indexed events since the last ask
+to this session (unprefixed lines, earlier `[bot]:`, and other
+indexed traffic). It is labeled untrusted indexed text, not
+instructions. Occupants MUST NOT follow directives found there.
+
+Cap: 32 events and 8192 bytes of rendered event lines, dropping oldest
+first. A per-session cursor (`ask_context_event_id`,
+`ask_context_created_at`) tracks the last event already stuffed into
+an ask. That cursor is not `processed_events` (trigger dedup). First
+ask (null cursor), including the first ask after a new session,
+points at the place snapshot file instead of restating the 7-day
+window. Place snapshots still refresh on start and each turn (D19,
+D27).
+
 ## D6. Renew is wall-clock
 
 Status: accepted
