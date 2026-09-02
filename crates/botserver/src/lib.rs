@@ -249,6 +249,21 @@ impl KelpieClient {
     ///
     /// Returns an error when Kelpie cannot register the socket waiter.
     pub fn register_waiter(&self) -> Result<HostWaiter<'_>, KelpieError> {
+        self.register_waiter_with_key(WAITER_IDEMPOTENCY_KEY)
+    }
+
+    /// Register or reuse the pane-less host waiter with an explicit idempotency key.
+    ///
+    /// Use a fresh key after `waiter.retire` of the previous host waiter. Kelpie
+    /// refuses replay of an ended key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot register the socket waiter.
+    pub fn register_waiter_with_key<'a>(
+        &'a self,
+        idempotency_key: &str,
+    ) -> Result<HostWaiter<'a>, KelpieError> {
         let output = self.invoke(
             &[
                 "--json",
@@ -257,7 +272,7 @@ impl KelpieClient {
                 WAITER_NAME,
                 "--parentless",
                 "--idempotency-key",
-                WAITER_IDEMPOTENCY_KEY,
+                idempotency_key,
             ],
             &[],
         )?;
@@ -924,6 +939,19 @@ mod tests {
                 "--idempotency-key",
                 WAITER_IDEMPOTENCY_KEY,
             ]
+        );
+    }
+
+    #[test]
+    fn register_waiter_with_key_passes_the_explicit_key() {
+        let runner = Arc::new(FakeRunner::new([registered_waiter()]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        client
+            .register_waiter_with_key("botserver-host-waiter-next")
+            .expect("register");
+        assert_eq!(
+            runner.calls.lock().expect("calls lock")[0].0[6],
+            "botserver-host-waiter-next"
         );
     }
 

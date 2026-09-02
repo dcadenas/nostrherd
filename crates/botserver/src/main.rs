@@ -1,10 +1,11 @@
 //! Host process: relay subscriber, per-bot actors, Kelpie waiter.
 
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use botserver::actor::persist_ingest;
@@ -18,7 +19,7 @@ use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
 use botserver::sqlite::SqliteRepository;
-use botserver::{HostRepository, HostWaiter, KelpieClient, KelpieError};
+use botserver::{HostRepository, HostWaiter, KelpieClient, KelpieError, WAITER_IDEMPOTENCY_KEY};
 use botserver_domain::{Bot, EventId};
 use clap::Parser;
 use futures::StreamExt;
@@ -74,6 +75,7 @@ enum HostError {
     MissingEnv(&'static str),
     InvalidOperatorKey,
     Runtime(std::io::Error),
+    WaiterKey(std::io::Error),
     Relay(nostr_sdk::error::Error),
     Subscribe(RelaySubscribeError),
     Ingest(IngestError<rusqlite::Error>),
@@ -93,6 +95,12 @@ impl fmt::Display for HostError {
             Self::MissingEnv(name) => write!(formatter, "missing {name}"),
             Self::InvalidOperatorKey => formatter.write_str("invalid BUZZ_PRIVATE_KEY"),
             Self::Runtime(error) => write!(formatter, "failed to start async runtime: {error}"),
+            Self::WaiterKey(error) => {
+                write!(
+                    formatter,
+                    "failed to persist waiter idempotency key: {error}"
+                )
+            }
             Self::Relay(error) => write!(formatter, "relay client failed: {error}"),
             Self::Subscribe(error) => write!(formatter, "{error}"),
             Self::Ingest(error) => write!(formatter, "{error}"),
@@ -111,7 +119,7 @@ impl std::error::Error for HostError {
         match self {
             Self::Config(error) => Some(error),
             Self::Database(error) => Some(error),
-            Self::Runtime(error) => Some(error),
+            Self::Runtime(error) | Self::WaiterKey(error) => Some(error),
             Self::Relay(error) => Some(error),
             Self::Subscribe(error) => Some(error),
             Self::Ingest(error) => Some(error),
@@ -180,6 +188,52 @@ fn load_host(config: &Path, database: &Path) -> Result<(BotRegistry, SqliteRepos
         BotRegistry::load(config)?,
         SqliteRepository::open(database)?,
     ))
+}
+
+fn waiter_key_path(database: &Path) -> PathBuf {
+    let mut path = database.as_os_str().to_owned();
+    path.push(".waiter-key");
+    PathBuf::from(path)
+}
+
+fn read_waiter_key(database: &Path) -> String {
+    fs::read_to_string(waiter_key_path(database))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| WAITER_IDEMPOTENCY_KEY.to_owned())
+}
+
+fn ended_waiter_key(error: &KelpieError) -> bool {
+    matches!(
+        error,
+        KelpieError::Rejected { stderr, .. } if stderr.contains("ended waiter")
+    )
+}
+
+fn mint_waiter_key(database: &Path) -> Result<String, HostError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let key = format!("botserver-host-waiter-{millis}");
+    fs::write(waiter_key_path(database), format!("{key}\n")).map_err(HostError::WaiterKey)?;
+    Ok(key)
+}
+
+fn register_host_waiter<'a>(
+    kelpie: &'a KelpieClient,
+    database: &Path,
+) -> Result<HostWaiter<'a>, HostError> {
+    let key = read_waiter_key(database);
+    match kelpie.register_waiter_with_key(&key) {
+        Ok(waiter) => Ok(waiter),
+        Err(error) if ended_waiter_key(&error) => {
+            let fresh = mint_waiter_key(database)?;
+            Ok(kelpie.register_waiter_with_key(&fresh)?)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn replay_since(repository: &SqliteRepository) -> Result<Timestamp, HostError> {
@@ -384,7 +438,7 @@ async fn serve(
 ) -> Result<(), HostError> {
     let operator_pubkey = operator.keys.public_key().to_hex();
     let kelpie = KelpieClient::default();
-    let waiter = kelpie.register_waiter()?;
+    let waiter = register_host_waiter(&kelpie, database)?;
     let mut inbox = spawn_inbox(
         default_socket(),
         waiter.identity().logical_agent_id().to_owned(),
