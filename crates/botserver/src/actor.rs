@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use botserver_domain::{Bot, EventId, SessionName};
+use botserver_domain::{Bot, BotId, EventId, SessionName};
 
 use crate::ask_body::{render_ask_body, AskContextCursor};
 use crate::inbox::InboxDelivery;
@@ -292,6 +292,7 @@ where
     ) -> Result<TriggerOutcome, ActorError<R::Error>> {
         match action {
             crate::relay::IngestAction::TurnCandidate {
+                bot_id: _,
                 event_id,
                 channel_id,
                 reply_to_event_id,
@@ -375,17 +376,48 @@ where
         })?;
         if action == InboxAction::Ack {
             if let Some(ask_id) = delivery.reply_to() {
-                if self
-                    .repository
-                    .turn_by_ask_id(ask_id)
-                    .map_err(ActorError::Repository)?
-                    .is_some_and(|turn| turn.state == TurnState::Posted)
-                {
-                    self.resume_queued(kelpie, waiter)?;
-                }
+                self.resume_if_posted(kelpie, waiter, ask_id)?;
             }
         }
         Ok(action)
+    }
+
+    /// Return the bot that owns a turn identified by its ask id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence cannot read the turn.
+    pub fn bot_id_for_ask(&self, ask_id: &str) -> Result<Option<BotId>, ActorError<R::Error>> {
+        Ok(self
+            .repository
+            .turn_by_ask_id(ask_id)
+            .map_err(ActorError::Repository)?
+            .map(|turn| turn.bot_id))
+    }
+
+    /// Resume this bot's queue after its turn reached `posted`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence, pane allocation, or Kelpie fails.
+    pub fn resume_if_posted(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        ask_id: &str,
+    ) -> Result<(), ActorError<R::Error>> {
+        let Some(turn) = self
+            .repository
+            .turn_by_ask_id(ask_id)
+            .map_err(ActorError::Repository)?
+        else {
+            return Ok(());
+        };
+        if turn.state != TurnState::Posted || turn.bot_id != *self.bot.id() {
+            return Ok(());
+        }
+        self.resume_queued(kelpie, waiter)?;
+        Ok(())
     }
 
     /// Retry unfinished outbound attempts after a dropped inbox delivery.
@@ -935,6 +967,7 @@ pub fn persist_ingest<R: HostRepository>(
 ) -> Result<TriggerOutcome, ActorError<R::Error>> {
     match action {
         crate::relay::IngestAction::TurnCandidate {
+            bot_id: _,
             event_id,
             channel_id,
             reply_to_event_id,
@@ -1937,6 +1970,7 @@ mod tests {
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
         let action = crate::relay::IngestAction::TurnCandidate {
+            bot_id: botserver_domain::BotId::new("bot").expect("id"),
             event_id: trigger.event_id.clone(),
             channel_id: trigger.channel_id.clone(),
             reply_to_event_id: trigger.reply_to_event_id.clone(),
@@ -1966,6 +2000,7 @@ mod tests {
         let bot = bot();
         let trigger = work('a', "@daniel bot: hello", Some('c'));
         let action = crate::relay::IngestAction::TurnCandidate {
+            bot_id: botserver_domain::BotId::new("bot").expect("id"),
             event_id: trigger.event_id.clone(),
             channel_id: trigger.channel_id.clone(),
             reply_to_event_id: trigger.reply_to_event_id.clone(),
@@ -2010,6 +2045,7 @@ mod tests {
         let event = event_id('a');
         let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
         let action = crate::relay::IngestAction::TurnCandidate {
+            bot_id: botserver_domain::BotId::new("bot").expect("id"),
             event_id: event.clone(),
             channel_id: channel.to_owned(),
             reply_to_event_id: None,
@@ -2042,6 +2078,7 @@ mod tests {
         let bot = bot();
         let event = event_id('a');
         let action = crate::relay::IngestAction::TurnCandidate {
+            bot_id: botserver_domain::BotId::new("bot").expect("id"),
             event_id: event.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
@@ -2072,6 +2109,7 @@ mod tests {
         let waiter = kelpie.register_waiter().expect("waiter");
         let event = event_id('a');
         let action = crate::relay::IngestAction::TurnCandidate {
+            bot_id: botserver_domain::BotId::new("bot").expect("id"),
             event_id: event.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,

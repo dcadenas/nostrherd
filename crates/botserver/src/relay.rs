@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use botserver_domain::{
-    place_display as usable_place_display, EventId, TriggerMatch, INBOUND_TRIGGER,
+    place_display as usable_place_display, BotId, EventId, TriggerMatch, INBOUND_TRIGGER,
 };
 use futures::Stream;
 use nostr_sdk::prelude::{
@@ -25,8 +25,9 @@ const PROFILE_KIND: u16 = 0;
 /// Relay event emitted to the per-bot actor layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestAction {
-    /// A new channel message matched the configured trigger.
+    /// A new channel message matched one configured bot's trigger.
     TurnCandidate {
+        bot_id: BotId,
         event_id: EventId,
         channel_id: String,
         reply_to_event_id: Option<EventId>,
@@ -117,12 +118,22 @@ where
     }
 }
 
+fn trigger_bot_id(token: &str) -> Option<BotId> {
+    token.strip_suffix(':').and_then(BotId::new)
+}
+
+fn default_inbound_triggers() -> Vec<(BotId, String)> {
+    trigger_bot_id(INBOUND_TRIGGER)
+        .map(|id| vec![(id, INBOUND_TRIGGER.to_owned())])
+        .unwrap_or_default()
+}
+
 /// Idempotently index relay traffic and emit only actionable events.
 #[derive(Debug)]
 pub struct RelayIngest<R> {
     operator_pubkey: String,
     relay_pubkey: String,
-    inbound_trigger: String,
+    inbound_triggers: Vec<(BotId, String)>,
     repository: R,
 }
 
@@ -137,15 +148,31 @@ impl<R: HostRepository> RelayIngest<R> {
         Self {
             operator_pubkey: operator_pubkey.into().to_ascii_lowercase(),
             relay_pubkey: relay_pubkey.into().to_ascii_lowercase(),
-            inbound_trigger: INBOUND_TRIGGER.to_owned(),
+            inbound_triggers: default_inbound_triggers(),
             repository,
         }
     }
 
     /// Classify inbound bodies with this `{bot-id}:` token.
     #[must_use]
-    pub fn with_inbound_trigger(mut self, inbound_trigger: impl Into<String>) -> Self {
-        self.inbound_trigger = inbound_trigger.into();
+    pub fn with_inbound_trigger(self, inbound_trigger: impl Into<String>) -> Self {
+        let token = inbound_trigger.into();
+        match trigger_bot_id(&token) {
+            Some(bot_id) => self.with_inbound_triggers([(bot_id, token)]),
+            None => self,
+        }
+    }
+
+    /// Classify inbound bodies against every configured `{bot-id}:` token.
+    #[must_use]
+    pub fn with_inbound_triggers(
+        mut self,
+        triggers: impl IntoIterator<Item = (BotId, String)>,
+    ) -> Self {
+        self.inbound_triggers = triggers
+            .into_iter()
+            .filter(|(_, token)| !token.is_empty())
+            .collect();
         self
     }
 
@@ -245,6 +272,31 @@ impl<R: HostRepository> RelayIngest<R> {
         &mut self.repository
     }
 
+    fn trigger_token(&self, bot_id: &BotId) -> Option<&str> {
+        self.inbound_triggers
+            .iter()
+            .find(|(id, _)| id == bot_id)
+            .map(|(_, token)| token.as_str())
+    }
+
+    fn match_trigger(
+        &self,
+        signing_pubkey: &str,
+        p_tags: &[String],
+        content: &str,
+    ) -> Option<(BotId, TriggerMatch)> {
+        self.inbound_triggers.iter().find_map(|(bot_id, token)| {
+            TriggerMatch::parse(
+                &self.operator_pubkey,
+                signing_pubkey,
+                p_tags.iter().map(String::as_str),
+                token,
+                content,
+            )
+            .map(|trigger| (bot_id.clone(), trigger))
+        })
+    }
+
     fn message_action(
         &self,
         event_id: EventId,
@@ -270,14 +322,9 @@ impl<R: HostRepository> RelayIngest<R> {
             }
         });
         let p_tags = p_tags.map(str::to_ascii_lowercase).collect::<Vec<_>>();
-        let trigger = TriggerMatch::parse(
-            &self.operator_pubkey,
-            signing_pubkey,
-            p_tags.iter().map(String::as_str),
-            &self.inbound_trigger,
-            content,
-        )?;
+        let (bot_id, trigger) = self.match_trigger(signing_pubkey, &p_tags, content)?;
         Some(IngestAction::TurnCandidate {
+            bot_id,
             event_id,
             channel_id,
             reply_to_event_id: reply_target(tags),
@@ -305,22 +352,23 @@ impl<R: HostRepository> RelayIngest<R> {
         if target.author_pubkey != author_pubkey {
             return Ok(None);
         }
-        if self
+        let Some(active) = self
             .repository
             .active_turn_for_event(&target_event_id)
             .map_err(IngestError::Repository)?
-            .is_none()
-        {
+        else {
             return Ok(None);
-        }
+        };
         // An active target already proved the original event p-tagged the operator.
-        let replacement = TriggerMatch::parse(
-            &self.operator_pubkey,
-            author_pubkey,
-            [&self.operator_pubkey],
-            &self.inbound_trigger,
-            content,
-        );
+        let replacement = self.trigger_token(&active.bot_id).and_then(|token| {
+            TriggerMatch::parse(
+                &self.operator_pubkey,
+                author_pubkey,
+                [&self.operator_pubkey],
+                token,
+                content,
+            )
+        });
         Ok(Some(IngestAction::Edit {
             event_id,
             target_event_id,
@@ -1354,6 +1402,50 @@ mod tests {
         };
         assert_eq!(trigger.request(), "hello");
         assert_eq!(ingest.ingest(&missed).unwrap(), None);
+    }
+
+    #[test]
+    fn inbound_tokens_route_to_the_matching_bot() {
+        let operator_keys = Keys::generate();
+        let operator = operator_keys.public_key().to_hex();
+        let peer = "b".repeat(64);
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), FakeRepository::default())
+            .with_inbound_triggers([
+                (BotId::new("bot").expect("bot"), "bot:".to_owned()),
+                (BotId::new("pr").expect("pr"), "pr:".to_owned()),
+            ]);
+        let bot_message = event_with_keys(
+            &operator_keys,
+            CHANNEL_MESSAGE_KIND,
+            "bot: hello",
+            [tag(&["h", "channel"]), tag(&["p", &peer])],
+        );
+        let pr_message = event_with_keys(
+            &operator_keys,
+            CHANNEL_MESSAGE_KIND,
+            "pr: review this",
+            [tag(&["h", "channel"]), tag(&["p", &peer])],
+        );
+
+        let bot_action = ingest.ingest(&bot_message).unwrap().expect("bot trigger");
+        let IngestAction::TurnCandidate {
+            bot_id, trigger, ..
+        } = bot_action
+        else {
+            panic!("expected turn candidate");
+        };
+        assert_eq!(bot_id.as_str(), "bot");
+        assert_eq!(trigger.request(), "hello");
+
+        let pr_action = ingest.ingest(&pr_message).unwrap().expect("pr trigger");
+        let IngestAction::TurnCandidate {
+            bot_id, trigger, ..
+        } = pr_action
+        else {
+            panic!("expected turn candidate");
+        };
+        assert_eq!(bot_id.as_str(), "pr");
+        assert_eq!(trigger.request(), "review this");
     }
 
     #[test]
