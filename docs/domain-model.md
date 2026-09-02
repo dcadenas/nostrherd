@@ -3,7 +3,7 @@
 Bounded context: **personal Nostr bot host**.
 
 No types here talk to SQLite, Kelpie, or the relay. Those adapters live
-in `botserver` / `botcli`.
+in `botserver` (leftover `botcli` is not the occupant path).
 
 ## Aggregates
 
@@ -27,8 +27,9 @@ armed.
 
 Work owed for one triggering Nostr event. Holds: event id, Kelpie ask
 id, `TurnState` (`queued`, `open`, `posted`, `failed`, `cancelled`).
-Completing a turn is `botcli` publish **then** Kelpie final, not
-cancel. Publish reservation is a claim, not a state (D28).
+Completing a turn is occupant `kelpie reply --final`, then host
+publish, then `inbox.ack`, not cancel. Publish reservation is a claim,
+not a state (D28).
 
 ## Values
 

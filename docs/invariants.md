@@ -14,7 +14,7 @@ this file and SPEC disagree.
 | I7 | Turn states are parsed tokens; there is no `publishing` state | `turn_state_parses_known_tokens_only` |
 | I8 | Only queued→open/cancelled and open→posted/failed/cancelled are legal | `turn_transition_parses_legal_changes_only`, `turns_queue_in_order_and_state_changes_are_terminal` |
 | I9 | A claimed open turn MUST NOT be cancelled | `claimed_open_turn_cannot_be_cancelled`, `flow_10_claimed_turn_keeps_the_landing_reply` |
-| I10 | A late `botcli` on a cancelled ask MUST NOT publish | `spec_flow_10_cancelled_turn_never_reaches_buzz` |
+| I10 | The host MUST NOT publish on a cancelled ask | `spec_flow_10_cancelled_turn_never_reaches_buzz` |
 | I11 | Binaries MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` when set, and MUST NOT take `--envchain` | `operator_env_reads_buzz_private_key_and_relay_url`, `botcli_reads_buzz_private_key_and_relay_url`, `send_without_buzz_private_key_exits_nonzero`, `send_without_buzz_relay_url_exits_nonzero`, `botserver_parser_rejects_envchain`, `parser_requires_send_and_exactly_one_body_source` |
 | I12 | SQLite MUST NOT store nsecs | `sqlite_does_not_persist_an_nsec`, `sqlite_schema_has_no_nsec_columns` |
 

@@ -1,6 +1,7 @@
 # SPEC.md
 
-Normative contract for `botserver` / `botcli`.
+Normative contract for `botserver`. The leftover `botcli` crate is not
+the occupant publish path.
 If this file and another document disagree, this file wins unless the
 other document is a later accepted decision in `docs/decision-log.md`.
 
@@ -25,8 +26,9 @@ selected by convention, posting with a visible bot stamp.
    (channel, DM, …). Start or reuse via Kelpie.
 5. Inject a Kelpie **ask** whose waiter is `botserver`. Body carries
    escaped Nostr text. `from=` MUST be `botserver`, never a relay pubkey.
-6. Occupant publishes with `botcli`. On success `botcli` MUST
-   `kelpie reply --final` as that occupant.
+6. Occupant answers with `kelpie reply --final` and unstamped prose.
+   The host is the only Nostr publisher: it stamps `[bot]:`, posts from
+   sqlite coordinates, then `inbox.ack`.
 7. Persist host state (sessions, turns, processed events) in SQLite.
 8. Bound occupant context with Kelpie renew (wall-clock). Durable
    context lives in files, not only in the model.
@@ -46,9 +48,9 @@ relay  ->  botserver (reconnecting inbox client, waiter)
              per-bot actor
                sqlite  (processed events, sessions, turns)
                corpus repo path
-               kelpie start|ask  bot-<place>
-                    -> occupant
-                         botcli publish + kelpie reply --final
+                kelpie start|ask  bot-<place>
+                     -> occupant kelpie reply --final
+                          host stamps, publishes, inbox.ack
 ```
 
 ## Core domain (see `docs/domain-model.md`)
@@ -78,30 +80,55 @@ escaped nostr body
 Tells MUST NOT be used for triggered channel work: they create no
 obligation or reminder.
 
-## botcli
+`from=botserver` is the waiter public name, not a pane and not a relay
+pubkey (D2).
 
-`botcli` is a Nostr **send** tool for Herdr occupants, not a Kelpie
-client. It MUST NOT expose ask/tell/reply as its user-facing verbs.
-The occupant command is `send`.
+## Occupant reply
 
-The post body MUST come from `--stdin` or `--file`, never from a
-shell-expanded argument. Occupants SHOULD use a quoted heredoc
-(`<<'EOF'`). `--body` is forbidden for agent-generated text.
+The occupant is an ordinary Kelpie peer of waiter `botserver`. Snapshot
+and renew stay. It MUST answer a trigger ask with `kelpie reply --final`
+and unstamped prose. It MUST NOT stamp `[bot]:`, MUST NOT call the
+relay, and MUST NOT receive the operator nsec. Cancel MUST NOT be used
+for a successful answer.
 
-Host coordinates (channel, reply-to event, mention, in-flight Kelpie
-ask id) are flags, not the body. There is no `--envchain` flag.
-`botcli` MUST stamp `[bot]:` onto the body after reading it.
+The occupant self-renews. The host MUST NOT arm occupant renew with
+`--sender-id` of waiter `botserver`, so this inbox only sees channel
+asks the host created (D32).
 
+## Host publish
 
-Stdout defaults to JSON: a receipt (`event_id`, and ask id if a Kelpie
-ask was closed). That is the CLI result, not the channel message.
-Errors are JSON on stderr. A human `--text` receipt MAY be added later;
-it MUST NOT be the default.
+The host is the only Nostr publisher (D31). On an accepted occupant
+final it MUST stamp `[bot]:`, post from sqlite coordinates, then
+`inbox.ack`. Occupants never get the operator nsec.
 
-After an accepted relay publish it MUST `kelpie reply --final` as the
-owing occupant when an ask id was supplied. That is plumbing so the
-host obligation closes. Cancel MUST NOT be used for a successful post.
-`botcli` MUST NOT publish if that ask is already cancelled.
+Outbound `--reply-to` is the triggering EventId, including the first
+call. Keep the trigger's existing parent separately when snapshots need
+thread-root context.
+
+The host MUST `--mention` the indexed event's effective author (not the
+raw relay signer, not an arbitrary `p` tag), including operator-authored
+triggers. `ignore_self` still blocks retrigger.
+
+The leftover `botcli` crate is not the occupant path (D4/D22 retracted).
+It remains until a later removal issue.
+
+Crash-safe outbox (durable outbound attempt, same event id on retry) is
+a later issue.
+
+## Inbox
+
+Keep the claimed connection and the reply body. ACK only after the host
+decides. Do not ACK in the drain thread before the body is durable
+(D33).
+
+Classify by `reply_to` in the host's Turn ids:
+
+- Empty or whitespace-only final: do not ACK if a later valid final
+  should still be allowed.
+- Progress: ACK, do not publish.
+- Cancelled turn: ACK, do not publish.
+- Already posted: ACK.
+- Unknown `reply_to`: do not publish.
 
 ## Persistence
 
@@ -110,12 +137,12 @@ git is the store of bot personality. SQLite MUST NOT store nsecs.
 
 ## Secrets
 
-Operator keys enter the process environment via an outer wrapper
-(`envchain NAMESPACE botcli …` / `envchain NAMESPACE botserver …`, or
-an alias). The binaries MUST read `BUZZ_PRIVATE_KEY` and
-`BUZZ_RELAY_URL` when set. They MUST NOT take `--envchain` and MUST
-NOT exec `envchain`. Keys MUST NOT appear in process titles, sqlite,
-logs, or standing pane-env.
+Operator keys enter the host process via an outer wrapper
+(`envchain NAMESPACE botserver …`). Occupants MUST NOT receive the
+nsec. The host MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` when
+set. Binaries MUST NOT take `--envchain` and MUST NOT exec `envchain`.
+Keys MUST NOT appear in process titles, sqlite, logs, or standing
+pane-env.
 
 ## User-visible flows (v1)
 
@@ -148,8 +175,8 @@ subset.
 10. **Edit / delete.** Edit of the triggering message before the bot
     posts: the one eventual `[bot]:` answers the **latest** text
     (cancel the old ask, ask again). Delete before it posts: no post.
-    After it posted: leave `[bot]:` up. A late `botcli` on a cancelled
-    ask MUST NOT publish.
+    After it posted: leave `[bot]:` up. A late occupant final on a
+    cancelled ask MUST NOT publish (I10, host).
 11. **Long work.** One stamped reply when done. No working ping in v1.
 12. **Desktop.** Buzz desktop is still Daniel. The host does not mark
     him typing or rewrite his presence.
