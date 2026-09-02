@@ -392,6 +392,7 @@ mod tests {
 
     use botserver::HostRepository;
     use clap::{CommandFactory, Parser};
+    use nostr_sdk::prelude::ToBech32;
 
     use super::*;
 
@@ -640,7 +641,7 @@ mod tests {
         let _lock = lock_env();
         let _restore = EnvRestore::capture();
         let keys = Keys::generate();
-        let secret = keys.secret_key().to_secret_hex();
+        let secret = keys.secret_key().to_bech32().expect("nsec");
         std::env::set_var("BUZZ_PRIVATE_KEY", &secret);
         std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
         OperatorEnv::from_env().expect("read env");
