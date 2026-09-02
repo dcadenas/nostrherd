@@ -358,11 +358,11 @@ triggers. `ignore_self` still blocks retrigger.
 I10 is a host MUST: a late occupant final on a cancelled ask MUST NOT
 publish.
 
-Shipping README, operator-runbook, `docs/testing.md`, and
-`corpus/example-bot` still describe leftover `botcli`. This revision
-does not rewrite them: the host at this SHA still publishes that way,
-and flipping occupant recipes would break D23 proofs before a later
-host-publish issue lands.
+Shipping README, operator-runbook, `docs/testing.md`,
+`corpus/example-bot`, and the D23 proof harness still describe leftover
+`botcli`. This revision does not rewrite them: the shipping publish
+path is still occupant-side `botcli`, and flipping occupant recipes
+would break D23 proofs before a later host-publish issue lands.
 
 ## D32. Occupant self-renews
 
