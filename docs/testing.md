@@ -594,6 +594,9 @@ HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
 hello from example-bot
 EOF
 # Expect: one [bot]: body. kelpie pending "$SNAME" is empty after ACK.
+# Expect: renew armed (1). D27: a failed arm does not block the ask.
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT renew_id IS NOT NULL FROM sessions WHERE channel_id='$CHANNEL';"
 kelpie --json pending "$SNAME"
 
 # Drop-host: second trigger, kill host, occupant replies, pending stays open.
@@ -602,6 +605,7 @@ env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
 kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
 HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   "$ROOT/target/debug/botcli" send --stdin \
@@ -615,6 +619,14 @@ kelpie --json pending "$SNAME"
 env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
 HOST_PID=$!
+for _ in $(seq 1 30); do
+  n=$(kelpie --json pending "$SNAME" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+r=d.get("result")
+print(len(r) if isinstance(r, list) else 99)')
+  if [ "$n" = "0" ]; then break; fi
+  sleep 0.3
+done
 # Expect: pending empties after inbox.ack on reconnect.
 kelpie --json pending "$SNAME"
 
@@ -628,9 +640,11 @@ d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or
 sleep 2
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete \
   --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" > "$PROOF/delete.json"
+sleep 2
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' ORDER BY t.sequence;"
 kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
 ```
 
 Wrap binaries with envchain. Do not pass `--envchain` (D29):
