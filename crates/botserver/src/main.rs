@@ -15,6 +15,7 @@ use botserver::actor::{ActorError, BotActor};
 use botserver::config::{BotRegistry, ConfigError};
 use botserver::herdr::{HerdrError, HerdrPaneAllocator};
 use botserver::inbox::{default_socket, spawn_inbox};
+use botserver::outbox::{BuzzPublisher, InboxAction};
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
@@ -443,6 +444,7 @@ async fn serve(
         default_socket(),
         waiter.identity().logical_agent_id().to_owned(),
     );
+    let publisher = BuzzPublisher;
     let mut actor = BotActor::new(bot, repository, HerdrPaneAllocator::default());
     if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
         eprintln!("queued occupant resume failed: {error}");
@@ -489,14 +491,18 @@ async fn serve(
                     &mut poll,
                 )
                 .await?;
+                if let Err(error) = actor.retry_outbound(&kelpie, &waiter, &publisher) {
+                    eprintln!("outbound retry failed: {error}");
+                }
             }
             delivery = inbox.recv() => match delivery {
-                Some(delivery) if delivery.disposition() == Some("final") => {
-                    if let Err(error) = actor.handle_turn_completed(&kelpie, &waiter) {
-                        eprintln!("queued occupant resume failed: {error}");
+                Some(delivery) => {
+                    match actor.handle_occupant_delivery(&kelpie, &waiter, &publisher, &delivery) {
+                        Ok(InboxAction::Ack) => inbox.ack(delivery.message_id()),
+                        Ok(InboxAction::Hold) => {}
+                        Err(error) => eprintln!("occupant delivery failed: {error}"),
                     }
                 }
-                Some(_) => {}
                 None => return Err(HostError::InboxClosed),
             }
         }

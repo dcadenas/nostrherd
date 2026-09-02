@@ -6,12 +6,28 @@ use std::time::Duration;
 use botserver_domain::{BotId, EventId, TurnTransition};
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::outbox::OutboundAttempt;
 use crate::{
     HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord, TurnReplacement,
     TurnState,
 };
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn add_column_if_missing(connection: &Connection, sql: &str) -> rusqlite::Result<()> {
+    if let Err(error) = connection.execute(sql, []) {
+        let duplicate_column = match &error {
+            rusqlite::Error::SqliteFailure(_, Some(message)) => {
+                message.contains("duplicate column name")
+            }
+            _ => false,
+        };
+        if !duplicate_column {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
 
 /// SQLite-backed host repository.
 #[derive(Debug)]
@@ -107,22 +123,28 @@ impl SqliteRepository {
                  ON turns(event_id) WHERE state IN ('queued', 'open');
 
               CREATE INDEX IF NOT EXISTS turns_session_order
-                  ON turns(session_id, sequence);",
+                   ON turns(session_id, sequence);
+
+              CREATE TABLE IF NOT EXISTS outbound_attempts (
+                  ask_id TEXT PRIMARY KEY NOT NULL,
+                  body TEXT NOT NULL,
+                  channel_id TEXT NOT NULL,
+                  reply_to_event_id TEXT NOT NULL CHECK(length(reply_to_event_id) = 64),
+                  mention TEXT NOT NULL,
+                  outbound_event_id TEXT CHECK(
+                      outbound_event_id IS NULL OR length(outbound_event_id) = 64
+                  ),
+                  dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1))
+              ) STRICT;",
         )?;
-        if let Err(error) = connection.execute(
+        add_column_if_missing(
+            &connection,
             "ALTER TABLE turns ADD COLUMN publish_claimed INTEGER NOT NULL DEFAULT 0",
-            [],
-        ) {
-            let duplicate_column = match &error {
-                rusqlite::Error::SqliteFailure(_, Some(message)) => {
-                    message.contains("duplicate column name")
-                }
-                _ => false,
-            };
-            if !duplicate_column {
-                return Err(error);
-            }
-        }
+        )?;
+        add_column_if_missing(
+            &connection,
+            "ALTER TABLE outbound_attempts ADD COLUMN dispatched INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(Self { connection })
     }
 
@@ -683,6 +705,73 @@ impl HostRepository for SqliteRepository {
             })?
             .collect();
         ids
+    }
+
+    fn save_outbound_attempt(&mut self, attempt: &OutboundAttempt) -> Result<(), Self::Error> {
+        self.connection.execute(
+            "INSERT INTO outbound_attempts(
+                 ask_id, body, channel_id, reply_to_event_id, mention,
+                 outbound_event_id, dispatched
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(ask_id) DO UPDATE SET
+                 body = excluded.body,
+                 channel_id = excluded.channel_id,
+                 reply_to_event_id = excluded.reply_to_event_id,
+                 mention = excluded.mention,
+                 outbound_event_id = COALESCE(
+                     outbound_attempts.outbound_event_id,
+                     excluded.outbound_event_id
+                 ),
+                 dispatched = excluded.dispatched",
+            params![
+                attempt.ask_id,
+                attempt.body,
+                attempt.channel_id,
+                attempt.reply_to_event_id.as_str(),
+                attempt.mention,
+                attempt.outbound_event_id,
+                i64::from(attempt.dispatched)
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn outbound_attempt(&self, ask_id: &str) -> Result<Option<OutboundAttempt>, Self::Error> {
+        self.connection
+            .query_row(
+                "SELECT ask_id, body, channel_id, reply_to_event_id, mention,
+                        outbound_event_id, dispatched
+                 FROM outbound_attempts WHERE ask_id = ?1",
+                [ask_id],
+                |row| {
+                    let reply_to: String = row.get(3)?;
+                    let dispatched: i64 = row.get(6)?;
+                    Ok(OutboundAttempt {
+                        ask_id: row.get(0)?,
+                        body: row.get(1)?,
+                        channel_id: row.get(2)?,
+                        reply_to_event_id: parse_event_id(&reply_to, 3)?,
+                        mention: row.get(4)?,
+                        outbound_event_id: row.get(5)?,
+                        dispatched: dispatched != 0,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    fn mark_outbound_accepted(
+        &mut self,
+        ask_id: &str,
+        event_id: &str,
+    ) -> Result<bool, Self::Error> {
+        let changed = self.connection.execute(
+            "UPDATE outbound_attempts SET outbound_event_id = ?1
+             WHERE ask_id = ?2
+               AND (outbound_event_id IS NULL OR outbound_event_id = ?1)",
+            params![event_id, ask_id],
+        )?;
+        Ok(changed == 1)
     }
 }
 

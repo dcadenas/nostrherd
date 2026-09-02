@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ pub struct InboxDelivery {
     kind: String,
     disposition: Option<String>,
     reply_to: Option<String>,
+    body: String,
 }
 
 impl InboxDelivery {
@@ -47,6 +49,31 @@ impl InboxDelivery {
     pub fn reply_to(&self) -> Option<&str> {
         self.reply_to.as_deref()
     }
+
+    /// Return the occupant reply body.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
+/// Reconnecting inbox that forwards deliveries until the host ACKs.
+#[derive(Debug)]
+pub struct HostInbox {
+    rx: tokio::sync::mpsc::UnboundedReceiver<InboxDelivery>,
+    ack_tx: Sender<String>,
+}
+
+impl HostInbox {
+    /// Receive the next complete delivery, without acknowledging it.
+    pub async fn recv(&mut self) -> Option<InboxDelivery> {
+        self.rx.recv().await
+    }
+
+    /// Acknowledge one delivery on the claimed connection.
+    pub fn ack(&self, message_id: &str) {
+        let _ = self.ack_tx.send(message_id.to_owned());
+    }
 }
 
 /// Default Kelpie daemon socket path.
@@ -67,6 +94,7 @@ pub struct InboxConn {
     reader: BufReader<UnixStream>,
     next_id: u64,
     pending: VecDeque<Value>,
+    partial: String,
 }
 
 impl InboxConn {
@@ -90,6 +118,7 @@ impl InboxConn {
             reader,
             next_id: 1,
             pending: VecDeque::new(),
+            partial: String::new(),
         };
         let claimed = conn.read_json()?;
         if claimed.pointer("/result/claimed").and_then(Value::as_bool) != Some(true) {
@@ -115,6 +144,17 @@ impl InboxConn {
     ///
     /// Returns an error when Kelpie rejects the ACK or the connection drops.
     pub fn ack(&mut self, message_id: &str) -> Result<(), KelpieError> {
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(KelpieError::from)?;
+        let result = self.ack_inner(message_id);
+        let _ = self
+            .stream
+            .set_read_timeout(Some(Duration::from_millis(100)));
+        result
+    }
+
+    fn ack_inner(&mut self, message_id: &str) -> Result<(), KelpieError> {
         let id = format!("ack-{}", self.next_id);
         self.next_id += 1;
         let request = serde_json::json!({
@@ -181,19 +221,22 @@ pub fn parse_delivery(event: &Value) -> Result<InboxDelivery, KelpieError> {
             .get("reply_to")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        body: params
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
         message_id,
     })
 }
 
-/// Spawn a reconnecting inbox that ACKs each complete delivery.
+/// Spawn a reconnecting inbox that keeps the claim until the host ACKs.
 #[must_use]
-pub fn spawn_inbox(
-    socket: PathBuf,
-    waiter_id: String,
-) -> tokio::sync::mpsc::UnboundedReceiver<InboxDelivery> {
+pub fn spawn_inbox(socket: PathBuf, waiter_id: String) -> HostInbox {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ack_tx, ack_rx) = mpsc::channel();
     thread::spawn(move || loop {
-        if drain_inbox(&socket, &waiter_id, &tx).is_ok() {
+        if drain_inbox(&socket, &waiter_id, &tx, &ack_rx).is_ok() {
             return;
         }
         if tx.is_closed() {
@@ -201,22 +244,37 @@ pub fn spawn_inbox(
         }
         thread::sleep(RECONNECT_WAIT);
     });
-    rx
+    HostInbox { rx, ack_tx }
 }
 
 fn drain_inbox(
     socket: &Path,
     waiter_id: &str,
     tx: &tokio::sync::mpsc::UnboundedSender<InboxDelivery>,
+    ack_rx: &Receiver<String>,
 ) -> Result<(), KelpieError> {
     let mut conn = InboxConn::claim(socket, waiter_id)?;
+    conn.stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(KelpieError::from)?;
     loop {
-        let event = conn.read_event()?;
+        while let Ok(message_id) = ack_rx.try_recv() {
+            conn.ack(&message_id)?;
+        }
+        let event = match conn.read_event() {
+            Ok(event) => event,
+            Err(KelpieError::Io(error))
+                if error.kind() == io::ErrorKind::TimedOut
+                    || error.kind() == io::ErrorKind::WouldBlock =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if event.get("method").and_then(Value::as_str) != Some("inbox.delivery") {
             continue;
         }
         let delivery = parse_delivery(&event)?;
-        conn.ack(delivery.message_id())?;
         if tx.send(delivery).is_err() {
             return Ok(());
         }
@@ -238,17 +296,25 @@ impl InboxConn {
         if let Some(pending) = self.pending.pop_front() {
             return Ok(pending);
         }
-        let mut line = String::new();
-        let read = self
-            .reader
-            .read_line(&mut line)
-            .map_err(KelpieError::from)?;
-        if read == 0 || !line.ends_with('\n') {
-            return Err(KelpieError::from(io::Error::from(
+        match self.reader.read_line(&mut self.partial) {
+            Ok(0) => Err(KelpieError::from(io::Error::from(
                 io::ErrorKind::UnexpectedEof,
-            )));
+            ))),
+            Ok(_) if self.partial.ends_with('\n') => {
+                let line = std::mem::take(&mut self.partial);
+                serde_json::from_str(line.trim_end()).map_err(|error| json_error(&error))
+            }
+            Ok(_) => Err(KelpieError::from(io::Error::from(
+                io::ErrorKind::UnexpectedEof,
+            ))),
+            Err(error)
+                if error.kind() == io::ErrorKind::TimedOut
+                    || error.kind() == io::ErrorKind::WouldBlock =>
+            {
+                Err(KelpieError::from(error))
+            }
+            Err(error) => Err(KelpieError::from(error)),
         }
-        serde_json::from_str(line.trim_end()).map_err(|error| json_error(&error))
     }
 }
 
@@ -318,12 +384,13 @@ mod tests {
                 &serde_json::json!({
                     "id": "delivery-1",
                     "method": "inbox.delivery",
-                    "params": {
-                        "message_id": "reply-1",
-                        "kind": "reply",
-                        "disposition": "final",
-                        "reply_to": "ask-1"
-                    }
+                                    "params": {
+                                        "message_id": "reply-1",
+                                        "kind": "reply",
+                                        "disposition": "final",
+                                        "reply_to": "ask-1",
+                                        "body": "hello from occupant"
+                                    }
                 }),
             );
             let ack = read_line(&mut reader);
@@ -345,6 +412,7 @@ mod tests {
         assert_eq!(delivery.message_id(), "reply-1");
         assert_eq!(delivery.kind(), "reply");
         assert_eq!(delivery.disposition(), Some("final"));
+        assert_eq!(delivery.body(), "hello from occupant");
         conn.ack(delivery.message_id()).expect("ack");
         server.join().expect("server");
         let _ = std::fs::remove_file(socket);
@@ -372,6 +440,81 @@ mod tests {
 
         let mut conn = InboxConn::claim(&socket, "waiter-agent").expect("claim");
         conn.read_event().expect_err("torn line");
+        server.join().expect("server");
+        let _ = std::fs::remove_file(socket);
+    }
+
+    #[test]
+    fn drain_forwards_the_body_before_ack() {
+        let socket = temp_socket();
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (offered_tx, offered_rx) = mpsc::channel();
+        let (hold_tx, hold_rx) = mpsc::channel();
+        let (acked_tx, acked_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let claim = read_line(&mut reader);
+            assert_eq!(claim["method"], "inbox.claim");
+            write_line(
+                &mut stream,
+                &serde_json::json!({
+                    "id": claim["id"],
+                    "result": {"claimed": true, "logical_agent_id": "waiter-agent"}
+                }),
+            );
+            write_line(
+                &mut stream,
+                &serde_json::json!({
+                    "id": "delivery-1",
+                    "method": "inbox.delivery",
+                    "params": {
+                        "message_id": "reply-1",
+                        "kind": "reply",
+                        "disposition": "final",
+                        "reply_to": "ask-1",
+                        "body": "durable body"
+                    }
+                }),
+            );
+            offered_tx.send(()).expect("offered");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(80)))
+                .expect("timeout");
+            let mut line = String::new();
+            let early = reader.read_line(&mut line);
+            assert!(
+                early.is_err() || line.is_empty(),
+                "acked before host held the body: {line}"
+            );
+            hold_rx.recv().expect("host holds body");
+            stream.set_read_timeout(None).expect("clear timeout");
+            let ack = read_line(&mut reader);
+            assert_eq!(ack["method"], "inbox.ack");
+            assert_eq!(ack["params"]["message_id"], "reply-1");
+            write_line(
+                &mut stream,
+                &serde_json::json!({
+                    "id": ack["id"],
+                    "result": {"message_id": "reply-1", "outcome": "accepted"}
+                }),
+            );
+            acked_tx.send(()).expect("acked");
+        });
+
+        let mut inbox = super::spawn_inbox(socket.clone(), "waiter-agent".to_owned());
+        offered_rx.recv().expect("offered");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let delivery = runtime.block_on(inbox.recv()).expect("delivery");
+        assert_eq!(delivery.body(), "durable body");
+        assert_eq!(delivery.reply_to(), Some("ask-1"));
+        thread::sleep(std::time::Duration::from_millis(120));
+        hold_tx.send(()).expect("held");
+        inbox.ack(delivery.message_id());
+        acked_rx.recv().expect("server saw ack");
         server.join().expect("server");
         let _ = std::fs::remove_file(socket);
     }

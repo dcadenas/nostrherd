@@ -306,8 +306,14 @@ cancel MUST UPDATE only `queued` rows or `open` rows whose claim is
 clear. A claimed turn is treated as already landing: later edits and
 deletes of that EventId are ignored (D14 after publish). A failed
 publish MUST clear the claim so retry can proceed. Do not add a
-`publishing` TurnState. Crash-safe outbox (same event id on retry) is
-a later issue.
+`publishing` TurnState. The host records `dispatched` before calling send. After relay accept it
+stores the outbound event id. A crash after dispatch without an id does
+not call send again. `buzz messages send` has no prebuilt-id flag.
+Retry consults buzz stderr JSON `retryable`. `retryable: false`
+(including `delivery_unknown`) and an unparseable failure do not send
+again. `retryable: true` may send again: that follows buzz's last-error
+classification, which can be true after an earlier attempt already
+stored the event. Closing that mixed-attempt case is a buzz change.
 
 ## D29. envchain wraps the process; binaries only read env
 
@@ -358,12 +364,10 @@ triggers. `ignore_self` still blocks retrigger.
 I10 is a host MUST: a late occupant final on a cancelled ask MUST NOT
 publish.
 
-Shipping README, operator-runbook, `docs/testing.md`,
-`corpus/example-bot`, and the D23 live-test proof harness still describe
-leftover `botcli`. This revision does not rewrite them: the shipping
-publish path is still occupant-side `botcli`, and flipping occupant
-recipes would break D23 live-test proofs before a later host-publish
-issue lands.
+The host is the shipping publish path. Shipping README, operator-runbook,
+`docs/testing.md`, `corpus/example-bot`, and the D23 live-test proof
+harness still describe leftover `botcli`. Occupant send recipes stay
+until a later removal issue so those live proofs are not flipped here.
 
 ## D32. Occupant self-renews
 
@@ -372,8 +376,8 @@ Status: accepted
 Amends D27. Snapshot files stay. The occupant arms its own wall-clock
 renew. The host MUST NOT arm occupant renew with `--sender-id` of
 waiter `botserver`, so this inbox only sees channel asks the host
-created. Host runtime at this SHA still arms that way; a later issue
-removes it. `renew_id` remains until then.
+created. The host may still schedule the policy on the occupant's
+incarnation. `renew_id` remains the stored policy id.
 
 ## D33. Inbox ACK after the host decides
 

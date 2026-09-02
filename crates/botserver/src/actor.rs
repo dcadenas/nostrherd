@@ -7,6 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use botserver_domain::{Bot, EventId, SessionName};
 
+use crate::inbox::InboxDelivery;
+use crate::outbox::{self, InboxAction, OutboundPublisher, OutboxError};
 use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
 use crate::{
     occupant_bootstrap, AskDelivery, HostRepository, HostWaiter, KelpieClient, KelpieError,
@@ -89,6 +91,8 @@ pub enum ActorError<E> {
     Snapshot(io::Error),
     /// A live occupant under the session name is not the recorded agent.
     OccupantTwin { recorded: String, live: String },
+    /// Host publish of an occupant final failed.
+    Outbox(String),
 }
 
 impl<E: fmt::Display> fmt::Display for ActorError<E> {
@@ -110,6 +114,7 @@ impl<E: fmt::Display> fmt::Display for ActorError<E> {
                 formatter,
                 "session occupant {live} is not the recorded logical agent {recorded}"
             ),
+            Self::Outbox(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -128,7 +133,8 @@ where
             | Self::AskNotDelivered(_)
             | Self::EmptyAskBody
             | Self::TurnNotOpened { .. }
-            | Self::OccupantTwin { .. } => None,
+            | Self::OccupantTwin { .. }
+            | Self::Outbox(_) => None,
         }
     }
 }
@@ -285,6 +291,114 @@ where
                 self.abandon_unclaimed(kelpie, waiter, event_id, target_event_id, "trigger deleted")
             }
         }
+    }
+
+    /// Classify an occupant inbox delivery, publish a final, then ACK.
+    ///
+    /// Busy-queue resume happens only after `posted` is durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence, publish, or queued resume fails.
+    pub fn handle_occupant_delivery<Pub: OutboundPublisher>(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        publisher: &Pub,
+        delivery: &InboxDelivery,
+    ) -> Result<InboxAction, ActorError<R::Error>>
+    where
+        R::Error: fmt::Display,
+        Pub::Error: fmt::Display,
+    {
+        let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        let action =
+            outbox::handle_delivery(&mut self.repository, publisher, &mut notice, delivery)
+                .map_err(|error| match error {
+                    OutboxError::Repository(error) => ActorError::Repository(error),
+                    OutboxError::Publish(error) => ActorError::Outbox(error.to_string()),
+                })?;
+        if action == InboxAction::Ack {
+            if let Some(ask_id) = delivery.reply_to() {
+                if self
+                    .repository
+                    .turn_by_ask_id(ask_id)
+                    .map_err(ActorError::Repository)?
+                    .is_some_and(|turn| turn.state == TurnState::Posted)
+                {
+                    self.resume_queued(kelpie, waiter)?;
+                }
+            }
+        }
+        Ok(action)
+    }
+
+    /// Retry unfinished outbound attempts after a dropped inbox delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence or publish fails.
+    pub fn retry_outbound<Pub: OutboundPublisher>(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        publisher: &Pub,
+    ) -> Result<(), ActorError<R::Error>>
+    where
+        R::Error: fmt::Display,
+        Pub::Error: fmt::Display,
+    {
+        let sessions = self
+            .repository
+            .sessions_with_pending_turns()
+            .map_err(ActorError::Repository)?;
+        let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        for session in sessions {
+            if session.bot_id != *self.bot.id() {
+                continue;
+            }
+            let turns = self
+                .repository
+                .turns_for_session(&session.bot_id, &session.channel_id)
+                .map_err(ActorError::Repository)?;
+            for turn in turns {
+                if turn.state != TurnState::Open {
+                    continue;
+                }
+                let Some(ask_id) = turn.ask_id.as_deref() else {
+                    continue;
+                };
+                if self
+                    .repository
+                    .outbound_attempt(ask_id)
+                    .map_err(ActorError::Repository)?
+                    .is_none()
+                {
+                    continue;
+                }
+                let action = outbox::complete_outbound(
+                    &mut self.repository,
+                    publisher,
+                    &mut notice,
+                    &turn,
+                    None,
+                )
+                .map_err(|error| match error {
+                    OutboxError::Repository(error) => ActorError::Repository(error),
+                    OutboxError::Publish(error) => ActorError::Outbox(error.to_string()),
+                })?;
+                if action == InboxAction::Ack
+                    && self
+                        .repository
+                        .turn_by_ask_id(ask_id)
+                        .map_err(ActorError::Repository)?
+                        .is_some_and(|turn| turn.state == TurnState::Posted)
+                {
+                    self.resume_queued(kelpie, waiter)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Drain the next queued turn after an in-flight turn is posted.
@@ -530,7 +644,6 @@ where
                     .map_err(ActorError::Repository)?;
                 self.try_arm_renew(
                     kelpie,
-                    waiter,
                     occupant.logical_agent_id(),
                     occupant.incarnation_id(),
                     &snapshot_relpath,
@@ -583,7 +696,6 @@ where
                 .map_err(ActorError::Repository)?;
             self.try_arm_renew(
                 kelpie,
-                waiter,
                 occupant.logical_agent_id(),
                 occupant.incarnation_id(),
                 &snapshot_relpath,
@@ -596,7 +708,6 @@ where
             ) {
                 self.try_arm_renew(
                     kelpie,
-                    waiter,
                     &logical_id,
                     &incarnation_id,
                     &snapshot_relpath,
@@ -669,18 +780,14 @@ where
     fn try_arm_renew(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &HostWaiter<'_>,
         logical_id: &str,
         incarnation_id: &str,
         snapshot_relpath: &str,
         session: &mut SessionRecord,
     ) -> Result<(), ActorError<R::Error>> {
-        if let Ok(renew_id) = kelpie.arm_occupant_renew(
-            logical_id,
-            incarnation_id,
-            snapshot_relpath,
-            waiter.identity().logical_agent_id(),
-        ) {
+        if let Ok(renew_id) =
+            kelpie.arm_occupant_renew(logical_id, incarnation_id, snapshot_relpath)
+        {
             session.renew_id = Some(renew_id);
             self.repository
                 .save_session(session)
@@ -1096,6 +1203,7 @@ mod tests {
             occupant_bootstrap(".botserver/places/bot-foobar.md").as_bytes()
         );
         assert_eq!(calls[2].0[1], "renew");
+        assert!(!calls[2].0.iter().any(|argument| argument == "--sender-id"));
         assert_eq!(calls[4].0[1], "ask");
         assert_eq!(
             calls[4].0[calls[4]
