@@ -28,13 +28,12 @@ throwaway, or another non-prod URL). Live proofs in this repo use
 
 ## Wrap the host
 
-`botserver` currently adopts a Herdr pane so `HERDR_PANE_ID` is set.
-A non-Herdr shell exits with `missing HERDR_PANE_ID`. D2 is the
-pane-less socket waiter; this pane path remains until that client
-lands.
+`botserver` registers a pane-less Kelpie waiter named `botserver`
+(`waiter.register`, then a reconnecting `inbox.claim`). It does not
+need `HERDR_PANE_ID`. Occupant panes are still Herdr sessions.
 
 ```bash
-HERDR_PANE_ID="$PANE" envchain botserver botserver \
+envchain botserver botserver \
   --config /path/to/bots.toml \
   --database /path/to/botserver.sqlite
 ```
@@ -49,7 +48,7 @@ kind = "opencode"
 ```
 
 `--check` loads config and database, then exits. It needs neither the
-envchain wrap nor a Herdr pane.
+envchain wrap nor Kelpie.
 
 ## Wrap botcli
 

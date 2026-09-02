@@ -12,12 +12,13 @@ use botserver::actor::persist_ingest;
 use botserver::actor::TriggerOutcome;
 use botserver::actor::{ActorError, BotActor};
 use botserver::config::{BotRegistry, ConfigError};
-use botserver::herdr::{current_pane, HerdrError, HerdrPaneAllocator};
+use botserver::herdr::{HerdrError, HerdrPaneAllocator};
+use botserver::inbox::{default_socket, spawn_inbox};
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
 use botserver::sqlite::SqliteRepository;
-use botserver::{AdoptedWaiter, HostRepository, KelpieClient, KelpieError};
+use botserver::{HostRepository, HostWaiter, KelpieClient, KelpieError};
 use botserver_domain::{Bot, EventId};
 use clap::Parser;
 use futures::StreamExt;
@@ -210,7 +211,7 @@ fn dispatch_ingest(
 fn observe_event(
     actor: &mut BotActor<SqliteRepository, HerdrPaneAllocator>,
     kelpie: &KelpieClient,
-    waiter: &AdoptedWaiter<'_>,
+    waiter: &HostWaiter<'_>,
     ingest: &mut RelayIngest<SqliteRepository>,
     event: &Event,
 ) -> Result<(), HostError> {
@@ -288,7 +289,7 @@ async fn fetch_stored_events(
 async fn poll_relay(
     actor: &mut BotActor<SqliteRepository, HerdrPaneAllocator>,
     kelpie: &KelpieClient,
-    waiter: &AdoptedWaiter<'_>,
+    waiter: &HostWaiter<'_>,
     ingest: &mut RelayIngest<SqliteRepository>,
     subscriber: &RelaySubscriber,
     operator_pubkey: &str,
@@ -380,8 +381,11 @@ async fn serve(
 ) -> Result<(), HostError> {
     let operator_pubkey = operator.keys.public_key().to_hex();
     let kelpie = KelpieClient::default();
-    let waiter_pane = current_pane()?;
-    let waiter = kelpie.adopt_waiter(&waiter_pane.pane_id, &waiter_pane.terminal_id)?;
+    let waiter = kelpie.register_waiter()?;
+    let mut inbox = spawn_inbox(
+        default_socket(),
+        waiter.identity().logical_agent_id().to_owned(),
+    );
     let mut actor = BotActor::new(bot, repository, HerdrPaneAllocator::default());
     if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
         eprintln!("queued occupant resume failed: {error}");
@@ -428,6 +432,15 @@ async fn serve(
                     &mut poll,
                 )
                 .await?;
+            }
+            delivery = inbox.recv() => match delivery {
+                Some(delivery) if delivery.disposition() == Some("final") => {
+                    if let Err(error) = actor.handle_turn_completed(&kelpie, &waiter) {
+                        eprintln!("queued occupant resume failed: {error}");
+                    }
+                }
+                Some(_) => {}
+                None => eprintln!("kelpie inbox closed"),
             }
         }
     }
@@ -825,24 +838,21 @@ mod tests {
     }
 
     #[test]
-    fn runtime_requires_waiter_pane() {
+    fn check_does_not_need_a_waiter_pane() {
         let _lock = lock_env();
         let _restore = EnvRestore::capture();
-        let keys = Keys::generate();
-        std::env::set_var("BUZZ_PRIVATE_KEY", keys.secret_key().to_secret_hex());
-        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
         std::env::remove_var("HERDR_PANE_ID");
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
-        let error = run(&Args::parse_from([
+        run(&Args::parse_from([
             "botserver",
+            "--check",
             "--config",
             config.to_str().expect("utf8"),
             "--database",
             database.to_str().expect("utf8"),
         ]))
-        .expect_err("missing pane");
-        assert!(error.to_string().contains("missing HERDR_PANE_ID"));
+        .expect("check");
     }
 
     #[test]
