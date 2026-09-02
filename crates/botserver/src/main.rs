@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
@@ -446,7 +447,8 @@ async fn serve(
     );
     let publisher = BuzzPublisher;
     let inbound_trigger = bot.inbound_trigger().to_owned();
-    let mut actor = BotActor::new(bot, repository, HerdrPaneAllocator::default());
+    let mut actor = BotActor::new(bot, repository, HerdrPaneAllocator::default())
+        .with_reactions(Arc::new(publisher));
     if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
         eprintln!("queued occupant resume failed: {error}");
     }

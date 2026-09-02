@@ -413,3 +413,20 @@ the operator. Own `[bot]:` posts still do not trigger (`ignore_self`).
 Discovery MUST also fetch and subscribe to kind 9/40002 events
 **authored by** the operator. The `#p` filter alone never sees those
 DM lines.
+
+## D35. Host in-flight reaction is ⏳
+
+Status: accepted
+
+The host adds a NIP-25 kind-7 `⏳` on the triggering EventId when a
+turn becomes queued or open, and removes it with NIP-09 kind 5 when
+work on that EventId ends: posted, failed, or a cancel that does not
+re-queue the same EventId (`buzz reactions add|remove --event <id>
+--emoji ⏳`). An edit that replaces the turn keeps the marker up.
+Occupants never publish a reaction. This is not a second `[bot]:`
+(D17) and not presence or typing (D18).
+
+The marker is visually distinct from Buzz ACP `👀` / `💬`. Failures are
+best-effort: a failed add or remove MUST NOT fail the turn. A stale
+`⏳` on a fast-fail path is acceptable. v1 is one emoji; `💬` stays
+out of scope.

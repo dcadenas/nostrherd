@@ -12,8 +12,9 @@ cargo test --all-targets
 flows 1–12. It is not a live relay proof.
 
 `crates/botserver/src/outbox.rs` and `inbox.rs` prove host publish on
-kelpie final, ACK-after-decide, and crash-safe retry of the same
-outbound event. That is not a live relay proof.
+kelpie final, ACK-after-decide, crash-safe retry of the same outbound
+event, and best-effort `⏳` add/remove on the trigger. That is not a
+live relay proof.
 
 `TriggerMatch` and `TurnTransition` are parsed types in
 `crates/domain`. Illegal trigger text and illegal turn changes are
