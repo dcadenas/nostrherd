@@ -174,10 +174,10 @@ impl OutboundPublisher for BuzzPublisher {
         let output = child.wait_with_output()?;
         if !output.status.success() {
             let _ = write_result;
-            return Err(PublishError::CommandFailed {
-                status: output.status.to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
+            return Err(classify_buzz_failure(
+                output.status.to_string(),
+                String::from_utf8_lossy(&output.stderr).trim(),
+            ));
         }
         let _ = write_result;
         let receipt: serde_json::Value =
@@ -200,6 +200,23 @@ impl OutboundPublisher for BuzzPublisher {
     fn retryable(error: &Self::Error) -> bool {
         error.is_retryable()
     }
+}
+
+fn classify_buzz_failure(status: String, stderr: &str) -> PublishError {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stderr) {
+        if value.get("retryable").and_then(serde_json::Value::as_bool) == Some(true) {
+            return PublishError::CommandFailed {
+                status,
+                stderr: stderr.to_owned(),
+            };
+        }
+        let reason = value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("buzz reported a non-retryable failure");
+        return PublishError::AcceptedUnrecorded(format!("{reason}: {stderr}"));
+    }
+    PublishError::AcceptedUnrecorded(format!("buzz exited {status} without a retryable receipt"))
 }
 
 /// Classify one inbox delivery against a persisted turn.
@@ -372,17 +389,17 @@ where
             }
         }
         Err(error) if !P::retryable(&error) => {
-            notice(&format!(
-                "accepted outbound for ask {ask_id} without a stored id"
-            ));
+            notice(&format!("not retrying outbound for ask {ask_id}: {error}"));
             let _ = repository
-                .set_turn_state(ask_id, TurnState::Posted)
+                .set_turn_state(ask_id, TurnState::Failed)
                 .map_err(OutboxError::Repository)?;
             return Ok(InboxAction::Ack);
         }
         Err(error) => {
             attempt.dispatched = false;
-            let _ = repository.save_outbound_attempt(&attempt);
+            repository
+                .save_outbound_attempt(&attempt)
+                .map_err(OutboxError::Repository)?;
             let _ = repository.release_publish_claim(ask_id);
             return Err(OutboxError::Publish(error));
         }
@@ -423,6 +440,26 @@ mod tests {
                 return Err(PublishError::InvalidReceipt("rejected".to_owned()));
             }
             Ok(self.event_id.clone())
+        }
+
+        fn retryable(error: &Self::Error) -> bool {
+            error.is_retryable()
+        }
+    }
+
+    struct NonRetryPublisher;
+
+    impl OutboundPublisher for NonRetryPublisher {
+        type Error = PublishError;
+
+        fn publish(&self, _attempt: &OutboundAttempt) -> Result<String, Self::Error> {
+            Err(PublishError::AcceptedUnrecorded(
+                "delivery_unknown: timeout".to_owned(),
+            ))
+        }
+
+        fn retryable(error: &Self::Error) -> bool {
+            error.is_retryable()
         }
     }
 
@@ -723,6 +760,51 @@ mod tests {
             repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
             TurnState::Posted
         );
+    }
+
+    #[test]
+    fn non_retryable_buzz_failure_does_not_publish_again() {
+        let (mut repository, _publisher) = open_repo();
+        let mut notices = Vec::new();
+        let action = handle_delivery(
+            &mut repository,
+            &NonRetryPublisher,
+            &mut |notice| notices.push(notice.to_owned()),
+            &delivery("final", "ask-1", "hello"),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Failed
+        );
+        assert!(notices
+            .iter()
+            .any(|notice| notice.contains("delivery_unknown")));
+        let again = handle_delivery(
+            &mut repository,
+            &NonRetryPublisher,
+            &mut |_: &str| {},
+            &delivery("final", "ask-1", "hello"),
+        )
+        .expect("second");
+        assert_eq!(again, InboxAction::Ack);
+    }
+
+    #[test]
+    fn buzz_stderr_retryable_false_is_not_retryable() {
+        let error = classify_buzz_failure(
+            "exit status: 2".to_owned(),
+            r#"{"error":"delivery_unknown","message":"timeout","retryable":false}"#,
+        );
+        assert!(!error.is_retryable());
+        let retry = classify_buzz_failure(
+            "exit status: 2".to_owned(),
+            r#"{"error":"network_error","message":"connect","retryable":true}"#,
+        );
+        assert!(retry.is_retryable());
+        let opaque = classify_buzz_failure("exit status: 2".to_owned(), "not json");
+        assert!(!opaque.is_retryable());
     }
 
     #[test]

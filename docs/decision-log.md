@@ -308,8 +308,10 @@ deletes of that EventId are ignored (D14 after publish). A failed
 publish MUST clear the claim so retry can proceed. Do not add a
 `publishing` TurnState. The host records `dispatched` before calling send. After relay accept it
 stores the outbound event id. A crash after dispatch without an id does
-not call send again, so retry cannot mint a second `[bot]:`. `buzz
-messages send` has no prebuilt-id flag; this wrap is the retry boundary.
+not call send again. `buzz messages send` has no prebuilt-id flag; its
+stderr JSON `retryable` field is the retry boundary. `retryable: false`
+(including `delivery_unknown`) and an unparseable failure are treated
+like an already-invoked send: no second `[bot]:`.
 
 ## D29. envchain wraps the process; binaries only read env
 

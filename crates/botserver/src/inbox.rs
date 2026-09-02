@@ -145,7 +145,7 @@ impl InboxConn {
     /// Returns an error when Kelpie rejects the ACK or the connection drops.
     pub fn ack(&mut self, message_id: &str) -> Result<(), KelpieError> {
         self.stream
-            .set_read_timeout(None)
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(KelpieError::from)?;
         let result = self.ack_inner(message_id);
         let _ = self
