@@ -72,15 +72,17 @@ without the prefix, or a bare mention of the operator.
 
 The operator's own unprefixed reply in a thread is human mail.
 
-## D9. Fixed trigger and stamp protocol
+## D9. Trigger token is `{bot-id}:`; stamp is `[bot]:`
 
 Status: accepted
 
 Closes Q2.
 
-Inbound: the event MUST `p`-tag the operator pubkey and the body MUST
-have `bot:` as the first token after an optional leading mention.
-Example: `@daniel bot: hello`.
+Inbound: the body MUST have `{bot-id}:` as the first token after an
+optional leading mention. For the example bot id `bot` that is `bot:`.
+Other authors MUST `p`-tag the operator pubkey. Example:
+`@daniel bot: hello`. The operator's own `{id}:` is a trigger without
+a self `p`-tag (D11, D34).
 
 Outbound: the host MUST prefix the published body with `[bot]:`.
 Occupants MUST NOT stamp it themselves. Own `[bot]:` posts MUST NOT
@@ -105,7 +107,9 @@ session name.
 Status: accepted
 
 `@daniel bot:` from the operator pubkey is a trigger. That is how you
-talk to the bot without a second identity.
+talk to the bot without a second identity. Buzz 1-1 DMs `p`-tag the
+peer, not the author, so the operator's own `bot:` MUST match on
+authorship (D34), not only on a self mention.
 
 ## D12. One in-flight turn per session; channels are independent
 
@@ -247,8 +251,9 @@ MUST NOT mutate a Turn, matching Buzz relay validation.
 
 Status: accepted
 
-Ingest uses separate filters for operator `p`-tag discovery, known-channel
-`h`-tag traffic, and active-turn mutation `e` tags. Every filter carries
+Ingest uses separate filters for operator `p`-tag discovery,
+operator-authored kind 9/40002, known-channel `h`-tag traffic, and
+active-turn mutation `e` tags. Every filter carries
 an inclusive persisted `since` cursor. The cursor starts at the oldest
 unprocessed actionable event; with none pending it overlaps the newest
 indexed timestamp by Buzz's 15-minute accepted clock drift. The host
@@ -272,8 +277,9 @@ imply the trigger obligation exists.
 
 Status: accepted
 
-D9 requires `bot:` as the first token after an optional mention. If the
-remainder is empty (`bot:` or `@daniel bot:` with no request text), the
+D9 requires `{bot-id}:` as the first token after an optional mention.
+If the remainder is empty (`bot:` or `@daniel bot:` with no request text
+when the bot id is `bot`), the
 host MUST acknowledge the event and MUST NOT open a Turn, start an
 occupant, or send an ask. Silence here is not D8 untriggered traffic;
 it is a classified trigger with nothing to answer.
@@ -392,3 +398,18 @@ Classify by `reply_to` in the host's Turn ids:
 - Cancelled turn: ACK, do not publish.
 - Already posted: ACK.
 - Unknown `reply_to`: do not publish.
+
+## D34. Operator-authored `bot:` does not need a self `p`-tag
+
+Status: accepted
+
+Amends D9, D11, and D24.
+
+A Buzz 1-1 DM composer `p`-tags the other participant, not the author.
+Typing `{id}: ping` or `@daniel {id}: ping` as the operator therefore
+does not mention the operator pubkey. Other authors still MUST `p`-tag
+the operator. Own `[bot]:` posts still do not trigger (`ignore_self`).
+
+Discovery MUST also fetch and subscribe to kind 9/40002 events
+**authored by** the operator. The `#p` filter alone never sees those
+DM lines.

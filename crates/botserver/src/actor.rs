@@ -601,7 +601,9 @@ where
             .repository
             .latest_body_for_event(event_id)
             .map_err(ActorError::Repository)?
-            .and_then(|content| botserver_domain::TriggerMatch::from_body(&content))
+            .and_then(|content| {
+                botserver_domain::TriggerMatch::from_body(&content, self.bot.inbound_trigger())
+            })
             .map(|trigger| trigger.request().to_owned())
             .filter(|content| !content.is_empty()))
     }
@@ -1785,7 +1787,9 @@ mod tests {
             reply_to_event_id: trigger.reply_to_event_id.clone(),
             trigger: botserver_domain::TriggerMatch::parse(
                 "operator",
+                "someone-else",
                 ["operator"],
+                "bot:",
                 "@daniel bot: hello",
             )
             .expect("trigger"),
@@ -1812,7 +1816,9 @@ mod tests {
             reply_to_event_id: trigger.reply_to_event_id.clone(),
             trigger: botserver_domain::TriggerMatch::parse(
                 "operator",
+                "someone-else",
                 ["operator"],
+                "bot:",
                 "@daniel bot: hello",
             )
             .expect("trigger"),
@@ -1852,8 +1858,14 @@ mod tests {
             event_id: event.clone(),
             channel_id: channel.to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], "bot:")
-                .expect("trigger"),
+            trigger: botserver_domain::TriggerMatch::parse(
+                "operator",
+                "someone-else",
+                ["operator"],
+                "bot:",
+                "bot:",
+            )
+            .expect("trigger"),
         };
 
         assert_eq!(
@@ -1878,8 +1890,14 @@ mod tests {
             event_id: event.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], "bot: hi")
-                .expect("trigger"),
+            trigger: botserver_domain::TriggerMatch::parse(
+                "operator",
+                "someone-else",
+                ["operator"],
+                "bot:",
+                "bot: hi",
+            )
+            .expect("trigger"),
         };
 
         assert_eq!(
@@ -1902,8 +1920,14 @@ mod tests {
             event_id: event.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], "bot: hi")
-                .expect("trigger"),
+            trigger: botserver_domain::TriggerMatch::parse(
+                "operator",
+                "someone-else",
+                ["operator"],
+                "bot:",
+                "bot: hi",
+            )
+            .expect("trigger"),
         };
 
         assert_eq!(
@@ -2121,7 +2145,8 @@ mod tests {
             .handle_trigger(&kelpie, &waiter, &trigger)
             .expect("first");
         let edit_id = event_id('e');
-        let replacement = botserver_domain::TriggerMatch::from_body("bot: latest").expect("edit");
+        let replacement =
+            botserver_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
 
         assert_eq!(
             actor
@@ -2237,7 +2262,10 @@ mod tests {
                     &crate::relay::IngestAction::Edit {
                         event_id: event_id('e'),
                         target_event_id: trigger.event_id.clone(),
-                        replacement: botserver_domain::TriggerMatch::from_body("bot: stale"),
+                        replacement: botserver_domain::TriggerMatch::from_body(
+                            "bot: stale",
+                            "bot:"
+                        ),
                     },
                     &trigger.channel_display,
                 )
@@ -2285,7 +2313,10 @@ mod tests {
                     &crate::relay::IngestAction::Edit {
                         event_id: event_id('e'),
                         target_event_id: second.event_id.clone(),
-                        replacement: botserver_domain::TriggerMatch::from_body("bot: later"),
+                        replacement: botserver_domain::TriggerMatch::from_body(
+                            "bot: later",
+                            "bot:"
+                        ),
                     },
                     &second.channel_display,
                 )
@@ -2344,7 +2375,10 @@ mod tests {
                     &crate::relay::IngestAction::Edit {
                         event_id: event_id('e'),
                         target_event_id: first.event_id.clone(),
-                        replacement: botserver_domain::TriggerMatch::from_body("bot: latest"),
+                        replacement: botserver_domain::TriggerMatch::from_body(
+                            "bot: latest",
+                            "bot:",
+                        ),
                     },
                     &first.channel_display,
                 )

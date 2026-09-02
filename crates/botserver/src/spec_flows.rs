@@ -228,7 +228,8 @@ impl Harness {
             &self.operator,
             "f".repeat(64),
             SqliteRepository::open(&self.db_path).expect("ingest db"),
-        );
+        )
+        .with_inbound_trigger(self.bot.inbound_trigger());
         ingest.ingest(event).expect("ingest")
     }
 

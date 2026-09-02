@@ -58,10 +58,13 @@ relay  ->  botserver (reconnecting inbox client, waiter)
 After parse, configuration is a set of `Bot` records. Runtime is one
 `BotActor` per bot. A trigger becomes a `Turn` bound to a `Session`.
 
-A `Turn` opens only on a **trigger** (D8, D9). No occupant is created
-until the first trigger for that place. Ordinary channel traffic, thread
-replies without the prefix, and `@daniel` without `bot:` MUST NOT start
-or poke a session.
+A `Turn` opens only on a **trigger** (D8, D9, D34). The inbound token is
+the configured bot id plus a colon (`bot:` when `id = "bot"`). No occupant
+is created until the first trigger for that place. Ordinary channel
+traffic, thread replies without the prefix, and `@daniel` without
+`{id}:` MUST NOT start or poke a session. Other authors MUST `p`-tag
+the operator. The operator's own `{id}:` (optional leading mention) is
+a trigger even when the event does not `p`-tag them.
 
 Session grain is one occupant per Buzz channel UUID, including DMs
 (D10). Thread ids are reply coordinates on the turn, not extra sessions.
@@ -155,10 +158,10 @@ subset.
 3. **Follow-up without prefix.** Sebastian's next line is `and the PR?`
    with no `bot:`. The occupant is not poked. Daniel may answer as
    himself.
-4. **Second call.** Later, anyone (including Daniel) writes
-   `@daniel bot: …` in the same channel. Same occupant gets a new ask,
-   reply-to that event. If the previous turn is still open, this one
-   waits.
+4. **Second call.** Later, anyone writes `@daniel bot: …` in the same
+   channel, or Daniel writes `bot: …` without `@`. Same occupant gets a
+   new ask, reply-to that event. If the previous turn is still open,
+   this one waits.
 5. **Another channel.** `@daniel bot:` in `#eng` is `bot-eng`,
    independent of `#foobar`.
 6. **DM.** Same as a channel: first trigger creates `bot-<dm-slug>`,

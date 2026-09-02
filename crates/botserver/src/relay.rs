@@ -3,10 +3,11 @@
 use std::fmt;
 use std::time::Duration;
 
-use botserver_domain::{EventId, TriggerMatch};
+use botserver_domain::{EventId, TriggerMatch, INBOUND_TRIGGER};
 use futures::Stream;
 use nostr_sdk::prelude::{
-    Client, ClientNotification, Event, Filter, Kind, SingleLetterTag, SubscriptionId, Timestamp,
+    Client, ClientNotification, Event, Filter, Kind, PublicKey, SingleLetterTag, SubscriptionId,
+    Timestamp,
 };
 
 use crate::{HostRepository, IndexedRelayEvent};
@@ -117,6 +118,7 @@ where
 pub struct RelayIngest<R> {
     operator_pubkey: String,
     relay_pubkey: String,
+    inbound_trigger: String,
     repository: R,
 }
 
@@ -131,8 +133,16 @@ impl<R: HostRepository> RelayIngest<R> {
         Self {
             operator_pubkey: operator_pubkey.into().to_ascii_lowercase(),
             relay_pubkey: relay_pubkey.into().to_ascii_lowercase(),
+            inbound_trigger: INBOUND_TRIGGER.to_owned(),
             repository,
         }
+    }
+
+    /// Classify inbound bodies with this `{bot-id}:` token.
+    #[must_use]
+    pub fn with_inbound_trigger(mut self, inbound_trigger: impl Into<String>) -> Self {
+        self.inbound_trigger = inbound_trigger.into();
+        self
     }
 
     /// Index one verified Nostr event and return an actor action when needed.
@@ -174,6 +184,7 @@ impl<R: HostRepository> RelayIngest<R> {
                 event_id.clone(),
                 channel_id.clone(),
                 &tags,
+                &event.pubkey.to_hex(),
                 &author,
                 &event.content,
             )),
@@ -235,6 +246,7 @@ impl<R: HostRepository> RelayIngest<R> {
         event_id: EventId,
         channel_id: Option<String>,
         tags: &[Vec<String>],
+        signing_pubkey: &str,
         author: &EffectiveAuthor,
         content: &str,
     ) -> Option<IngestAction> {
@@ -256,7 +268,9 @@ impl<R: HostRepository> RelayIngest<R> {
         let p_tags = p_tags.map(str::to_ascii_lowercase).collect::<Vec<_>>();
         let trigger = TriggerMatch::parse(
             &self.operator_pubkey,
+            signing_pubkey,
             p_tags.iter().map(String::as_str),
+            &self.inbound_trigger,
             content,
         )?;
         Some(IngestAction::TurnCandidate {
@@ -296,8 +310,13 @@ impl<R: HostRepository> RelayIngest<R> {
             return Ok(None);
         }
         // An active target already proved the original event p-tagged the operator.
-        let replacement =
-            TriggerMatch::parse(&self.operator_pubkey, [&self.operator_pubkey], content);
+        let replacement = TriggerMatch::parse(
+            &self.operator_pubkey,
+            author_pubkey,
+            [&self.operator_pubkey],
+            &self.inbound_trigger,
+            content,
+        );
         Ok(Some(IngestAction::Edit {
             event_id,
             target_event_id,
@@ -355,7 +374,8 @@ impl RelaySubscriber {
         Self { client }
     }
 
-    /// Subscribe to operator mentions, known channels, and active-turn mutations.
+    /// Subscribe to operator mentions, operator-authored messages, known
+    /// channels, and active-turn mutations.
     ///
     /// Call this again whenever `channel_ids` or `active_event_ids` changes.
     /// Empty sets close the corresponding prior subscription. `since` is an
@@ -375,6 +395,9 @@ impl RelaySubscriber {
     ) -> Result<(), RelaySubscribeError> {
         self.subscribe_filter("botserver-messages", message_filter(operator_pubkey, since))
             .await?;
+        if let Some(filter) = operator_authored_filter(operator_pubkey, since) {
+            self.subscribe_filter("botserver-authored", filter).await?;
+        }
         self.update_filter("botserver-channels", channel_filter(channel_ids, since))
             .await?;
         self.update_filter(
@@ -415,7 +438,7 @@ impl RelaySubscriber {
         self.client.notifications()
     }
 
-    /// Fetch stored operator-mention messages since `since`.
+    /// Fetch stored operator-mention and operator-authored messages since `since`.
     ///
     /// # Errors
     ///
@@ -425,8 +448,14 @@ impl RelaySubscriber {
         operator_pubkey: &str,
         since: Timestamp,
     ) -> Result<Vec<Event>, RelaySubscribeError> {
-        self.fetch_filtered(Some(message_filter(operator_pubkey, since)))
-            .await
+        let mut events = self
+            .fetch_filtered(Some(message_filter(operator_pubkey, since)))
+            .await?;
+        events.extend(
+            self.fetch_filtered(operator_authored_filter(operator_pubkey, since))
+                .await?,
+        );
+        Ok(events)
     }
 
     /// Fetch stored `h`-tag traffic for known channels since `since`.
@@ -549,6 +578,19 @@ fn message_filter(operator_pubkey: &str, since: Timestamp) -> Filter {
         ])
         .custom_tag(SingleLetterTag::LOWERCASE_P, operator_pubkey)
         .since(since)
+}
+
+fn operator_authored_filter(operator_pubkey: &str, since: Timestamp) -> Option<Filter> {
+    let pubkey = PublicKey::parse(operator_pubkey).ok()?;
+    Some(
+        Filter::new()
+            .kinds([
+                Kind::Custom(CHANNEL_MESSAGE_KIND),
+                Kind::Custom(STREAM_MESSAGE_V2_KIND),
+            ])
+            .author(pubkey)
+            .since(since),
+    )
 }
 
 fn channel_filter(channel_ids: &[String], since: Timestamp) -> Option<Filter> {
@@ -1143,6 +1185,68 @@ mod tests {
     }
 
     #[test]
+    fn operator_authored_bot_colon_without_self_p_tag_emits() {
+        let operator_keys = Keys::generate();
+        let operator = operator_keys.public_key().to_hex();
+        let peer = "b".repeat(64);
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), FakeRepository::default());
+        let message = event_with_keys(
+            &operator_keys,
+            CHANNEL_MESSAGE_KIND,
+            "bot: testing",
+            [tag(&["h", "channel"]), tag(&["p", &peer])],
+        );
+
+        let action = ingest.ingest(&message).unwrap().expect("trigger");
+        let IngestAction::TurnCandidate { trigger, .. } = action else {
+            panic!("expected turn candidate");
+        };
+        assert_eq!(trigger.request(), "testing");
+    }
+
+    #[test]
+    fn inbound_trigger_token_is_the_configured_bot_id() {
+        let operator_keys = Keys::generate();
+        let operator = operator_keys.public_key().to_hex();
+        let peer = "b".repeat(64);
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), FakeRepository::default())
+            .with_inbound_trigger("review:");
+        let matched = event_with_keys(
+            &operator_keys,
+            CHANNEL_MESSAGE_KIND,
+            "review: hello",
+            [tag(&["h", "channel"]), tag(&["p", &peer])],
+        );
+        let missed = event_with_keys(
+            &operator_keys,
+            CHANNEL_MESSAGE_KIND,
+            "bot: hello",
+            [tag(&["h", "channel"]), tag(&["p", &peer])],
+        );
+
+        let action = ingest.ingest(&matched).unwrap().expect("trigger");
+        let IngestAction::TurnCandidate { trigger, .. } = action else {
+            panic!("expected turn candidate");
+        };
+        assert_eq!(trigger.request(), "hello");
+        assert_eq!(ingest.ingest(&missed).unwrap(), None);
+    }
+
+    #[test]
+    fn peer_authored_bot_colon_without_operator_p_tag_is_indexed_only() {
+        let operator = "a".repeat(64);
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), FakeRepository::default());
+        let message = event(
+            CHANNEL_MESSAGE_KIND,
+            "bot: testing",
+            [tag(&["h", "channel"]), tag(&["p", &"b".repeat(64)])],
+        );
+
+        assert_eq!(ingest.ingest(&message).unwrap(), None);
+        assert_eq!(ingest.repository.indexed.len(), 1);
+    }
+
+    #[test]
     fn subscription_filters_scope_messages_and_mutations() {
         let operator = "a".repeat(64);
         let active = EventId::parse_hex(&"b".repeat(64)).expect("active");
@@ -1152,6 +1256,14 @@ mod tests {
         assert_eq!(message_json["kinds"], serde_json::json!([9, 40002]));
         assert_eq!(message_json["#p"], serde_json::json!([operator]));
         assert_eq!(message_json["since"], 42);
+
+        let authored_json =
+            serde_json::to_value(operator_authored_filter(&operator, since).expect("filter"))
+                .unwrap();
+        assert_eq!(authored_json["kinds"], serde_json::json!([9, 40002]));
+        assert_eq!(authored_json["authors"], serde_json::json!([operator]));
+        assert_eq!(authored_json["since"], 42);
+        assert!(authored_json.get("#p").is_none());
 
         let channel_json = serde_json::to_value(
             channel_filter(&["channel-a".to_owned(), "channel-b".to_owned()], since)

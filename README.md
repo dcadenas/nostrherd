@@ -1,7 +1,7 @@
 # botserver
 
 Private host for personal Nostr bots that post **as you**, with a
-channel convention (`bot: …` in, `[bot]:` out), driven through Herdr and
+channel convention (`{bot-id}: …` in, `[bot]:` out; id `bot` → `bot:`), driven through Herdr and
 Kelpie.
 
 This is not an ACP child and not a Buzz managed-agent. The daemon watches

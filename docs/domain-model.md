@@ -37,9 +37,9 @@ mint a second `[bot]:`.
 
 - `EventId`, `Pubkey` — relay coordinates, opaque hex.
 - `Place` — `Channel(uuid)` | `Dm(pubkey)` | `GroupDm(id)` (shape TBD).
-- `TriggerMatch` — operator `p`-tag plus first token `bot:` after an
-  optional mention (D8, D9). A non-prefix reply in an open thread is
-  not a match.
+- `TriggerMatch` — first token `{bot-id}:` after an optional mention,
+  plus either an operator `p`-tag or operator authorship (D8, D9, D34).
+  A non-prefix reply in an open thread is not a match.
 - `TurnState` / `TurnTransition` — parsed tokens. Illegal changes are
   `None`.
 

@@ -40,8 +40,14 @@ impl fmt::Display for BotId {
     }
 }
 
-/// Inbound trigger token required by D9.
+/// Inbound trigger token for the example bot id `bot` (`{id}:`).
 pub const INBOUND_TRIGGER: &str = "bot:";
+
+/// Inbound trigger token for a bot id, e.g. `bot` → `bot:`.
+#[must_use]
+pub fn inbound_trigger_for(id: &BotId) -> String {
+    format!("{}:", id.as_str())
+}
 
 /// Outbound stamp applied by the host.
 pub const OUTBOUND_PREFIX: &str = "[bot]:";
@@ -70,17 +76,18 @@ pub struct Bot {
 }
 
 impl Bot {
-    /// Construct a bot with the D9 trigger and stamp protocol.
+    /// Construct a bot with inbound token `{id}:` and stamp `[bot]:`.
     #[must_use]
     pub fn new(id: BotId, corpus_path: PathBuf, occupant_kind: impl Into<String>) -> Option<Self> {
         let occupant_kind = occupant_kind.into();
         if occupant_kind.is_empty() || occupant_kind.chars().any(char::is_whitespace) {
             return None;
         }
+        let inbound_trigger = inbound_trigger_for(&id);
         Some(Self {
             id,
             corpus_path,
-            inbound_trigger: INBOUND_TRIGGER.to_owned(),
+            inbound_trigger,
             outbound_prefix: OUTBOUND_PREFIX.to_owned(),
             occupant_kind,
         })
@@ -236,38 +243,51 @@ pub struct TriggerMatch {
 }
 
 impl TriggerMatch {
-    /// Match an operator `p`-tag and an exact leading `bot:` token.
+    /// Match an operator-authored or operator-mentioned `{id}:` body.
     ///
-    /// One leading `@mention` token is allowed. The returned request excludes
-    /// both the mention and trigger tokens.
+    /// `inbound_trigger` is `{bot-id}:` (D9). Other authors MUST `p`-tag the
+    /// operator. The operator's own `{id}:` body is a trigger even when Buzz
+    /// only `p`-tags the DM peer (D11, D34). One leading `@mention` token is
+    /// allowed. The returned request excludes both the mention and trigger
+    /// tokens.
     #[must_use]
-    pub fn parse<I, S>(operator_pubkey: &str, p_tags: I, body: &str) -> Option<Self>
+    pub fn parse<I, S>(
+        operator_pubkey: &str,
+        author_pubkey: &str,
+        p_tags: I,
+        inbound_trigger: &str,
+        body: &str,
+    ) -> Option<Self>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        if !p_tags
+        let from_operator = author_pubkey.eq_ignore_ascii_case(operator_pubkey);
+        let mentioned = p_tags
             .into_iter()
-            .any(|pubkey| pubkey.as_ref() == operator_pubkey)
-        {
+            .any(|pubkey| pubkey.as_ref().eq_ignore_ascii_case(operator_pubkey));
+        if !from_operator && !mentioned {
             return None;
         }
-        Self::from_body(body)
+        Self::from_body(body, inbound_trigger)
     }
 
     /// Parse the inbound trigger token without checking `p`-tags.
     ///
     /// Use this on already-classified trigger text, such as a stored channel
-    /// body being replayed as an ask.
+    /// body being replayed as an ask. `inbound_trigger` is `{bot-id}:`.
     #[must_use]
-    pub fn from_body(body: &str) -> Option<Self> {
+    pub fn from_body(body: &str, inbound_trigger: &str) -> Option<Self> {
+        if inbound_trigger.is_empty() {
+            return None;
+        }
         let body = body.trim_start();
         let (first, remainder) = split_first_token(body)?;
-        let request = if first == "bot:" {
+        let request = if first == inbound_trigger {
             remainder
         } else if first.starts_with('@') && first.len() > 1 {
             let (trigger, remainder) = split_first_token(remainder)?;
-            (trigger == "bot:").then_some(remainder)?
+            (trigger == inbound_trigger).then_some(remainder)?
         } else {
             return None;
         };
@@ -407,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn bot_uses_fixed_trigger_protocol_and_rejects_empty_kind() {
+    fn bot_uses_id_as_inbound_trigger_and_rejects_empty_kind() {
         let id = BotId::new("bot").expect("bot");
         assert!(Bot::new(id.clone(), PathBuf::from("/corpus"), "").is_none());
         assert!(Bot::new(id.clone(), PathBuf::from("/corpus"), "open code").is_none());
@@ -416,6 +436,14 @@ mod tests {
         assert_eq!(bot.outbound_prefix(), OUTBOUND_PREFIX);
         assert_eq!(bot.occupant_kind(), "opencode");
         assert_eq!(bot.corpus_path(), Path::new("/corpus"));
+        let review = Bot::new(
+            BotId::new("review").expect("id"),
+            PathBuf::from("/corpus"),
+            "opencode",
+        )
+        .expect("bot");
+        assert_eq!(review.inbound_trigger(), "review:");
+        assert_ne!(review.inbound_trigger(), INBOUND_TRIGGER);
     }
 
     #[test]
@@ -521,33 +549,99 @@ mod tests {
     }
 
     #[test]
-    fn trigger_requires_operator_p_tag() {
-        assert!(TriggerMatch::parse("operator", ["someone-else"], "bot: hello").is_none());
+    fn trigger_requires_operator_p_tag_unless_operator_authored() {
+        assert!(TriggerMatch::parse(
+            "operator",
+            "someone-else",
+            ["someone-else"],
+            INBOUND_TRIGGER,
+            "bot: hello"
+        )
+        .is_none());
         assert_eq!(
-            TriggerMatch::parse("operator", ["someone-else", "operator"], "bot: hello")
-                .map(|matched| matched.request),
+            TriggerMatch::parse(
+                "operator",
+                "someone-else",
+                ["someone-else", "operator"],
+                INBOUND_TRIGGER,
+                "bot: hello"
+            )
+            .map(|matched| matched.request),
             Some("hello".to_owned())
         );
+        assert_eq!(
+            TriggerMatch::parse(
+                "operator",
+                "operator",
+                ["someone-else"],
+                INBOUND_TRIGGER,
+                "bot: hello"
+            )
+            .map(|matched| matched.request),
+            Some("hello".to_owned())
+        );
+        assert_eq!(
+            TriggerMatch::parse(
+                "operator",
+                "operator",
+                ["someone-else"],
+                INBOUND_TRIGGER,
+                "@daniel bot: testing"
+            )
+            .map(|matched| matched.request),
+            Some("testing".to_owned())
+        );
+        assert!(TriggerMatch::parse(
+            "operator",
+            "operator",
+            ["someone-else"],
+            INBOUND_TRIGGER,
+            "[bot]: pong"
+        )
+        .is_none());
+        assert_eq!(
+            TriggerMatch::parse(
+                "operator",
+                "operator",
+                ["someone-else"],
+                "review:",
+                "review: hello"
+            )
+            .map(|matched| matched.request),
+            Some("hello".to_owned())
+        );
+        assert!(TriggerMatch::parse(
+            "operator",
+            "operator",
+            ["someone-else"],
+            "review:",
+            "bot: hello"
+        )
+        .is_none());
     }
 
     #[test]
     fn trigger_allows_one_leading_mention() {
         let matched = TriggerMatch::parse(
             "operator",
+            "someone-else",
             ["operator"],
+            INBOUND_TRIGGER,
             "  @daniel\n bot:   review the PR  ",
         )
         .expect("trigger");
 
         assert_eq!(matched.request(), "review the PR");
         assert_eq!(
-            TriggerMatch::from_body("@daniel bot: review the PR")
+            TriggerMatch::from_body("@daniel bot: review the PR", INBOUND_TRIGGER)
                 .expect("body")
                 .request(),
             "review the PR"
         );
         assert_eq!(
-            TriggerMatch::from_body("bot:").expect("empty").request(),
+            TriggerMatch::from_body("bot:", INBOUND_TRIGGER)
+                .expect("empty")
+                .request(),
             ""
         );
     }
@@ -564,7 +658,14 @@ mod tests {
             "[bot]: bot: help",
         ] {
             assert!(
-                TriggerMatch::parse("operator", ["operator"], body).is_none(),
+                TriggerMatch::parse(
+                    "operator",
+                    "someone-else",
+                    ["operator"],
+                    INBOUND_TRIGGER,
+                    body
+                )
+                .is_none(),
                 "unexpected trigger: {body}"
             );
         }

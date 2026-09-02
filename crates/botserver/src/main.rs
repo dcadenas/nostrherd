@@ -445,6 +445,7 @@ async fn serve(
         waiter.identity().logical_agent_id().to_owned(),
     );
     let publisher = BuzzPublisher;
+    let inbound_trigger = bot.inbound_trigger().to_owned();
     let mut actor = BotActor::new(bot, repository, HerdrPaneAllocator::default());
     if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
         eprintln!("queued occupant resume failed: {error}");
@@ -460,7 +461,8 @@ async fn serve(
         operator_pubkey.clone(),
         String::new(),
         SqliteRepository::open(database)?,
-    );
+    )
+    .with_inbound_trigger(inbound_trigger);
     let mut refresh = tokio::time::interval(SUBSCRIPTION_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut poll = RelayPoll {
@@ -629,8 +631,14 @@ mod tests {
             event_id: botserver_domain::EventId::parse_hex(&"a".repeat(64)).expect("event"),
             channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], content)
-                .expect("trigger"),
+            trigger: botserver_domain::TriggerMatch::parse(
+                "operator",
+                "someone-else",
+                ["operator"],
+                "bot:",
+                content,
+            )
+            .expect("trigger"),
         }
     }
 
@@ -665,8 +673,14 @@ mod tests {
             event_id: event_id.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse("operator", ["operator"], "bot: hi")
-                .expect("trigger"),
+            trigger: botserver_domain::TriggerMatch::parse(
+                "operator",
+                "someone-else",
+                ["operator"],
+                "bot:",
+                "bot: hi",
+            )
+            .expect("trigger"),
         };
 
         assert_eq!(
