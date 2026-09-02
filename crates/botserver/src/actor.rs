@@ -46,6 +46,13 @@ pub struct TriggerWork {
     pub nostr_body: String,
 }
 
+/// Known channels and active triggering event ids for relay filters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingScope {
+    pub channel_ids: Vec<String>,
+    pub active_event_ids: Vec<EventId>,
+}
+
 /// How the actor treated one trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerOutcome {
@@ -153,6 +160,24 @@ where
     #[must_use]
     pub fn bot(&self) -> &Bot {
         &self.bot
+    }
+
+    /// Known session channels and queued or open triggering event ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence cannot list sessions or turns.
+    pub fn pending_scope(&self) -> Result<PendingScope, ActorError<R::Error>> {
+        Ok(PendingScope {
+            channel_ids: self
+                .repository
+                .known_channel_ids()
+                .map_err(ActorError::Repository)?,
+            active_event_ids: self
+                .repository
+                .active_event_ids()
+                .map_err(ActorError::Repository)?,
+        })
     }
 
     /// Persist a trigger and start or ask the channel occupant.
@@ -1302,6 +1327,27 @@ mod tests {
         assert_eq!(start_count(&runner), 1);
         assert_eq!(panes.calls.lock().expect("pane calls").len(), 1);
         assert!(continued_starts(&runner).is_empty());
+    }
+
+    #[test]
+    fn pending_scope_lists_open_turn_channels_and_event_ids() {
+        let (mut actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("asked");
+        let scope = actor.pending_scope().expect("scope");
+        assert_eq!(scope.channel_ids, vec![trigger.channel_id.clone()]);
+        assert_eq!(scope.active_event_ids, vec![trigger.event_id.clone()]);
+        actor
+            .repository
+            .set_turn_state("ask-1", TurnState::Posted)
+            .expect("posted");
+        let posted = actor.pending_scope().expect("posted scope");
+        assert_eq!(posted.channel_ids, vec![trigger.channel_id]);
+        assert!(posted.active_event_ids.is_empty());
     }
 
     #[test]

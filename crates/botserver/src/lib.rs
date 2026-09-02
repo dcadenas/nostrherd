@@ -1659,4 +1659,18 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the sessions cannot be read.
     fn sessions_with_pending_turns(&self) -> Result<Vec<SessionRecord>, Self::Error>;
+
+    /// Channel ids of every persisted session, including posted ones.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the sessions cannot be read.
+    fn known_channel_ids(&self) -> Result<Vec<String>, Self::Error>;
+
+    /// Event ids of queued or open turns, in session order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the turns cannot be read.
+    fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error>;
 }

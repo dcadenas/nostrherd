@@ -661,6 +661,29 @@ impl HostRepository for SqliteRepository {
             .collect();
         sessions
     }
+
+    fn known_channel_ids(&self) -> Result<Vec<String>, Self::Error> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT channel_id FROM sessions ORDER BY channel_id")?;
+        let ids = statement.query_map([], |row| row.get(0))?.collect();
+        ids
+    }
+
+    fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.event_id FROM turns AS t
+             WHERE t.state IN ('queued', 'open')
+             ORDER BY t.sequence",
+        )?;
+        let ids = statement
+            .query_map([], |row| {
+                let event_id: String = row.get(0)?;
+                parse_event_id(&event_id, 0)
+            })?
+            .collect();
+        ids
+    }
 }
 
 fn insert_queued_turn(connection: &Connection, turn: &NewTurn) -> rusqlite::Result<TurnRecord> {
@@ -960,8 +983,22 @@ mod tests {
             .unwrap();
         assert_eq!(
             repository.sessions_with_pending_turns().unwrap(),
-            vec![expected]
+            vec![expected.clone()]
         );
+        assert_eq!(
+            repository.known_channel_ids().unwrap(),
+            vec![channel_id.to_owned()]
+        );
+        assert_eq!(repository.active_event_ids().unwrap().len(), 1);
+        repository
+            .set_turn_state("ask-1", TurnState::Posted)
+            .unwrap();
+        assert!(repository.sessions_with_pending_turns().unwrap().is_empty());
+        assert_eq!(
+            repository.known_channel_ids().unwrap(),
+            vec![channel_id.to_owned()]
+        );
+        assert!(repository.active_event_ids().unwrap().is_empty());
     }
 
     #[test]

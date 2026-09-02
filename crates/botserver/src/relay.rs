@@ -425,9 +425,48 @@ impl RelaySubscriber {
         operator_pubkey: &str,
         since: Timestamp,
     ) -> Result<Vec<Event>, RelaySubscribeError> {
+        self.fetch_filtered(Some(message_filter(operator_pubkey, since)))
+            .await
+    }
+
+    /// Fetch stored `h`-tag traffic for known channels since `since`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an SDK error when the fetch cannot complete.
+    pub async fn fetch_channel_messages(
+        &self,
+        channel_ids: &[String],
+        since: Timestamp,
+    ) -> Result<Vec<Event>, RelaySubscribeError> {
+        self.fetch_filtered(channel_filter(channel_ids, since))
+            .await
+    }
+
+    /// Fetch stored edits and deletes for active turns since `since`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an SDK error when the fetch cannot complete.
+    pub async fn fetch_mutations(
+        &self,
+        active_event_ids: &[EventId],
+        since: Timestamp,
+    ) -> Result<Vec<Event>, RelaySubscribeError> {
+        self.fetch_filtered(mutation_filter(active_event_ids, since))
+            .await
+    }
+
+    async fn fetch_filtered(
+        &self,
+        filter: Option<Filter>,
+    ) -> Result<Vec<Event>, RelaySubscribeError> {
+        let Some(filter) = filter else {
+            return Ok(Vec::new());
+        };
         let events = self
             .client
-            .fetch_events(message_filter(operator_pubkey, since))
+            .fetch_events(filter)
             .timeout(Duration::from_secs(5))
             .await?;
         Ok(events.into_iter().collect())
@@ -761,6 +800,14 @@ mod tests {
         }
 
         fn sessions_with_pending_turns(&self) -> Result<Vec<SessionRecord>, Self::Error> {
+            unreachable!()
+        }
+
+        fn known_channel_ids(&self) -> Result<Vec<String>, Self::Error> {
+            unreachable!()
+        }
+
+        fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error> {
             unreachable!()
         }
     }
