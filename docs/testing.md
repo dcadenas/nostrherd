@@ -41,12 +41,14 @@ Invariants and their tests: `docs/invariants.md`.
 Live columns are issues 18–20. Occupant start/ask from the running host
 (`dcadenas/botserver#17`) uses the local relay; it is not the flow 2 live
 proof. Issue 18 is the live proof of flows 1–2: silence until a trigger,
-then a `[bot]:` body via `botcli`. Issue 19 is the live proof of flows
-3–5 and 7–8.
+then a `[bot]:` body via leftover `botcli`. Issue 19 is the live proof of
+flows 3–5 and 7–8. Issue 34 is the live E2E that the occupant only
+`kelpie reply --final` and the host stamps `[bot]:` (D31). It does not
+replace the issue 18–20 `botcli` harnesses.
 
 ## Live local relay
 
-Follow `skills/local-relay/SKILL.md`. Issues 17–19 require it.
+Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, and 34 require it.
 
 ```bash
 ./tools/local-relay up
@@ -647,6 +649,168 @@ env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete \
 sleep 2
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' ORDER BY t.sequence;"
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
+```
+
+### Occupant kelpie-final (issue 34)
+
+Host publish on occupant `kelpie reply --final`. Occupant must not invoke
+`botcli` and must not receive the operator nsec. Add the peer as a
+channel member before the trigger so host `--mention` of that author is
+accepted. Do not print nsecs, pubkeys, or event ids. Host waiter is
+pane-less. If a leftover socket waiter named `botserver` blocks
+`waiter.register`, `kelpie waiter-retire --logical-id` that waiter.
+
+Live proof landed: one `[bot]:` whose `e` tag is the trigger and whose
+`p` tag is the peer; unprefixed follow-up did not post; edit of an
+unposted trigger yielded one `[bot]:` for the latest text; delete before
+publish yielded no `[bot]:`, and a late final did not post.
+
+```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is34
+KEYS=$HOME/tmp-botserver-proof
+mkdir -p "$PROOF"
+./tools/local-relay up
+cargo build -p botserver
+
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$ROOT/corpus/example-bot"
+kind = "opencode"
+EOF
+
+OPERATOR_PUB=$(tr -d ' \n' < "$KEYS/operator.pub")
+PEER_PUB=$(tr -d ' \n' < "$KEYS/peer.pub")
+
+create_channel() {
+  local name=$1 out=$2
+  env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
+    --name "$name" --type stream --visibility open > "$PROOF/${out}.json"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
+    "$PROOF/${out}.json" "$PROOF/${out}.id"
+  ch=$(tr -d '\n' < "$PROOF/${out}.id")
+  env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels add-member \
+    --channel "$ch" --pubkey "$PEER_PUB" --role member >/dev/null
+}
+
+create_channel botserver-is34-first first
+create_channel botserver-is34-edit edit
+create_channel botserver-is34-delete delete
+FIRST=$(tr -d '\n' < "$PROOF/first.id")
+EDIT=$(tr -d '\n' < "$PROOF/edit.id")
+DELETE=$(tr -d '\n' < "$PROOF/delete.id")
+
+rm -f "$PROOF/host.sqlite"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
+  >"$PROOF/host.log" 2>&1 &
+HOST_PID=$!
+
+occupant_pane() {
+  kelpie --json report --live | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+want=sys.argv[1]
+found=[]
+def walk(obj):
+    if isinstance(obj, dict):
+        incs=obj.get("incarnations")
+        if incs and obj.get("public_name")==want:
+            pane=(incs[0] or {}).get("observed_pane_id")
+            if pane:
+                found.append(pane)
+        for v in obj.values():
+            walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            walk(v)
+walk(d.get("result") or d)
+print(found[-1] if found else "")
+' "$1"
+}
+
+bot_stamped() {
+  env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+    --channel "$1" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+print(sum(1 for it in items if str(it.get("content","")).startswith("[bot]:")))'
+}
+
+# First call: peer p-tags the operator with bot: hello.
+# Occupant answers with kelpie reply --final only (no envchain, no botcli).
+# Expect: one [bot]: body, reply-to the trigger, mention the peer (0/1).
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$FIRST" --mention "$OPERATOR_PUB" --content 'bot: hello' \
+  > "$PROOF/first-trigger.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
+  "$PROOF/first-trigger.json" "$PROOF/first-trigger.id"
+ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$FIRST' AND t.state='open';")
+SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$FIRST';")
+OCCUPANT_PANE=$(occupant_pane "$SNAME")
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
+hello from example-bot
+EOF
+bot_stamped "$FIRST"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT a.reply_to_event_id = (SELECT t.event_id FROM turns t WHERE t.ask_id=a.ask_id),
+          a.mention = '$PEER_PUB' FROM outbound_attempts a
+   JOIN turns t ON t.ask_id=a.ask_id JOIN sessions s ON s.id=t.session_id
+   WHERE s.channel_id='$FIRST';"
+
+# Unprefixed follow-up does not post.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$FIRST" --mention "$OPERATOR_PUB" --content 'and the PR?' \
+  >/dev/null
+bot_stamped "$FIRST"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$FIRST';"
+
+# Edit of an unposted trigger: one [bot]: for the latest text.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$EDIT" --mention "$OPERATOR_PUB" --content 'bot: hello' \
+  > "$PROOF/edit-trigger.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
+  "$PROOF/edit-trigger.json" "$PROOF/edit-trigger.id"
+EDIT_EVENT=$(tr -d '\n' < "$PROOF/edit-trigger.id")
+sleep 2
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages edit \
+  --event "$EDIT_EVENT" --content 'bot: latest' >/dev/null
+ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='open';")
+SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$EDIT';")
+OCCUPANT_PANE=$(occupant_pane "$SNAME")
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
+latest from example-bot
+EOF
+bot_stamped "$EDIT"
+
+# Delete before publish: no [bot]:. Late final does not post.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$DELETE" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
+  > "$PROOF/delete-trigger.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
+  "$PROOF/delete-trigger.json" "$PROOF/delete-trigger.id"
+ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DELETE' AND t.state='open';")
+SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$DELETE';")
+OCCUPANT_PANE=$(occupant_pane "$SNAME")
+sleep 2
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete \
+  --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" >/dev/null
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF' || true
+late final after delete
+EOF
+bot_stamped "$DELETE"
 kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
