@@ -168,6 +168,19 @@ where
         &self.bot
     }
 
+    /// Return whether this bot already has a session for `channel_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence cannot load the session.
+    pub fn has_session(&self, channel_id: &str) -> Result<bool, ActorError<R::Error>> {
+        Ok(self
+            .repository
+            .session(self.bot.id(), channel_id)
+            .map_err(ActorError::Repository)?
+            .is_some())
+    }
+
     /// Known session channels and queued or open triggering event ids.
     ///
     /// # Errors
@@ -1219,6 +1232,49 @@ mod tests {
         assert_eq!(calls[4].1, trigger.nostr_body.as_bytes());
         assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
         assert_eq!(WAITER_NAME, "botserver");
+    }
+
+    #[test]
+    fn first_trigger_names_the_occupant_from_the_place_display() {
+        let (mut actor, kelpie, _runner, panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let mut trigger = work('a', "@daniel bot: hello", None);
+        trigger.channel_display = "#eng".to_owned();
+
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("handle");
+
+        let session = actor
+            .repository
+            .session(actor.bot.id(), &trigger.channel_id)
+            .expect("session")
+            .expect("bound");
+        assert_eq!(session.session_name, "bot-eng");
+        assert_eq!(panes.calls.lock().expect("panes")[0].0, "bot-eng");
+    }
+
+    #[test]
+    fn existing_session_keeps_its_stored_name() {
+        let (mut actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("first");
+
+        actor
+            .ensure_session(&trigger.channel_id, "#eng")
+            .expect("again");
+
+        let session = actor
+            .repository
+            .session(actor.bot.id(), &trigger.channel_id)
+            .expect("session")
+            .expect("bound");
+        assert_eq!(session.session_name, "bot-foobar");
     }
 
     fn ask_count(runner: &Arc<FakeRunner>) -> usize {

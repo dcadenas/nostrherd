@@ -266,16 +266,37 @@ fn dispatch_ingest(
     }
 }
 
-fn observe_event(
+async fn channel_display_for(
+    actor: &BotActor<SqliteRepository, HerdrPaneAllocator>,
+    subscriber: &RelaySubscriber,
+    operator_pubkey: &str,
+    action: &IngestAction,
+) -> String {
+    let IngestAction::TurnCandidate { channel_id, .. } = action else {
+        return String::new();
+    };
+    if actor.has_session(channel_id).unwrap_or(false) {
+        return String::new();
+    }
+    subscriber
+        .place_display(operator_pubkey, channel_id)
+        .await
+        .unwrap_or_default()
+}
+
+async fn observe_event(
     actor: &mut BotActor<SqliteRepository, HerdrPaneAllocator>,
     kelpie: &KelpieClient,
     waiter: &HostWaiter<'_>,
     ingest: &mut RelayIngest<SqliteRepository>,
+    subscriber: &RelaySubscriber,
+    operator_pubkey: &str,
     event: &Event,
 ) -> Result<(), HostError> {
     if let Some(action) = ingest.ingest(event)? {
         let event_id = ingest_event_id(&action).clone();
-        let outcome = match actor.handle_ingest(kelpie, waiter, &action, "") {
+        let display = channel_display_for(actor, subscriber, operator_pubkey, &action).await;
+        let outcome = match actor.handle_ingest(kelpie, waiter, &action, &display) {
             Ok(outcome) => outcome,
             Err(error) => {
                 eprintln!("occupant dispatch failed {} {error}", event_id.as_str());
@@ -420,7 +441,16 @@ async fn poll_relay(
     };
     poll.last_retry_error = None;
     for event in events {
-        observe_event(actor, kelpie, waiter, ingest, &event)?;
+        observe_event(
+            actor,
+            kelpie,
+            waiter,
+            ingest,
+            subscriber,
+            operator_pubkey,
+            &event,
+        )
+        .await?;
     }
     if poll.last_queued_resume.elapsed() >= RESUME_QUEUED_EVERY {
         if let Err(error) = actor.resume_queued(kelpie, waiter) {
@@ -476,7 +506,15 @@ async fn serve(
         tokio::select! {
             notification = notifications.next() => match notification {
                 Some(ClientNotification::Event { event, .. }) => {
-                    observe_event(&mut actor, &kelpie, &waiter, &mut ingest, &event)?;
+                    observe_event(
+                        &mut actor,
+                        &kelpie,
+                        &waiter,
+                        &mut ingest,
+                        &subscriber,
+                        &operator_pubkey,
+                        &event,
+                    ).await?;
                 }
                 Some(ClientNotification::Shutdown) => return Ok(()),
                 Some(ClientNotification::Message { .. }) => {}
