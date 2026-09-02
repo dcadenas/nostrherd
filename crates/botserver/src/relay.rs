@@ -730,10 +730,11 @@ fn other_participant<'a>(operator_pubkey: &str, participants: &'a [String]) -> O
         if participant.eq_ignore_ascii_case(operator_pubkey) {
             continue;
         }
-        if other.is_some() {
-            return None;
+        match other {
+            None => other = Some(participant.as_str()),
+            Some(existing) if existing.eq_ignore_ascii_case(participant) => {}
+            Some(_) => return None,
         }
-        other = Some(participant.as_str());
     }
     other
 }
@@ -1450,6 +1451,11 @@ mod tests {
         assert!(wants_peer_display(&dm.name));
         assert_eq!(
             other_participant(&operator, &dm.participants),
+            Some(peer.as_str())
+        );
+        let duplicated = [peer.clone(), peer.clone()];
+        assert_eq!(
+            other_participant(&operator, &duplicated),
             Some(peer.as_str())
         );
         assert_eq!(

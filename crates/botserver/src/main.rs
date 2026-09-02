@@ -272,16 +272,33 @@ async fn channel_display_for(
     operator_pubkey: &str,
     action: &IngestAction,
 ) -> String {
-    let IngestAction::TurnCandidate { channel_id, .. } = action else {
+    let IngestAction::TurnCandidate {
+        channel_id,
+        trigger,
+        ..
+    } = action
+    else {
         return String::new();
     };
-    if actor.has_session(channel_id).unwrap_or(false) {
+    if trigger.request().is_empty() {
         return String::new();
     }
-    subscriber
-        .place_display(operator_pubkey, channel_id)
-        .await
-        .unwrap_or_default()
+    match actor.has_session(channel_id) {
+        Ok(true) => return String::new(),
+        Ok(false) => {}
+        Err(error) => eprintln!("session lookup failed: {error}"),
+    }
+    match subscriber.place_display(operator_pubkey, channel_id).await {
+        Ok(display) if !display.is_empty() => display,
+        Ok(_) => {
+            eprintln!("place display missing for new session, using uuid slug");
+            String::new()
+        }
+        Err(error) => {
+            eprintln!("place display lookup failed: {error}");
+            String::new()
+        }
+    }
 }
 
 async fn observe_event(

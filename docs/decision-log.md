@@ -100,8 +100,10 @@ are channels with their own UUID.
 Session name is `<botid>-<channel-slug>` (slug from channel display +
 stable id as needed to stay unique and ≤32 chars). Channel display is
 the kind-39000 `name` tag. A generic 1-1 title (`DM`) uses the other
-participant's kind-0 `display_name` or `name`. Existing stored session
-names are kept. The triggering EventId travels on the Turn as outbound
+participant's kind-0 `display_name` or `name`. Kind 39000 is NIP-29
+relay-signed group metadata; the host REQs it by `#d` without an author
+filter, matching Buzz client discovery. Existing stored session names
+are kept. The triggering EventId travels on the Turn as outbound
 `--reply-to`, not in the session name.
 
 ## D11. The operator may trigger their own bot
