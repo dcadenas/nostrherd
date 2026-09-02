@@ -3,12 +3,15 @@
 use std::fmt;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use botserver_domain::{Bot, EventId, SessionName};
 
 use crate::inbox::InboxDelivery;
-use crate::outbox::{self, InboxAction, OutboundPublisher, OutboxError};
+use crate::outbox::{
+    self, InFlightReaction, InboxAction, NoopInFlightReaction, OutboundPublisher, OutboxError,
+};
 use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
 use crate::{
     occupant_bootstrap, AskDelivery, HostRepository, HostWaiter, KelpieClient, KelpieError,
@@ -139,12 +142,34 @@ where
     }
 }
 
+#[derive(Clone)]
+struct ReactionHost {
+    inner: Arc<dyn InFlightReaction>,
+}
+
+impl fmt::Debug for ReactionHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReactionHost")
+    }
+}
+
+impl InFlightReaction for ReactionHost {
+    fn add(&self, trigger_event_id: &EventId) {
+        self.inner.add(trigger_event_id);
+    }
+
+    fn remove(&self, trigger_event_id: &EventId) {
+        self.inner.remove(trigger_event_id);
+    }
+}
+
 /// Serialized in-process actor for one configured bot.
 #[derive(Debug)]
 pub struct BotActor<R, P> {
     bot: Bot,
     pub(crate) repository: R,
     panes: P,
+    reactions: ReactionHost,
 }
 
 impl<R, P> BotActor<R, P>
@@ -159,7 +184,17 @@ where
             bot,
             repository,
             panes,
+            reactions: ReactionHost {
+                inner: Arc::new(NoopInFlightReaction),
+            },
         }
+    }
+
+    /// Use a host reaction sink for in-flight trigger markers.
+    #[must_use]
+    pub fn with_reactions(mut self, reactions: Arc<dyn InFlightReaction>) -> Self {
+        self.reactions = ReactionHost { inner: reactions };
+        self
     }
 
     /// Return the configured bot.
@@ -218,6 +253,7 @@ where
         else {
             return Ok(TriggerOutcome::Duplicate);
         };
+        self.reactions.add(&work.event_id);
         if !self.should_ask_event(&work.channel_id, &work.event_id)? {
             return Ok(TriggerOutcome::Queued);
         }
@@ -312,12 +348,17 @@ where
         Pub::Error: fmt::Display,
     {
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
-        let action =
-            outbox::handle_delivery(&mut self.repository, publisher, &mut notice, delivery)
-                .map_err(|error| match error {
-                    OutboxError::Repository(error) => ActorError::Repository(error),
-                    OutboxError::Publish(error) => ActorError::Outbox(error.to_string()),
-                })?;
+        let action = outbox::handle_delivery_with(
+            &mut self.repository,
+            publisher,
+            &mut notice,
+            delivery,
+            &self.reactions,
+        )
+        .map_err(|error| match error {
+            OutboxError::Repository(error) => ActorError::Repository(error),
+            OutboxError::Publish(error) => ActorError::Outbox(error.to_string()),
+        })?;
         if action == InboxAction::Ack {
             if let Some(ask_id) = delivery.reply_to() {
                 if self
@@ -376,12 +417,13 @@ where
                 {
                     continue;
                 }
-                let action = outbox::complete_outbound(
+                let action = outbox::complete_outbound_with(
                     &mut self.repository,
                     publisher,
                     &mut notice,
                     &turn,
                     None,
+                    &self.reactions,
                 )
                 .map_err(|error| match error {
                     OutboxError::Repository(error) => ActorError::Repository(error),
@@ -589,6 +631,7 @@ where
         if let Some(ask_id) = cancelled.ask_id.as_deref() {
             waiter.cancel(ask_id, reason).map_err(ActorError::Kelpie)?;
         }
+        self.reactions.remove(&cancelled.event_id);
         self.repository
             .mark_event_processed(event_id)
             .map_err(ActorError::Repository)?;
@@ -2399,5 +2442,202 @@ mod tests {
             runner.calls.lock().expect("calls").last().expect("ask").1,
             b"second"
         );
+    }
+
+    struct FakeOutbound {
+        event_id: String,
+    }
+
+    impl OutboundPublisher for FakeOutbound {
+        type Error = crate::outbox::PublishError;
+
+        fn publish(&self, attempt: &crate::outbox::OutboundAttempt) -> Result<String, Self::Error> {
+            if let Some(event_id) = &attempt.outbound_event_id {
+                return Ok(event_id.clone());
+            }
+            Ok(self.event_id.clone())
+        }
+
+        fn retryable(error: &Self::Error) -> bool {
+            error.is_retryable()
+        }
+    }
+
+    fn occupant_final(ask_id: &str, body: &str) -> InboxDelivery {
+        crate::inbox::parse_delivery(&serde_json::json!({
+            "method": "inbox.delivery",
+            "params": {
+                "message_id": "msg-1",
+                "kind": "reply",
+                "disposition": "final",
+                "reply_to": ask_id,
+                "body": body
+            }
+        }))
+        .expect("delivery")
+    }
+
+    #[test]
+    fn trigger_adds_in_flight_reaction() {
+        let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
+        let (actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("asked");
+        assert_eq!(
+            recorded.adds.lock().expect("adds").as_slice(),
+            [trigger.event_id.as_str()]
+        );
+        assert!(recorded.removes.lock().expect("removes").is_empty());
+    }
+
+    #[test]
+    fn queued_trigger_adds_its_own_in_flight_reaction() {
+        let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
+        let (actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let first = work('a', "first", None);
+        let second = work('b', "second", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &first)
+            .expect("first");
+        actor
+            .handle_trigger(&kelpie, &waiter, &second)
+            .expect("queued");
+        assert_eq!(
+            recorded.adds.lock().expect("adds").as_slice(),
+            [first.event_id.as_str(), second.event_id.as_str()]
+        );
+    }
+
+    #[test]
+    fn duplicate_trigger_does_not_add_again() {
+        let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
+        let (actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("asked");
+        assert_eq!(
+            actor
+                .handle_trigger(&kelpie, &waiter, &trigger)
+                .expect("dup"),
+            TriggerOutcome::Duplicate
+        );
+        assert_eq!(recorded.adds.lock().expect("adds").len(), 1);
+    }
+
+    #[test]
+    fn delete_removes_in_flight_reaction() {
+        let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            cancelled(),
+        ]);
+        let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("first");
+        actor
+            .handle_ingest(
+                &kelpie,
+                &waiter,
+                &crate::relay::IngestAction::Delete {
+                    event_id: event_id('d'),
+                    target_event_id: trigger.event_id.clone(),
+                },
+                &trigger.channel_display,
+            )
+            .expect("deleted");
+        assert_eq!(
+            recorded.removes.lock().expect("removes").as_slice(),
+            [trigger.event_id.as_str()]
+        );
+    }
+
+    #[test]
+    fn edit_keeps_in_flight_reaction_on_the_same_event() {
+        let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            cancelled(),
+            whoami(),
+            asked("ask-2"),
+        ]);
+        let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", Some('c'));
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("first");
+        let replacement =
+            botserver_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
+        actor
+            .handle_ingest(
+                &kelpie,
+                &waiter,
+                &crate::relay::IngestAction::Edit {
+                    event_id: event_id('e'),
+                    target_event_id: trigger.event_id.clone(),
+                    replacement: Some(replacement),
+                },
+                &trigger.channel_display,
+            )
+            .expect("replaced");
+        assert_eq!(recorded.adds.lock().expect("adds").len(), 1);
+        assert!(recorded.removes.lock().expect("removes").is_empty());
+    }
+
+    #[test]
+    fn occupant_final_removes_in_flight_reaction() {
+        let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
+        let (actor, kelpie, runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        index_trigger(&mut actor, &trigger);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("asked");
+        actor
+            .handle_occupant_delivery(
+                &kelpie,
+                &waiter,
+                &FakeOutbound {
+                    event_id: "d".repeat(64),
+                },
+                &occupant_final("ask-1", "done"),
+            )
+            .expect("posted");
+        assert_eq!(
+            recorded.removes.lock().expect("removes").as_slice(),
+            [trigger.event_id.as_str()]
+        );
+        assert!(runner
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .all(|call| call.0.iter().all(|arg| arg != "reactions")));
     }
 }

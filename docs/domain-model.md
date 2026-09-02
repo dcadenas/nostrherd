@@ -31,7 +31,9 @@ Completing a turn is occupant `kelpie reply --final`, then host
 publish, then `inbox.ack`, not cancel. Publish reservation is a claim,
 not a state (D28). The host keeps a durable outbound attempt (body,
 channel, trigger EventId, mention, accepted event id) so retry cannot
-mint a second `[bot]:`.
+mint a second `[bot]:`. While the turn is queued or open the host
+marks the trigger with `⏳` and removes it on posted, cancelled, or
+failed (D35).
 
 ## Values
 

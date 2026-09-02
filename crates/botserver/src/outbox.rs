@@ -3,6 +3,7 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use botserver_domain::{stamp_outbound, EventId, TurnState};
 
@@ -117,6 +118,69 @@ impl From<io::Error> for PublishError {
     }
 }
 
+/// Host NIP-25 marker while a turn is queued or open (D35).
+pub const IN_FLIGHT_REACTION: &str = "⏳";
+
+/// Best-effort in-flight marker on a triggering event.
+pub trait InFlightReaction: Send + Sync {
+    /// Add the in-flight emoji without failing the turn.
+    fn add(&self, trigger_event_id: &EventId);
+    /// Remove the in-flight emoji without failing the turn.
+    fn remove(&self, trigger_event_id: &EventId);
+}
+
+/// Ignore in-flight reaction side effects.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopInFlightReaction;
+
+impl InFlightReaction for NoopInFlightReaction {
+    fn add(&self, _trigger_event_id: &EventId) {}
+
+    fn remove(&self, _trigger_event_id: &EventId) {}
+}
+
+impl InFlightReaction for Arc<dyn InFlightReaction> {
+    fn add(&self, trigger_event_id: &EventId) {
+        (**self).add(trigger_event_id);
+    }
+
+    fn remove(&self, trigger_event_id: &EventId) {
+        (**self).remove(trigger_event_id);
+    }
+}
+
+/// Buzz CLI arguments for an in-flight reaction add or remove.
+#[must_use]
+pub fn in_flight_reaction_args<'a>(action: &'a str, trigger_event_id: &'a EventId) -> [&'a str; 6] {
+    [
+        "reactions",
+        action,
+        "--event",
+        trigger_event_id.as_str(),
+        "--emoji",
+        IN_FLIGHT_REACTION,
+    ]
+}
+
+fn run_buzz_reaction(action: &str, trigger_event_id: &EventId) {
+    match Command::new("buzz")
+        .args(in_flight_reaction_args(action, trigger_event_id))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => eprintln!(
+            "operator notice: in-flight reaction {action} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => {
+            eprintln!("operator notice: in-flight reaction {action} failed: {error}");
+        }
+    }
+}
+
 /// Publish one outbound attempt, returning the accepted event id.
 pub trait OutboundPublisher {
     /// Publisher failure type.
@@ -204,6 +268,16 @@ impl OutboundPublisher for BuzzPublisher {
     }
 }
 
+impl InFlightReaction for BuzzPublisher {
+    fn add(&self, trigger_event_id: &EventId) {
+        run_buzz_reaction("add", trigger_event_id);
+    }
+
+    fn remove(&self, trigger_event_id: &EventId) {
+        run_buzz_reaction("remove", trigger_event_id);
+    }
+}
+
 fn classify_buzz_failure(status: String, stderr: &str) -> PublishError {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(stderr) {
         if value.get("retryable").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -282,6 +356,33 @@ where
     R: HostRepository,
     P: OutboundPublisher,
 {
+    handle_delivery_with(
+        repository,
+        publisher,
+        notice,
+        delivery,
+        &NoopInFlightReaction,
+    )
+}
+
+/// Persist, publish, and clear the in-flight marker for one occupant delivery.
+///
+/// # Errors
+///
+/// Returns an error when persistence or publish fails. A publish failure does
+/// not ACK, so reconnect can retry the same outbound attempt.
+pub fn handle_delivery_with<R, P, I>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    delivery: &InboxDelivery,
+    reactions: &I,
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+    I: InFlightReaction,
+{
     let Some(ask_id) = delivery.reply_to() else {
         return Ok(InboxAction::Ack);
     };
@@ -297,9 +398,16 @@ where
             }
             Ok(InboxAction::Hold)
         }
-        Decision::AckWithoutPublish => Ok(InboxAction::Ack),
+        Decision::AckWithoutPublish => {
+            if let Some(turn) = &turn {
+                clear_in_flight_if_terminal(reactions, turn);
+            }
+            Ok(InboxAction::Ack)
+        }
         Decision::Publish { body } => match turn {
-            Some(turn) => complete_outbound(repository, publisher, notice, &turn, Some(&body)),
+            Some(turn) => {
+                complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
+            }
             None => Ok(InboxAction::Hold),
         },
     }
@@ -320,6 +428,34 @@ pub fn complete_outbound<R, P>(
 where
     R: HostRepository,
     P: OutboundPublisher,
+{
+    complete_outbound_with(
+        repository,
+        publisher,
+        notice,
+        turn,
+        body,
+        &NoopInFlightReaction,
+    )
+}
+
+/// Finish publish and clear the in-flight marker when the turn is terminal.
+///
+/// # Errors
+///
+/// Returns an error when persistence or a retryable publish fails.
+pub fn complete_outbound_with<R, P, I>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    turn: &TurnRecord,
+    body: Option<&str>,
+    reactions: &I,
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+    I: InFlightReaction,
 {
     let Some(ask_id) = turn.ask_id.as_deref() else {
         return Ok(InboxAction::Hold);
@@ -354,6 +490,7 @@ where
         let _ = repository
             .set_turn_state(ask_id, TurnState::Posted)
             .map_err(OutboxError::Repository)?;
+        reactions.remove(&turn.event_id);
         return Ok(InboxAction::Ack);
     }
     if attempt.dispatched {
@@ -363,6 +500,7 @@ where
         let _ = repository
             .set_turn_state(ask_id, TurnState::Failed)
             .map_err(OutboxError::Repository)?;
+        reactions.remove(&turn.event_id);
         return Ok(InboxAction::Ack);
     }
     let claimed = repository
@@ -373,6 +511,7 @@ where
         .map_err(OutboxError::Repository)?
         .is_some_and(|turn| turn.state == TurnState::Open);
     if !claimed && !still_open {
+        reactions.remove(&turn.event_id);
         return Ok(InboxAction::Ack);
     }
     attempt.dispatched = true;
@@ -395,6 +534,7 @@ where
             let _ = repository
                 .set_turn_state(ask_id, TurnState::Failed)
                 .map_err(OutboxError::Repository)?;
+            reactions.remove(&turn.event_id);
             return Ok(InboxAction::Ack);
         }
         Err(error) => {
@@ -409,7 +549,41 @@ where
     let _ = repository
         .set_turn_state(ask_id, TurnState::Posted)
         .map_err(OutboxError::Repository)?;
+    reactions.remove(&turn.event_id);
     Ok(InboxAction::Ack)
+}
+
+fn clear_in_flight_if_terminal(reactions: &impl InFlightReaction, turn: &TurnRecord) {
+    if matches!(
+        turn.state,
+        TurnState::Posted | TurnState::Failed | TurnState::Cancelled
+    ) {
+        reactions.remove(&turn.event_id);
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct RecordingInFlightReaction {
+    pub adds: std::sync::Mutex<Vec<String>>,
+    pub removes: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(test)]
+impl InFlightReaction for RecordingInFlightReaction {
+    fn add(&self, trigger_event_id: &EventId) {
+        self.adds
+            .lock()
+            .expect("adds")
+            .push(trigger_event_id.as_str().to_owned());
+    }
+
+    fn remove(&self, trigger_event_id: &EventId) {
+        self.removes
+            .lock()
+            .expect("removes")
+            .push(trigger_event_id.as_str().to_owned());
+    }
 }
 
 #[cfg(test)]
@@ -807,6 +981,108 @@ mod tests {
         assert!(retry.is_retryable());
         let opaque = classify_buzz_failure("exit status: 2".to_owned(), "not json");
         assert!(!opaque.is_retryable());
+    }
+
+    #[test]
+    fn in_flight_reaction_args_are_kind_seven_add_and_kind_five_remove() {
+        let event = event_id('a');
+        assert_eq!(
+            in_flight_reaction_args("add", &event),
+            [
+                "reactions",
+                "add",
+                "--event",
+                event.as_str(),
+                "--emoji",
+                "⏳"
+            ]
+        );
+        assert_eq!(
+            in_flight_reaction_args("remove", &event),
+            [
+                "reactions",
+                "remove",
+                "--event",
+                event.as_str(),
+                "--emoji",
+                "⏳"
+            ]
+        );
+        assert_ne!(IN_FLIGHT_REACTION, "👀");
+        assert_ne!(IN_FLIGHT_REACTION, "💬");
+    }
+
+    #[test]
+    fn posted_turn_removes_in_flight_reaction() {
+        let (mut repository, publisher) = open_repo();
+        let reactions = RecordingInFlightReaction::default();
+        handle_delivery_with(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("final", "ask-1", "hello"),
+            &reactions,
+        )
+        .expect("handle");
+        assert_eq!(
+            reactions.removes.lock().expect("removes").as_slice(),
+            [event_id('a').as_str()]
+        );
+        assert!(reactions.adds.lock().expect("adds").is_empty());
+    }
+
+    #[test]
+    fn failed_turn_removes_in_flight_reaction() {
+        let (mut repository, _publisher) = open_repo();
+        let reactions = RecordingInFlightReaction::default();
+        handle_delivery_with(
+            &mut repository,
+            &NonRetryPublisher,
+            &mut |_: &str| {},
+            &delivery("final", "ask-1", "hello"),
+            &reactions,
+        )
+        .expect("handle");
+        assert_eq!(
+            reactions.removes.lock().expect("removes").as_slice(),
+            [event_id('a').as_str()]
+        );
+    }
+
+    #[test]
+    fn progress_does_not_remove_in_flight_reaction() {
+        let (mut repository, publisher) = open_repo();
+        let reactions = RecordingInFlightReaction::default();
+        handle_delivery_with(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("progress", "ask-1", "working"),
+            &reactions,
+        )
+        .expect("handle");
+        assert!(reactions.removes.lock().expect("removes").is_empty());
+    }
+
+    #[test]
+    fn retryable_publish_failure_keeps_in_flight_reaction() {
+        let (mut repository, publisher) = open_repo();
+        *publisher.fail.lock().expect("fail") = true;
+        let reactions = RecordingInFlightReaction::default();
+        let error = handle_delivery_with(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("final", "ask-1", "hello"),
+            &reactions,
+        )
+        .expect_err("retryable");
+        assert!(matches!(error, OutboxError::Publish(_)));
+        assert!(reactions.removes.lock().expect("removes").is_empty());
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Open
+        );
     }
 
     #[test]

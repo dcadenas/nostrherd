@@ -17,6 +17,7 @@ this file and SPEC disagree.
 | I10 | The host MUST NOT publish on a cancelled ask | `cancelled_turn_acks_without_publish`, `spec_flow_10_cancelled_turn_never_reaches_buzz` |
 | I11 | Binaries MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` when set, and MUST NOT take `--envchain` | `operator_env_reads_buzz_private_key_and_relay_url`, `runtime_requires_operator_key_from_env`, `runtime_requires_relay_url_from_env`, `botserver_parser_rejects_envchain` |
 | I12 | SQLite MUST NOT store nsecs | `sqlite_does_not_persist_an_nsec`, `sqlite_schema_has_no_nsec_columns` |
+| I13 | Host MUST add `⏳` on queued/open and remove it on posted/cancelled/failed; occupants MUST NOT react | `trigger_adds_in_flight_reaction`, `queued_trigger_adds_its_own_in_flight_reaction`, `delete_removes_in_flight_reaction`, `occupant_final_removes_in_flight_reaction`, `posted_turn_removes_in_flight_reaction`, `failed_turn_removes_in_flight_reaction`, `progress_does_not_remove_in_flight_reaction` |
 
 SPEC user-visible flows are the product matrix in `docs/testing.md`.
 
