@@ -3,17 +3,12 @@ Read the channel snapshot path from the bootstrap/ask if present.
 When asked to answer a channel trigger, use:
 
 ```bash
-envchain botserver-proof botcli send --stdin \
-  --database "$BOTSERVER_DATABASE" \
-  --ask-id "$BOTSERVER_ASK_ID" \
-  --channel "$BOTSERVER_CHANNEL" \
-  --reply-to "$BOTSERVER_REPLY_TO" \
-  --mention "$BOTSERVER_MENTION" <<'EOF'
+kelpie reply --final --stdin <<'EOF'
 your reply
 EOF
 ```
-Host coordinates may also be flags the ask spells out. Body is stdin
-only.
+
+Do not stamp `[bot]:`. Do not call the relay. Do not wrap envchain.
 
 <!-- botserver-place-snapshots -->
 Read `.botserver/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.

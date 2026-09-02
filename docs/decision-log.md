@@ -37,8 +37,7 @@ Status: retracted
 
 Retracted as the occupant publish path. Occupants MUST answer with
 `kelpie reply --final` and unstamped prose. The host is the only Nostr
-publisher (D31). The leftover `botcli` crate remains until a later
-removal issue.
+publisher (D31). The `botcli` crate is removed (`dcadenas/botserver#35`).
 
 ## D5. Kelpie ask, not tell, for triggered work
 
@@ -214,9 +213,9 @@ deps) and the baseline SHA. A comment alone is not enough.
 
 Status: retracted
 
-Retracted as the occupant publish path. Occupants MUST NOT use `botcli`
-to post. The leftover crate may still have this CLI shape until a later
-removal issue. Host publish is D31.
+Retracted as the occupant publish path. Occupants MUST NOT use a send
+tool to post. The `botcli` crate is removed (`dcadenas/botserver#35`).
+Host publish is D31.
 
 ## D23. Live tests use the throwaway local relay
 
@@ -338,8 +337,7 @@ Personal host wrap uses envchain namespace `botserver` with
 `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL`. Occupants do not wrap a
 publish binary. That namespace is distinct from throwaway
 `botserver-proof` / `botserver-proof-peer` (D23 live-test relay). Do
-not point `BUZZ_RELAY_URL` at a production relay. The operator runbook
-still describes leftover `botcli` until a later issue.
+not point `BUZZ_RELAY_URL` at a production relay.
 
 ## D31. Host publishes; occupant only kelpie final
 
@@ -366,10 +364,7 @@ publish.
 
 The host is the shipping publish path. Issue 34 is the live E2E that the
 occupant only `kelpie reply --final` and the host stamps `[bot]:`.
-Shipping README, operator-runbook, `corpus/example-bot`, and leftover
-`botcli` in the issue 18–20 and 27 harnesses plus the trailing
-`docs/testing.md` envchain example stay until a later removal issue so
-those older proofs are not flipped here.
+Issue 35 removes the leftover `botcli` crate and occupant send recipes.
 
 ## D32. Occupant self-renews
 

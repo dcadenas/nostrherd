@@ -38,7 +38,7 @@ substitute.
 
 ## Live local relay
 
-Any issue that touches relay, botcli, occupants, or SPEC flows MUST
+Any issue that touches relay, occupants, or SPEC flows MUST
 use `skills/local-relay/SKILL.md` and `tools/local-relay`. Throwaway
 keys only. Never `nostr-personal` or `buzz-acp`.
 

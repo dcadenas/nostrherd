@@ -6,31 +6,25 @@ Kelpie.
 
 This is not an ACP child and not a Buzz managed-agent. The daemon watches
 the relay as your pubkey, wakes a corpus occupant per bot+channel, and
-publishes through `botcli`.
+publishes the occupant's `kelpie reply --final` as `[bot]:`.
 
 ## Binaries
 
 - `botserver` — host process (Kelpie waiter `botserver`) plus per-bot actors
-- `botcli` — occupant tool: publish, then `kelpie reply --final`
 
-`botcli send` reads generated text from stdin or a file, never from a body
-argument. Host coordinates remain flags:
+The occupant answers with `kelpie reply --final` and unstamped prose.
+The host is the only Nostr publisher (D31). Occupants MUST NOT receive
+the operator nsec.
 
 ```bash
-envchain botserver-proof botcli send --stdin \
-  --database /path/to/botserver.sqlite \
-  --ask-id <kelpie-ask-id> \
-  --channel <channel-uuid> \
-  --reply-to <event-id> \
-  --mention <pubkey> <<'EOF'
-reply text
-EOF
+envchain botserver-proof botserver \
+  --config /path/to/bots.toml \
+  --database /path/to/botserver.sqlite
 ```
 
-`envchain` wraps the process. `botcli` only reads `BUZZ_PRIVATE_KEY` and
-`BUZZ_RELAY_URL` from the environment (D29). It stamps `[bot]:` and prints
-a JSON receipt. When `--ask-id` is omitted, `--database` is omitted too
-and no Kelpie obligation is closed.
+`envchain` wraps the process. `botserver` only reads `BUZZ_PRIVATE_KEY`
+and `BUZZ_RELAY_URL` from the environment (D29). There is no
+`--envchain` flag.
 
 The command above uses throwaway live-test namespace `botserver-proof`.
 Personal operator keys use namespace `botserver`. Before running the

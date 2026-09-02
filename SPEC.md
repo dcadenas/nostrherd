@@ -1,7 +1,7 @@
 # SPEC.md
 
-Normative contract for `botserver`. The leftover `botcli` crate is not
-the occupant publish path.
+Normative contract for `botserver`. The host publishes; the occupant
+only `kelpie reply --final`.
 If this file and another document disagree, this file wins unless the
 other document is a later accepted decision in `docs/decision-log.md`.
 
@@ -109,9 +109,6 @@ thread-root context.
 The host MUST `--mention` the indexed event's effective author (not the
 raw relay signer, not an arbitrary `p` tag), including operator-authored
 triggers. `ignore_self` still blocks retrigger.
-
-The leftover `botcli` crate is not the occupant path (D4/D22 retracted).
-It remains until a later removal issue.
 
 The host persists a durable outbound attempt before publish. Retry of
 an accepted send uses that same outbound event id (D28).

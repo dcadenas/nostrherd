@@ -41,11 +41,10 @@ Invariants and their tests: `docs/invariants.md`.
 Live columns are issues 18–20. Occupant start/ask from the running host
 (`dcadenas/botserver#17`) uses the local relay; it is not the flow 2 live
 proof. Issue 18 is the live proof of flows 1–2: silence until a trigger,
-then a `[bot]:` body via leftover `botcli`. Issue 19 is the live proof of
-flows 3–5 and 7–8. Issue 34 is the live E2E that the occupant only
-`kelpie reply --final` and the host stamps `[bot]:` (D31). It does not
-replace leftover `botcli` in issues 18–20, 27, or the trailing envchain
-example.
+then a `[bot]:` body. Issue 19 is the live proof of flows 3–5 and 7–8.
+Issue 34 is the live E2E that the occupant only `kelpie reply --final`
+and the host stamps `[bot]:` (D31). Occupant recipes here use
+`kelpie reply --final`; do not invoke a send crate.
 
 ## Live local relay
 
@@ -62,15 +61,15 @@ Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, and 34 require it.
 
 Use throwaway envchain `botserver-proof` / `botserver-proof-peer`. Do not
 print nsecs, pubkeys, or event ids. Wrap live Buzz calls with
-`env -u BUZZ_AUTH_TAG`. A first-call trigger has no inbound reply marker,
-so `botcli` is invoked without `--reply-to` (thread replies are flow 7).
+`env -u BUZZ_AUTH_TAG`. A first-call trigger has no inbound reply marker
+(thread replies are flow 7). Occupant answers with `kelpie reply --final`.
 
 ```bash
 ROOT=$(pwd)
 PROOF=$HOME/tmp-botserver-proof-is18
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p botserver -p botcli
+cargo build -p botserver
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -102,9 +101,8 @@ sqlite3 "$PROOF/host.sqlite" \
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL';"
 
-# Flow 2: peer trigger, then botcli as the occupant pane so kelpie reply --final
-# closes the ask. Expect: one open turn, JSON receipt, turn posted, ask resolved,
-# one [bot]: body.
+# Flow 2: peer trigger, then occupant kelpie reply --final.
+# Expect: one open turn, host stamps [bot]:, ask resolved.
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
@@ -127,11 +125,8 @@ def walk(obj):
 walk(d.get("result") or d)
 print(found[-1] if found else "")
 ')
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" \
-  --ask-id "$ASK_ID" \
-  --channel "$CHANNEL" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 hello from example-bot
 EOF
 ```
@@ -150,7 +145,7 @@ ROOT=$(pwd)
 PROOF=$HOME/tmp-botserver-proof-is19
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p botserver -p botcli
+cargo build -p botserver
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -207,9 +202,8 @@ def walk(obj):
 walk(d.get("result") or d)
 print(found[-1] if found else "")
 ')
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$CHANNEL_A" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 hello from example-bot
 EOF
 
@@ -242,10 +236,8 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
 REPLY_TO=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.reply_to_event_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$CHANNEL_A" \
-  --reply-to "$REPLY_TO" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 later from example-bot
 EOF
 
@@ -268,15 +260,13 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
 REPLY_TO=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.reply_to_event_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$CHANNEL_A" \
-  --reply-to "$REPLY_TO" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 thread reply from example-bot
 EOF
 
 # Flow 8: two bot: triggers before a reply.
-# Expect: one open and one queued on A; after botcli of the open turn, poll until
+# Expect: one open and one queued on A; after occupant final of the open turn, poll until
 # the queued turn becomes open (host resume tick is every 30s).
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --content 'bot: first'
@@ -286,9 +276,8 @@ sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' ORDER BY t.sequence;"
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$CHANNEL_A" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 busy first
 EOF
 for _ in $(seq 1 40); do
@@ -319,7 +308,7 @@ ROOT=$(pwd)
 PROOF=$HOME/tmp-botserver-proof-is20
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p botserver -p botcli
+cargo build -p botserver
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -398,9 +387,8 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DM' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$DM';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$DM" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 dm hello from example-bot
 EOF
 
@@ -427,9 +415,8 @@ sqlite3 "$PROOF/host.sqlite" \
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state, occupant_logical_id = '$LID' FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$RECOVER';"
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$RECOVER" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 recovered hello
 EOF
 bot_stamped "$RECOVER"
@@ -452,9 +439,8 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$EDIT';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$EDIT" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 latest from example-bot
 EOF
 bot_stamped "$EDIT"
@@ -487,9 +473,8 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$POSTED' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$POSTED';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$POSTED" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 stay up from example-bot
 EOF
 POSTED_EVENT=$(tr -d '\n' < "$PROOF/posted-trigger.id")
@@ -508,9 +493,8 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$LONGWORK' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$LONGWORK';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$LONGWORK" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 long job done
 EOF
 bot_stamped "$LONGWORK"
@@ -540,7 +524,7 @@ ROOT=$(pwd)
 PROOF=$HOME/tmp-botserver-proof-is27
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p botserver -p botcli
+cargo build -p botserver
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -593,11 +577,8 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$CHANNEL';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" \
-  --ask-id "$ASK_ID" \
-  --channel "$CHANNEL" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 hello from example-bot
 EOF
 # Expect: one [bot]: body. kelpie pending "$SNAME" is empty after ACK.
@@ -614,11 +595,8 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
 kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
-  "$ROOT/target/debug/botcli" send --stdin \
-  --database "$PROOF/host.sqlite" \
-  --ask-id "$ASK_ID" \
-  --channel "$CHANNEL" <<'EOF'
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 after host drop
 EOF
 # Expect: kelpie pending "$SNAME" still lists the ask.
@@ -788,18 +766,14 @@ wait_pane() {
 
 reply_final() {
   local pane=$1 ask=$2 body=$3
-  if pgrep -a botcli >/dev/null 2>&1; then
-    echo 'botcli already running' >&2
+  if [ -x "$ROOT/target/debug/botcli" ]; then
+    echo 'botcli binary still present' >&2
     return 1
   fi
   HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
     kelpie reply "$ask" --final --stdin <<EOF
 $body
 EOF
-  if pgrep -a botcli >/dev/null 2>&1; then
-    echo 'botcli appeared during kelpie reply' >&2
-    return 1
-  fi
 }
 
 check_posted() {
@@ -919,12 +893,10 @@ kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
 
-Wrap binaries with envchain. Do not pass `--envchain` (D29):
+Wrap the host with envchain. Do not pass `--envchain` (D29):
 
 ```bash
-envchain botserver-proof botcli send --stdin --channel "$CHANNEL" <<'EOF'
-text
-EOF
+envchain botserver-proof botserver --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 ```
 
 Throwaway namespaces only: `botserver-proof` and
