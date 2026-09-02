@@ -16,7 +16,7 @@ use botserver::actor::{ActorError, BotActor};
 use botserver::config::{BotRegistry, ConfigError};
 use botserver::herdr::{HerdrError, HerdrPaneAllocator};
 use botserver::inbox::{default_socket, spawn_inbox, HostInbox, InboxDelivery};
-use botserver::outbox::{BuzzPublisher, InboxAction, InFlightReaction};
+use botserver::outbox::{BuzzPublisher, InFlightReaction, InboxAction};
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
