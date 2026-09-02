@@ -1,9 +1,10 @@
 Read the channel snapshot path from the bootstrap/ask if present.
 
-When asked to answer a channel trigger, use:
+When asked to answer a channel trigger, take the ask id from the
+envelope (`reply-to=` / `msg=`) and:
 
 ```bash
-kelpie reply --final --stdin <<'EOF'
+kelpie reply <ask-id> --final --stdin <<'EOF'
 your reply
 EOF
 ```

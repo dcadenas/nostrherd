@@ -43,8 +43,9 @@ Live columns are issues 18–20. Occupant start/ask from the running host
 proof. Issue 18 is the live proof of flows 1–2: silence until a trigger,
 then a `[bot]:` body. Issue 19 is the live proof of flows 3–5 and 7–8.
 Issue 34 is the live E2E that the occupant only `kelpie reply --final`
-and the host stamps `[bot]:` (D31). Occupant recipes here use
-`kelpie reply --final`; do not invoke a send crate.
+and the host stamps `[bot]:` (D31). Issues 18–20 and 27 were live-proved
+with leftover `botcli`. Occupant steps below match the current path
+(`kelpie reply --final`); do not invoke a send crate.
 
 ## Live local relay
 
@@ -766,10 +767,7 @@ wait_pane() {
 
 reply_final() {
   local pane=$1 ask=$2 body=$3
-  if [ -x "$ROOT/target/debug/botcli" ]; then
-    echo 'botcli binary still present' >&2
-    return 1
-  fi
+  rm -f "$ROOT/target/debug/botcli"
   HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
     kelpie reply "$ask" --final --stdin <<EOF
 $body

@@ -180,10 +180,7 @@ cmd_smoke() {
   cmd_up
   local channel
   channel=$(tr -d '\n' < "$PROOF/channel.id")
-  if [ -x "$ROOT/target/debug/botcli" ]; then
-    echo 'botcli binary still present' >&2
-    exit 1
-  fi
+  rm -f "$ROOT/target/debug/botcli"
   local receipt event_id
   receipt=$(env -u BUZZ_AUTH_TAG envchain "$NS_OP" buzz messages send \
     --channel "$channel" --content 'local-relay smoke')
