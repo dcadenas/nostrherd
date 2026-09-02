@@ -81,13 +81,9 @@ open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
 CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
 OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
 
-# Waiter pane: a live Herdr agent named botserver, then the host binary.
-# Skip herdr agent start when that pane is already the ready waiter; adopt reuses it.
+# Host waiter is pane-less (D2 / issue 27). Do not start a Herdr agent named botserver.
 rm -f "$PROOF/host.sqlite"
-PANE=$(herdr tab create --cwd "$ROOT" --label botserver-host --no-focus \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
-herdr agent start botserver --kind opencode --pane "$PANE" -- --auto
-HERDR_PANE_ID="$PANE" envchain botserver-proof "$ROOT/target/debug/botserver" \
+envchain botserver-proof "$ROOT/target/debug/botserver" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 
 # Flow 1: ordinary channel text (no bot: prefix, no operator mention).
@@ -136,11 +132,11 @@ EOF
 ### Flows 3–5, 7–8 (issue 19)
 
 Same throwaway namespaces and `env -u BUZZ_AUTH_TAG` as flows 1–2. Two
-fresh channels. Do not print channel ids, pubkeys, or event ids. Waiter
-is a live Herdr agent named `botserver`; skip `herdr agent start` when
-that alias is already the ready waiter. If a leftover Ready alias blocks
-a new pane, retire that incarnation without `--close-pane` and adopt the
-new pane. Queued-turn drain runs on the host refresh tick (every 30s).
+fresh channels. Do not print channel ids, pubkeys, or event ids. Host
+waiter is pane-less. If a leftover Ready alias named `botserver` blocks
+`waiter.register`, retire that incarnation. Occupant recover still uses
+`kelpie start --logical-id`. Queued-turn drain runs on the host refresh
+tick (every 30s).
 
 ```bash
 ROOT=$(pwd)
@@ -171,10 +167,7 @@ CHANNEL_B=$(tr -d '\n' < "$PROOF/channel-b.id")
 OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
 
 rm -f "$PROOF/host.sqlite"
-PANE=$(herdr tab create --cwd "$ROOT" --label botserver-host --no-focus \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
-herdr agent start botserver --kind opencode --pane "$PANE" -- --auto
-HERDR_PANE_ID="$PANE" envchain botserver-proof "$ROOT/target/debug/botserver" \
+envchain botserver-proof "$ROOT/target/debug/botserver" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 
 # Flow 3: trigger, then unprefixed follow-up (mention without bot:).
@@ -308,11 +301,11 @@ sqlite3 "$PROOF/host.sqlite" \
 ### Flows 6, 9-12 (issue 20)
 
 Same throwaway namespaces and `env -u BUZZ_AUTH_TAG` as flows 1–2. Do not
-print channel ids, pubkeys, or event ids. Waiter is a live Herdr agent
-named `botserver`. After a trigger is `open`, wait one host poll (~1s)
-before edit/delete so mutation fetch includes that EventId. After
-`herdr pane close` of an occupant, `kelpie recover` so whoami reports
-the alias unbound; the 30s resume tick then continues `--logical-id`.
+print channel ids, pubkeys, or event ids. Host waiter is pane-less. After
+a trigger is `open`, wait one host poll (~1s) before edit/delete so
+mutation fetch includes that EventId. After `herdr pane close` of an
+occupant, `kelpie recover` so whoami reports the alias unbound; the 30s
+resume tick then continues `--logical-id`.
 
 ```bash
 ROOT=$(pwd)
@@ -353,10 +346,7 @@ env -u BUZZ_AUTH_TAG envchain botserver-proof buzz users presence \
   --pubkeys "$OPERATOR_PUB" > "$PROOF/presence-before.json"
 
 rm -f "$PROOF/host.sqlite"
-PANE=$(herdr tab create --cwd "$ROOT" --label botserver-host --no-focus \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
-herdr agent start botserver --kind opencode --pane "$PANE" -- --auto
-HERDR_PANE_ID="$PANE" envchain botserver-proof "$ROOT/target/debug/botserver" \
+envchain botserver-proof "$ROOT/target/debug/botserver" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 
 occupant_pane() {
@@ -527,6 +517,134 @@ python3 -c 'import json,sys
 b=json.load(open(sys.argv[1])); a=json.load(open(sys.argv[2]))
 raise SystemExit(0 if a==b else 1)' \
   "$PROOF/presence-before.json" "$PROOF/presence-after.json"
+```
+
+### Socket waiter (issue 27)
+
+Host waiter is pane-less. First `bot:` still yields one `[bot]:`. Occupant
+envelopes use `from=botserver`. The ask stays open until `inbox.ack`.
+Killing the host before ACK leaves the obligation open. Do not print
+pubkeys or event ids. Live proof landed: no waiter pane, one stamped
+reply, obligation closed only after ACK, drop-host left it open, delete
+cancelled the unposted turn.
+
+```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is27
+mkdir -p "$PROOF"
+./tools/local-relay up
+cargo build -p botserver -p botcli
+
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$ROOT/corpus/example-bot"
+kind = "opencode"
+EOF
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
+  --name botserver-is27 --type stream --visibility open > "$PROOF/channel.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
+  "$PROOF/channel.json" "$PROOF/channel.id"
+CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
+
+rm -f "$PROOF/host.sqlite"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
+HOST_PID=$!
+
+occupant_pane() {
+  kelpie --json report --live | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+want=sys.argv[1]
+found=[]
+def walk(obj):
+    if isinstance(obj, dict):
+        incs=obj.get("incarnations")
+        if incs and obj.get("public_name")==want:
+            pane=(incs[0] or {}).get("observed_pane_id")
+            if pane:
+                found.append(pane)
+        for v in obj.values():
+            walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            walk(v)
+walk(d.get("result") or d)
+print(found[-1] if found else "")
+' "$1"
+}
+
+# Expect: report lists waiter botserver with no observed pane.
+kelpie --json report --live
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
+ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
+SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$CHANNEL';")
+OCCUPANT_PANE=$(occupant_pane "$SNAME")
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
+  "$ROOT/target/debug/botcli" send --stdin \
+  --database "$PROOF/host.sqlite" \
+  --ask-id "$ASK_ID" \
+  --channel "$CHANNEL" <<'EOF'
+hello from example-bot
+EOF
+# Expect: one [bot]: body. kelpie pending "$SNAME" is empty after ACK.
+# Expect: renew armed (1). D27: a failed arm does not block the ask.
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT renew_id IS NOT NULL FROM sessions WHERE channel_id='$CHANNEL';"
+kelpie --json pending "$SNAME"
+
+# Drop-host: second trigger, kill host, occupant replies, pending stays open.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: drop-host'
+ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
+OCCUPANT_PANE=$(occupant_pane "$SNAME")
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
+  "$ROOT/target/debug/botcli" send --stdin \
+  --database "$PROOF/host.sqlite" \
+  --ask-id "$ASK_ID" \
+  --channel "$CHANNEL" <<'EOF'
+after host drop
+EOF
+# Expect: kelpie pending "$SNAME" still lists the ask.
+kelpie --json pending "$SNAME"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
+HOST_PID=$!
+for _ in $(seq 1 30); do
+  n=$(kelpie --json pending "$SNAME" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+r=d.get("result")
+print(len(r) if isinstance(r, list) else 99)')
+  if [ "$n" = "0" ]; then break; fi
+  sleep 0.3
+done
+# Expect: pending empties after inbox.ack on reconnect.
+kelpie --json pending "$SNAME"
+
+# Delete before publish: trigger, delete, unposted turn cancelled.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
+  > "$PROOF/delete-trigger.json"
+python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
+  "$PROOF/delete-trigger.json" "$PROOF/delete-trigger.id"
+sleep 2
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete \
+  --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" > "$PROOF/delete.json"
+sleep 2
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' ORDER BY t.sequence;"
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
 ```
 
 Wrap binaries with envchain. Do not pass `--envchain` (D29):

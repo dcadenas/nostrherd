@@ -9,7 +9,7 @@ use botserver_domain::{Bot, EventId, SessionName};
 
 use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
 use crate::{
-    occupant_bootstrap, AdoptedWaiter, AskDelivery, HostRepository, KelpieClient, KelpieError,
+    occupant_bootstrap, AskDelivery, HostRepository, HostWaiter, KelpieClient, KelpieError,
     NewTurn, OccupantLaunch, SessionRecord, TurnState,
 };
 
@@ -188,7 +188,7 @@ where
     pub fn handle_trigger(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
         work: &TriggerWork,
     ) -> Result<TriggerOutcome, ActorError<R::Error>> {
         if work.nostr_body.trim().is_empty() {
@@ -230,7 +230,7 @@ where
     pub fn handle_ingest(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
         action: &crate::relay::IngestAction,
         channel_display: &str,
     ) -> Result<TriggerOutcome, ActorError<R::Error>> {
@@ -295,7 +295,7 @@ where
     pub fn handle_turn_completed(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
     ) -> Result<Option<TriggerOutcome>, ActorError<R::Error>> {
         self.resume_queued(kelpie, waiter)
     }
@@ -311,7 +311,7 @@ where
     pub fn recover_open_occupants(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
     ) -> Result<usize, ActorError<R::Error>> {
         let sessions = self
             .repository
@@ -347,7 +347,7 @@ where
     pub fn resume_queued(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
     ) -> Result<Option<TriggerOutcome>, ActorError<R::Error>> {
         let mut first_error = self.recover_open_occupants(kelpie, waiter).err();
         let sessions = self
@@ -394,7 +394,7 @@ where
     fn handle_edit(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
         event_id: &EventId,
         target_event_id: &EventId,
         replacement: Option<&botserver_domain::TriggerMatch>,
@@ -457,7 +457,7 @@ where
     fn abandon_unclaimed(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
         event_id: &EventId,
         target_event_id: &EventId,
         reason: &str,
@@ -495,7 +495,7 @@ where
     fn recover_open_session(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
         session: &SessionRecord,
     ) -> Result<bool, ActorError<R::Error>> {
         let Some(logical_id) = session.occupant_logical_id.as_deref() else {
@@ -530,6 +530,7 @@ where
                     .map_err(ActorError::Repository)?;
                 self.try_arm_renew(
                     kelpie,
+                    waiter,
                     occupant.logical_agent_id(),
                     occupant.incarnation_id(),
                     &snapshot_relpath,
@@ -563,7 +564,7 @@ where
     fn ask_oldest_queued(
         &mut self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
         channel_id: &str,
         nostr_body: &str,
     ) -> Result<(), ActorError<R::Error>> {
@@ -582,6 +583,7 @@ where
                 .map_err(ActorError::Repository)?;
             self.try_arm_renew(
                 kelpie,
+                waiter,
                 occupant.logical_agent_id(),
                 occupant.incarnation_id(),
                 &snapshot_relpath,
@@ -594,6 +596,7 @@ where
             ) {
                 self.try_arm_renew(
                     kelpie,
+                    waiter,
                     &logical_id,
                     &incarnation_id,
                     &snapshot_relpath,
@@ -636,7 +639,7 @@ where
     fn start_occupant(
         &self,
         kelpie: &KelpieClient,
-        waiter: &AdoptedWaiter<'_>,
+        waiter: &HostWaiter<'_>,
         session: &SessionRecord,
         snapshot_relpath: &str,
         continue_as: Option<&str>,
@@ -666,14 +669,18 @@ where
     fn try_arm_renew(
         &mut self,
         kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
         logical_id: &str,
         incarnation_id: &str,
         snapshot_relpath: &str,
         session: &mut SessionRecord,
     ) -> Result<(), ActorError<R::Error>> {
-        if let Ok(renew_id) =
-            kelpie.arm_occupant_renew(logical_id, incarnation_id, snapshot_relpath)
-        {
+        if let Ok(renew_id) = kelpie.arm_occupant_renew(
+            logical_id,
+            incarnation_id,
+            snapshot_relpath,
+            waiter.identity().logical_agent_id(),
+        ) {
             session.renew_id = Some(renew_id);
             self.repository
                 .save_session(session)
@@ -893,9 +900,8 @@ mod tests {
     fn adopt() -> CommandOutput {
         success(&serde_json::json!({
             "logical_agent_id": "waiter-agent",
-            "incarnation_id": "waiter-incarnation",
-            "operation_id": "adopt-operation",
-            "outcome": "succeeded"
+            "public_name": "botserver",
+            "delivery_transport": "socket_inbox"
         }))
     }
 
@@ -1033,7 +1039,7 @@ mod tests {
     fn first_trigger_starts_then_asks_and_stores_reply_to() {
         let (mut actor, kelpie, runner, panes) =
             actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
 
         assert_eq!(
@@ -1151,7 +1157,7 @@ mod tests {
             whoami(),
             asked("ask-1"),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
 
         assert_eq!(
@@ -1194,7 +1200,7 @@ mod tests {
             whoami(),
             asked("ask-2"),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: first", None))
             .expect("first");
@@ -1221,7 +1227,7 @@ mod tests {
     fn open_turn_queues_without_a_second_ask() {
         let (mut actor, kelpie, runner, _panes) =
             actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: first", None))
             .expect("first");
@@ -1262,7 +1268,7 @@ mod tests {
             start(),
             renewed(),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         actor
             .handle_trigger(&kelpie, &waiter, &trigger)
@@ -1312,7 +1318,7 @@ mod tests {
             asked("ask-1"),
             whoami(),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
             .expect("asked");
@@ -1333,7 +1339,7 @@ mod tests {
     fn pending_scope_lists_open_turn_channels_and_event_ids() {
         let (mut actor, kelpie, _runner, _panes) =
             actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         actor
             .handle_trigger(&kelpie, &waiter, &trigger)
@@ -1360,7 +1366,7 @@ mod tests {
             asked("ask-1"),
             whoami_other(),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
             .expect("asked");
@@ -1386,7 +1392,7 @@ mod tests {
             start(),
             renewed(),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
             .expect("asked");
@@ -1407,7 +1413,7 @@ mod tests {
             asked("ask-1"),
             success(&serde_json::json!({ "incarnation_id": "broken" })),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
             .expect("asked");
@@ -1430,7 +1436,7 @@ mod tests {
             asked("ask-1"),
             failure("rejected", "kelpie daemon unavailable"),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
             .expect("asked");
@@ -1455,7 +1461,7 @@ mod tests {
             whoami(),
             asked("ask-2"),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .repository
             .save_session(&crate::SessionRecord {
@@ -1533,7 +1539,7 @@ mod tests {
     fn resume_queued_starts_an_occupant_for_bootstrapping() {
         let (mut actor, kelpie, runner, _panes) =
             actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         actor
             .ensure_session(&trigger.channel_id, &trigger.channel_display)
@@ -1584,7 +1590,7 @@ mod tests {
             whoami(),
             asked("ask-2"),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         for (channel, display, character, body) in [
             (first_channel, "aaa", 'a', "bot: first"),
             (second_channel, "foobar", 'b', "bot: second"),
@@ -1641,7 +1647,7 @@ mod tests {
     #[test]
     fn resume_queued_skips_a_session_without_indexed_body() {
         let (mut actor, kelpie, _runner, _panes) = actor([adopt()]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         actor
             .ensure_session(&trigger.channel_id, &trigger.channel_display)
@@ -1663,7 +1669,7 @@ mod tests {
     fn ingest_turn_candidate_uses_the_actor_path() {
         let (mut actor, kelpie, _runner, _panes) =
             actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
         let action = crate::relay::IngestAction::TurnCandidate {
             event_id: trigger.event_id.clone(),
@@ -1782,7 +1788,7 @@ mod tests {
     #[test]
     fn handle_ingest_acks_an_unnameable_channel_without_kelpie() {
         let (mut actor, kelpie, runner, panes) = actor([adopt()]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let event = event_id('a');
         let action = crate::relay::IngestAction::TurnCandidate {
             event_id: event.clone(),
@@ -1810,7 +1816,7 @@ mod tests {
                 .lock()
                 .expect("calls")
                 .iter()
-                .filter(|call| call.0.get(1).is_some_and(|verb| verb != "adopt"))
+                .filter(|call| call.0.get(1).is_some_and(|verb| verb != "waiter-register"))
                 .count(),
             0
         );
@@ -1820,7 +1826,7 @@ mod tests {
     #[test]
     fn empty_trigger_request_is_not_asked() {
         let (mut actor, kelpie, runner, _panes) = actor([adopt()]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let error = actor
             .handle_trigger(&kelpie, &waiter, &work('a', "   ", None))
             .expect_err("empty");
@@ -1836,7 +1842,7 @@ mod tests {
     #[test]
     fn ingest_edit_is_acknowledged_without_asking() {
         let (mut actor, kelpie, runner, _panes) = actor([adopt()]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let edit_id = event_id('a');
         assert_eq!(
             actor
@@ -1869,7 +1875,7 @@ mod tests {
     fn snapshot_excludes_other_channel_dms() {
         let (mut actor, kelpie, _runner, _panes) =
             actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         let now = unix_now().expect("now");
         let dm_channel = "ffffffff-ffff-ffff-ffff-ffffffffffff";
@@ -1955,7 +1961,7 @@ mod tests {
             whoami(),
             asked("ask-2"),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let first = work('a', "first", None);
         let second = work('b', "second", None);
         index_trigger(&mut actor, &first);
@@ -2001,7 +2007,7 @@ mod tests {
             whoami(),
             asked("ask-2"),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "hello", Some('c'));
         actor
             .handle_trigger(&kelpie, &waiter, &trigger)
@@ -2059,7 +2065,7 @@ mod tests {
             asked("ask-1"),
             cancelled(),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "hello", None);
         actor
             .handle_trigger(&kelpie, &waiter, &trigger)
@@ -2105,7 +2111,7 @@ mod tests {
     fn claimed_open_turn_ignores_later_edits() {
         let (mut actor, kelpie, runner, _panes) =
             actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "hello", None);
         actor
             .handle_trigger(&kelpie, &waiter, &trigger)
@@ -2153,7 +2159,7 @@ mod tests {
             asked("ask-1"),
             whoami(),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let first = work('a', "first", None);
         let second = work('b', "second", None);
         actor
@@ -2210,7 +2216,7 @@ mod tests {
             whoami(),
             asked("ask-2"),
         ]);
-        let waiter = kelpie.adopt_waiter("w1:p2", "term-2").expect("waiter");
+        let waiter = kelpie.register_waiter().expect("waiter");
         let first = work('a', "first", None);
         let second = work('b', "second", None);
         index_trigger(&mut actor, &first);

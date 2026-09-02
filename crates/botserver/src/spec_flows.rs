@@ -76,9 +76,8 @@ fn success(result: &Value) -> CommandOutput {
 fn adopt() -> CommandOutput {
     success(&serde_json::json!({
         "logical_agent_id": "waiter-agent",
-        "incarnation_id": "waiter-incarnation",
-        "operation_id": "adopt-operation",
-        "outcome": "succeeded"
+        "public_name": "botserver",
+        "delivery_transport": "socket_inbox"
     }))
 }
 
@@ -312,10 +311,7 @@ fn flow_02_first_call_starts_bot_foobar_and_asks() {
     let message = trigger_event(FOOBAR, "@daniel bot: hello", None);
     let action = harness.ingest(&message).expect("trigger");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
 
     assert_eq!(
         actor
@@ -335,8 +331,11 @@ fn flow_02_first_call_starts_bot_foobar_and_asks() {
         "bot-foobar"
     );
     assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
-    let adopt = &harness.runner.calls.lock().expect("calls")[0].0;
-    assert!(adopt.windows(2).any(|pair| pair == ["--name", WAITER_NAME]));
+    let register = &harness.runner.calls.lock().expect("calls")[0].0;
+    assert!(register
+        .windows(2)
+        .any(|pair| pair == ["--name", WAITER_NAME]));
+    assert!(register.iter().any(|arg| arg == "waiter-register"));
 }
 
 #[test]
@@ -345,10 +344,7 @@ fn flow_03_follow_up_without_prefix_does_not_poke() {
     let first = trigger_event(FOOBAR, "@daniel bot: hello", None);
     let action = harness.ingest(&first).expect("trigger");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
         .expect("first");
@@ -380,10 +376,7 @@ fn flow_04_second_call_reuses_the_same_occupant() {
     let first = trigger_event(FOOBAR, "@daniel bot: hello", None);
     let first_action = harness.ingest(&first).expect("first");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &first_action, "Foobar")
         .expect("first");
@@ -441,10 +434,7 @@ fn flow_05_another_channel_is_an_independent_occupant() {
     let foobar_action = harness.ingest(&foobar).expect("foobar");
     let eng_action = harness.ingest(&eng).expect("eng");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &foobar_action, "Foobar")
         .expect("foobar");
@@ -475,10 +465,7 @@ fn flow_06_dm_is_its_own_channel_session() {
     let dm = trigger_event(DM, "@daniel bot: ping", None);
     let action = harness.ingest(&dm).expect("dm trigger");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &action, "sebastian")
         .expect("dm");
@@ -506,10 +493,7 @@ fn flow_07_thread_stays_on_the_channel_occupant() {
         Some(thread.as_str())
     );
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
         .expect("thread");
@@ -539,10 +523,7 @@ fn flow_08_busy_queues_the_second_turn() {
     let first_action = harness.ingest(&first).expect("first");
     let second_action = harness.ingest(&second).expect("second");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &first_action, "Foobar")
         .expect("first");
@@ -586,10 +567,7 @@ fn flow_09_gone_pane_continues_the_logical_agent() {
     let message = trigger_event(FOOBAR, "@daniel bot: hello", None);
     let action = harness.ingest(&message).expect("trigger");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
         .expect("asked");
@@ -651,10 +629,7 @@ fn flow_10_edit_answers_latest_text_and_delete_abandons() {
     );
     let first_action = harness.ingest(&first).expect("first");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &first_action, "Foobar")
         .expect("first");
@@ -708,10 +683,7 @@ fn flow_10_claimed_turn_keeps_the_landing_reply() {
     );
     let action = harness.ingest(&first).expect("first");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
         .expect("first");
@@ -755,10 +727,7 @@ fn flow_10_posted_turn_is_left_up_after_delete() {
     );
     let action = harness.ingest(&first).expect("first");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
         .expect("first");
@@ -780,10 +749,7 @@ fn flow_11_one_ask_while_the_occupant_works() {
     let message = trigger_event(FOOBAR, "@daniel bot: long job", None);
     let action = harness.ingest(&message).expect("trigger");
     let mut actor = harness.actor();
-    let waiter = harness
-        .kelpie
-        .adopt_waiter("w1:p2", "term-2")
-        .expect("waiter");
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
         .expect("asked");
