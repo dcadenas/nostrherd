@@ -366,10 +366,10 @@ publish.
 
 The host is the shipping publish path. Issue 34 is the live E2E that the
 occupant only `kelpie reply --final` and the host stamps `[bot]:`.
-Shipping README, operator-runbook, `corpus/example-bot`, and the issue
-18–20 live-test harnesses still describe leftover `botcli`. Occupant
-send recipes stay until a later removal issue so those older proofs are
-not flipped here.
+Shipping README, operator-runbook, `corpus/example-bot`, and leftover
+`botcli` in the issue 18–20 and 27 harnesses plus the trailing
+`docs/testing.md` envchain example stay until a later removal issue so
+those older proofs are not flipped here.
 
 ## D32. Occupant self-renews
 

@@ -44,7 +44,8 @@ proof. Issue 18 is the live proof of flows 1–2: silence until a trigger,
 then a `[bot]:` body via leftover `botcli`. Issue 19 is the live proof of
 flows 3–5 and 7–8. Issue 34 is the live E2E that the occupant only
 `kelpie reply --final` and the host stamps `[bot]:` (D31). It does not
-replace the issue 18–20 `botcli` harnesses.
+replace leftover `botcli` in issues 18–20, 27, or the trailing envchain
+example.
 
 ## Live local relay
 
@@ -655,17 +656,19 @@ wait "$HOST_PID" 2>/dev/null || true
 
 ### Occupant kelpie-final (issue 34)
 
-Host publish on occupant `kelpie reply --final`. Occupant must not invoke
-`botcli` and must not receive the operator nsec. Add the peer as a
-channel member before the trigger so host `--mention` of that author is
-accepted. Do not print nsecs, pubkeys, or event ids. Host waiter is
-pane-less. If a leftover socket waiter named `botserver` blocks
-`waiter.register`, `kelpie waiter-retire --logical-id` that waiter.
+Host publish on occupant `kelpie reply --final`. Do not invoke `botcli`.
+Do not wrap that reply with envchain. Add the peer as a channel member
+before the trigger so host `--mention` of that author is accepted. Do
+not print nsecs, pubkeys, or event ids. Host waiter is pane-less. If a
+leftover socket waiter named `botserver` blocks `waiter.register`,
+`kelpie waiter-retire --logical-id` that waiter.
 
 Live proof landed: one `[bot]:` whose `e` tag is the trigger and whose
 `p` tag is the peer; unprefixed follow-up did not post; edit of an
 unposted trigger yielded one `[bot]:` for the latest text; delete before
-publish yielded no `[bot]:`, and a late final did not post.
+publish yielded no `[bot]:`, and a late final did not post. Poll until
+the host opens a turn before reading `ask_id`. Check relay tags, not
+only sqlite. Wait for cancelled-then-open before answering an edit.
 
 ```bash
 ROOT=$(pwd)
@@ -739,34 +742,123 @@ items=json.load(sys.stdin)
 print(sum(1 for it in items if str(it.get("content","")).startswith("[bot]:")))'
 }
 
+wait_sql() {
+  local sql=$1 want=$2
+  local got=
+  for _ in $(seq 1 80); do
+    got=$(sqlite3 "$PROOF/host.sqlite" "$sql" 2>/dev/null || true)
+    if [ "$got" = "$want" ]; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "sqlite wanted $want got ${got:-empty}" >&2
+  return 1
+}
+
+wait_open_ask() {
+  local channel=$1
+  local ask=
+  for _ in $(seq 1 80); do
+    ask=$(sqlite3 "$PROOF/host.sqlite" \
+      "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$channel' AND t.state='open';" 2>/dev/null || true)
+    if [ -n "$ask" ]; then
+      printf '%s' "$ask"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "no open ask" >&2
+  return 1
+}
+
+wait_pane() {
+  local name=$1 pane=
+  for _ in $(seq 1 80); do
+    pane=$(occupant_pane "$name")
+    if [ -n "$pane" ]; then
+      printf '%s' "$pane"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "no occupant pane" >&2
+  return 1
+}
+
+reply_final() {
+  local pane=$1 ask=$2 body=$3
+  if pgrep -a botcli >/dev/null 2>&1; then
+    echo 'botcli already running' >&2
+    return 1
+  fi
+  HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+    kelpie reply "$ask" --final --stdin <<EOF
+$body
+EOF
+  if pgrep -a botcli >/dev/null 2>&1; then
+    echo 'botcli appeared during kelpie reply' >&2
+    return 1
+  fi
+}
+
+check_posted() {
+  local channel=$1 trigger_file=$2 peer_file=$3 needle=$4
+  env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+    --channel "$channel" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+trigger=open(sys.argv[1]).read().strip()
+peer=open(sys.argv[2]).read().strip()
+needle=sys.argv[3]
+bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+print("posted_count", len(bots))
+if len(bots)!=1:
+    raise SystemExit(1)
+it=bots[0]
+content=str(it.get("content",""))
+tags=it.get("tags") or []
+e_ok=any(isinstance(t,list) and t and t[0]=="e" and len(t)>1 and t[1]==trigger for t in tags)
+p_ok=any(isinstance(t,list) and t and t[0]=="p" and len(t)>1 and t[1]==peer for t in tags)
+body_ok=needle in content
+print("e_tag_is_trigger", int(e_ok))
+print("p_tag_is_peer", int(p_ok))
+print("stamped_body", int(body_ok))
+if not (e_ok and p_ok and body_ok):
+    raise SystemExit(1)
+' "$trigger_file" "$peer_file" "$needle"
+}
+
 # First call: peer p-tags the operator with bot: hello.
 # Occupant answers with kelpie reply --final only (no envchain, no botcli).
-# Expect: one [bot]: body, reply-to the trigger, mention the peer (0/1).
+# Expect: one [bot]: body, e tag is the trigger, p tag is the peer (0/1).
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$FIRST" --mention "$OPERATOR_PUB" --content 'bot: hello' \
   > "$PROOF/first-trigger.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
   "$PROOF/first-trigger.json" "$PROOF/first-trigger.id"
-ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
-  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$FIRST' AND t.state='open';")
+TRIGGER=$(tr -d '\n' < "$PROOF/first-trigger.id")
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$FIRST' AND t.state='open';" 1
+ASK_ID=$(wait_open_ask "$FIRST")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$FIRST';")
-OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
-  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
-hello from example-bot
-EOF
-bot_stamped "$FIRST"
+OCCUPANT_PANE=$(wait_pane "$SNAME")
+reply_final "$OCCUPANT_PANE" "$ASK_ID" 'hello from example-bot'
+for _ in $(seq 1 40); do
+  [ "$(bot_stamped "$FIRST")" = 1 ] && break
+  sleep 0.5
+done
 sqlite3 "$PROOF/host.sqlite" \
-  "SELECT a.reply_to_event_id = (SELECT t.event_id FROM turns t WHERE t.ask_id=a.ask_id),
-          a.mention = '$PEER_PUB' FROM outbound_attempts a
+  "SELECT a.reply_to_event_id = '$TRIGGER', a.mention = '$PEER_PUB',
+          a.body NOT LIKE '[bot]:%' FROM outbound_attempts a
    JOIN turns t ON t.ask_id=a.ask_id JOIN sessions s ON s.id=t.session_id
    WHERE s.channel_id='$FIRST';"
+check_posted "$FIRST" "$PROOF/first-trigger.id" "$KEYS/peer.pub" 'hello from example-bot'
 
 # Unprefixed follow-up does not post.
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$FIRST" --mention "$OPERATOR_PUB" --content 'and the PR?' \
   >/dev/null
+sleep 3
 bot_stamped "$FIRST"
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$FIRST';"
@@ -779,18 +871,28 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
   "$PROOF/edit-trigger.json" "$PROOF/edit-trigger.id"
 EDIT_EVENT=$(tr -d '\n' < "$PROOF/edit-trigger.id")
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='open';" 1
 sleep 2
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages edit \
   --event "$EDIT_EVENT" --content 'bot: latest' >/dev/null
-ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
-  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='open';")
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='cancelled';" 1
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='open';" 1
+ASK_ID=$(wait_open_ask "$EDIT")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$EDIT';")
-OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
-  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
-latest from example-bot
-EOF
-bot_stamped "$EDIT"
+OCCUPANT_PANE=$(wait_pane "$SNAME")
+reply_final "$OCCUPANT_PANE" "$ASK_ID" 'latest from example-bot'
+for _ in $(seq 1 40); do
+  [ "$(bot_stamped "$EDIT")" = 1 ] && break
+  sleep 0.5
+done
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+  --channel "$EDIT" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+print("edit_posted_count", len(bots))
+if len(bots)!=1 or "latest from example-bot" not in str(bots[0].get("content","")):
+    raise SystemExit(1)
+'
 
 # Delete before publish: no [bot]:. Late final does not post.
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
@@ -799,17 +901,19 @@ env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
   "$PROOF/delete-trigger.json" "$PROOF/delete-trigger.id"
-ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
-  "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DELETE' AND t.state='open';")
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DELETE' AND t.state='open';" 1
+ASK_ID=$(wait_open_ask "$DELETE")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$DELETE';")
-OCCUPANT_PANE=$(occupant_pane "$SNAME")
+OCCUPANT_PANE=$(wait_pane "$SNAME")
 sleep 2
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete \
   --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" >/dev/null
+wait_sql "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DELETE';" cancelled
 HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF' || true
 late final after delete
 EOF
+sleep 3
 bot_stamped "$DELETE"
 kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
