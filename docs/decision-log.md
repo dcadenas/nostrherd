@@ -364,10 +364,12 @@ triggers. `ignore_self` still blocks retrigger.
 I10 is a host MUST: a late occupant final on a cancelled ask MUST NOT
 publish.
 
-The host is the shipping publish path. Shipping README, operator-runbook,
-`docs/testing.md`, `corpus/example-bot`, and the D23 live-test proof
-harness still describe leftover `botcli`. Occupant send recipes stay
-until a later removal issue so those live proofs are not flipped here.
+The host is the shipping publish path. Issue 34 is the live E2E that the
+occupant only `kelpie reply --final` and the host stamps `[bot]:`.
+Shipping README, operator-runbook, `corpus/example-bot`, and leftover
+`botcli` in the issue 18–20 and 27 harnesses plus the trailing
+`docs/testing.md` envchain example stay until a later removal issue so
+those older proofs are not flipped here.
 
 ## D32. Occupant self-renews
 
