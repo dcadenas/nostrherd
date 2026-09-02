@@ -171,7 +171,9 @@ impl OutboundPublisher for BuzzPublisher {
             .take()
             .expect("piped stdin is available")
             .write_all(stamp_outbound(&attempt.body).as_bytes());
-        let output = child.wait_with_output()?;
+        let output = child.wait_with_output().map_err(|error| {
+            PublishError::AcceptedUnrecorded(format!("buzz wait failed after start: {error}"))
+        })?;
         if !output.status.success() {
             let _ = write_result;
             return Err(classify_buzz_failure(
