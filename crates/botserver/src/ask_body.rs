@@ -98,7 +98,7 @@ fn unread_events<'a>(
 }
 
 fn after_cursor(event: &IndexedRelayEvent, cursor: &AskContextCursor) -> bool {
-    event.event_id != cursor.event_id && event.created_at >= cursor.created_at
+    (event.created_at, event.event_id.as_str()) > (cursor.created_at, cursor.event_id.as_str())
 }
 
 fn cap_context_lines(events: &[&IndexedRelayEvent]) -> (Vec<String>, bool) {
@@ -246,6 +246,31 @@ mod tests {
         assert!(rendered
             .body
             .contains("No unread indexed events since the last ask."));
+    }
+
+    #[test]
+    fn same_second_events_before_the_cursor_id_are_not_restuffed() {
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let cursor = AskContextCursor {
+            event_id: event_id('b'),
+            created_at: 11,
+        };
+        let rendered = render_ask_body(
+            "again",
+            "bot-foobar",
+            channel,
+            Some(&cursor),
+            &event_id('d'),
+            12,
+            &[
+                event(channel, 11, "peer-a", 'a'),
+                event(channel, 11, "peer-b", 'b'),
+                event(channel, 12, "peer-c", 'c'),
+            ],
+        );
+        assert!(!rendered.body.contains("peer-a"));
+        assert!(!rendered.body.contains("peer-b"));
+        assert!(rendered.body.contains("peer-c"));
     }
 
     #[test]

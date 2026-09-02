@@ -14,7 +14,10 @@ use crate::actor::{BotActor, OccupantPane, OccupantPaneAllocator, TriggerOutcome
 use crate::ask_body::ask_body_request;
 use crate::relay::{IngestAction, RelayIngest, RelaySubscriber};
 use crate::sqlite::SqliteRepository;
-use crate::{CommandOutput, CommandRunner, HostRepository, KelpieClient, TurnState, WAITER_NAME};
+use crate::{
+    CommandOutput, CommandRunner, HostRepository, IndexedRelayEvent, KelpieClient, TurnState,
+    WAITER_NAME,
+};
 
 const FOOBAR: &str = "ab12cd34-5678-90ab-cdef-0123456789ab";
 const ENG: &str = "cd34ef56-7890-12ab-cdef-34567890abcd";
@@ -459,6 +462,44 @@ fn ask_context_includes_unprefixed_line_between_triggers() {
 
     let follow_up = ordinary_event(FOOBAR, "and the PR?");
     assert_eq!(harness.ingest(&follow_up), None);
+    let first_created = actor
+        .repository
+        .indexed_event(&turns(&actor, FOOBAR)[0].event_id)
+        .expect("first event")
+        .expect("indexed")
+        .created_at;
+    actor
+        .repository
+        .index_event(
+            &IndexedRelayEvent {
+                event_id: EventId::parse_hex(&"c".repeat(64)).expect("event"),
+                author_pubkey: "b".repeat(64),
+                created_at: first_created + 1,
+                kind: 9,
+                content: "and the PR?".to_owned(),
+                tags_json: "[]".to_owned(),
+                channel_id: Some(FOOBAR.to_owned()),
+                target_event_id: None,
+            },
+            false,
+        )
+        .expect("later unprefixed");
+    actor
+        .repository
+        .index_event(
+            &IndexedRelayEvent {
+                event_id: EventId::parse_hex(&"d".repeat(64)).expect("event"),
+                author_pubkey: "b".repeat(64),
+                created_at: first_created + 1,
+                kind: 9,
+                content: "secret dm".to_owned(),
+                tags_json: "[]".to_owned(),
+                channel_id: Some(DM.to_owned()),
+                target_event_id: None,
+            },
+            false,
+        )
+        .expect("other place");
 
     let second = trigger_event(FOOBAR, "@daniel bot: later", None);
     let second_action = harness.ingest(&second).expect("second");
