@@ -28,8 +28,10 @@ throwaway, or another non-prod URL). Live proofs in this repo use
 
 ## Wrap the host
 
-`botserver` MUST run in a Herdr pane so `HERDR_PANE_ID` is set (D2).
-A non-Herdr shell exits with `missing HERDR_PANE_ID`.
+`botserver` currently adopts a Herdr pane so `HERDR_PANE_ID` is set.
+A non-Herdr shell exits with `missing HERDR_PANE_ID`. D2 is the
+pane-less socket waiter; this pane path remains until that client
+lands.
 
 ```bash
 HERDR_PANE_ID="$PANE" envchain botserver botserver \

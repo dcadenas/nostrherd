@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-/// Public Herdr and Kelpie name of the host waiter.
+/// Public Kelpie name of the host socket waiter (D2).
 pub const WAITER_NAME: &str = "botserver";
 
 /// A newly started session occupant.
@@ -868,6 +868,11 @@ mod tests {
             .expect("json"),
             stderr: b"kelpie: request failed".to_vec(),
         }
+    }
+
+    #[test]
+    fn names_socket_waiter_botserver() {
+        assert_eq!(WAITER_NAME, "botserver");
     }
 
     #[test]
