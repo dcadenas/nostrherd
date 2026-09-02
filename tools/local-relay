@@ -178,16 +178,14 @@ cmd_status() {
 
 cmd_smoke() {
   cmd_up
-  local channel botcli
+  local channel
   channel=$(tr -d '\n' < "$PROOF/channel.id")
-  botcli="$ROOT/target/debug/botcli"
-  if [ ! -x "$botcli" ]; then
-    cargo build -q -p botcli --manifest-path "$ROOT/Cargo.toml"
-  fi
+  rm -f "$ROOT/target/debug/botcli"
   local receipt event_id
-  receipt=$(printf 'local-relay smoke\n' | env -u BUZZ_AUTH_TAG envchain "$NS_OP" "$botcli" send --stdin --channel "$channel")
+  receipt=$(env -u BUZZ_AUTH_TAG envchain "$NS_OP" buzz messages send \
+    --channel "$channel" --content 'local-relay smoke')
   echo "$receipt"
-  event_id=$(printf '%s\n' "$receipt" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')
+  event_id=$(printf '%s\n' "$receipt" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("event_id") or d.get("id") or "")')
   env -u BUZZ_AUTH_TAG envchain "$NS_OP" buzz messages get --channel "$channel" --limit 50 \
     | python3 -c 'import json,sys
 want=sys.argv[1]
@@ -196,7 +194,8 @@ items=raw if isinstance(raw, list) else [raw]
 ok=any(
     isinstance(m, dict)
     and (m.get("id") or m.get("event_id")) == want
-    and (m.get("content") or "").startswith("[bot]:")
+    and "local-relay smoke" in (m.get("content") or "")
+    and not (m.get("content") or "").startswith("[bot]:")
     for m in items
 )
 print("body_ok" if ok else "body_bad")

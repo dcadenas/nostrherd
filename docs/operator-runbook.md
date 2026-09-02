@@ -1,13 +1,13 @@
 # Operator runbook: personal envchain namespace
 
-Personal `botserver` / `botcli` use envchain namespace `botserver`.
+Personal `botserver` uses envchain namespace `botserver`.
 That is not the throwaway live-test namespaces `botserver-proof` and
 `botserver-proof-peer` (D23 live-test relay, `skills/local-relay`).
 
 `envchain` injects `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` into the
-wrapped process (D29, D30). The binaries only read those names from
+wrapped process (D29, D30). The binary only reads those names from
 the environment. There is no `--envchain` flag. Do not exec `envchain`
-from the binaries. Do not put the nsec in SQLite, logs, process titles,
+from the binary. Do not put the nsec in SQLite, logs, process titles,
 or standing pane-env.
 
 Do not point `BUZZ_RELAY_URL` at a production relay.
@@ -50,32 +50,8 @@ kind = "opencode"
 `--check` loads config and database, then exits. It needs neither the
 envchain wrap nor Kelpie.
 
-## Wrap botcli
-
-Occupants publish with the same namespace:
-
-`botcli` execs `buzz`. Strip `BUZZ_AUTH_TAG` if the shell exported it
-(same as live Buzz calls in `docs/testing.md`). `botserver` does not
-read that name.
-
-```bash
-env -u BUZZ_AUTH_TAG envchain botserver botcli send --stdin \
-  --database /path/to/botserver.sqlite \
-  --ask-id <kelpie-ask-id> \
-  --channel <channel-uuid> \
-  --reply-to <event-id> \
-  --mention <pubkey> <<'EOF'
-reply text
-EOF
-```
-
-`--reply-to` is omitted on a first-call trigger with no inbound reply
-marker. `--database` and `--ask-id` are omitted together when no Kelpie
-ask should close.
-
-A PATH wrapper that execs
-`env -u BUZZ_AUTH_TAG envchain botserver botcli "$@"` is allowed
-(SPEC). The namespace name is not a secret.
+Occupants answer with `kelpie reply --final` and unstamped prose. They
+MUST NOT wrap a publish binary and MUST NOT receive the nsec.
 
 ## Do not
 

@@ -2,8 +2,9 @@
 name: local-relay
 description: >
   Run the throwaway Buzz relay and envchain namespaces for live
-  botserver tests. Use when an issue needs a real relay, botcli send,
-  or @operator bot: triggers. Never use personal or sidecar keys.
+  botserver tests. Use when an issue needs a real relay, occupant
+  kelpie reply, or @operator bot: triggers. Never use personal or
+  sidecar keys.
 ---
 
 # Local throwaway relay
@@ -13,8 +14,8 @@ relay. They do not use `nostr-personal`, `buzz-acp`, or prod.
 
 ## When
 
-Any issue whose acceptance mentions the relay, `botcli send`, ingest,
-occupants, or SPEC user-visible flows.
+Any issue whose acceptance mentions the relay, ingest, occupants, or
+SPEC user-visible flows.
 
 ## Do not
 
@@ -52,8 +53,9 @@ them if missing. `envchain --list` shows **names only**.
 ./tools/local-relay smoke
 ```
 
-`smoke` runs `botcli send --stdin` as the operator and checks the
-channel body starts with `[bot]:`.
+`smoke` posts a throwaway operator message with `buzz messages send`
+and checks the channel body is present. It does not stamp `[bot]:`
+and does not invoke a send crate.
 
 ## Trigger as the peer
 
@@ -62,18 +64,15 @@ channel body starts with `[bot]:`.
 ```
 
 That posts `@<operator> bot: hello from peer` with a `p` tag. Use this
-to exercise ingest once `botserver` is running. Issue 18 live proof of
-SPEC flows 1–2 is recorded in `docs/testing.md`.
+to exercise ingest once `botserver` is running. Occupant answers use
+`kelpie reply --final`; the host stamps `[bot]:`. Issue 34 live proof
+is recorded in `docs/testing.md`.
 
 ## Secrets in commands
 
 Wrap the **binary**, never put the nsec in pane-env or in flags:
 
 ```bash
-envchain botserver-proof botcli send --stdin --channel "$CHANNEL" <<'EOF'
-text
-EOF
-
 envchain botserver-proof botserver --config … --database …
 ```
 

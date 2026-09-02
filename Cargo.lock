@@ -196,17 +196,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "botcli"
-version = "0.1.0"
-dependencies = [
- "botserver",
- "botserver-domain",
- "clap",
- "rusqlite",
- "serde_json",
-]
-
-[[package]]
 name = "botserver"
 version = "0.1.0"
 dependencies = [
