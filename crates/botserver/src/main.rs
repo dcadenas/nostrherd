@@ -283,17 +283,8 @@ fn dispatch_ingest(
     repository: &mut SqliteRepository,
     action: &IngestAction,
 ) -> Result<TriggerOutcome, HostError> {
-    let bot = match action {
-        IngestAction::TurnCandidate { bot_id, .. } => bots.iter().find(|bot| bot.id() == bot_id),
-        IngestAction::Edit {
-            target_event_id, ..
-        }
-        | IngestAction::Delete {
-            target_event_id, ..
-        } => repository
-            .active_turn_for_event(target_event_id)?
-            .and_then(|turn| bots.iter().find(|bot| bot.id() == &turn.bot_id)),
-    };
+    let bot = action_bot_id(repository, action)?
+        .and_then(|bot_id| bots.iter().find(|bot| bot.id() == &bot_id));
     if let Some(bot) = bot {
         Ok(persist_ingest(bot, repository, action, "")?)
     } else {
@@ -560,10 +551,22 @@ fn handle_host_delivery(
     inbox: &mut HostInbox,
     delivery: &InboxDelivery,
 ) -> Result<(), HostError> {
-    let action = match actors.first_mut() {
-        Some(actor) => actor.handle_occupant_delivery(kelpie, waiter, &publisher, delivery),
-        None => return Err(HostError::NoBots),
+    let bot_id = {
+        let Some(actor) = actors.first() else {
+            return Err(HostError::NoBots);
+        };
+        match delivery.reply_to() {
+            Some(ask_id) => actor.bot_id_for_ask(ask_id)?,
+            None => None,
+        }
     };
+    let idx = bot_id
+        .and_then(|id| actors.iter().position(|actor| actor.bot().id() == &id))
+        .unwrap_or(0);
+    let Some(actor) = actors.get_mut(idx) else {
+        return Err(HostError::NoBots);
+    };
+    let action = actor.handle_occupant_delivery(kelpie, waiter, &publisher, delivery);
     match action {
         Ok(InboxAction::Ack) => {
             if let Some(ask_id) = delivery.reply_to() {
@@ -875,6 +878,67 @@ mod tests {
         assert_ne!(bot_session.session_name, pr_session.session_name);
         assert!(bot_session.session_name.starts_with("bot-"));
         assert!(pr_session.session_name.starts_with("pr-"));
+    }
+
+    #[test]
+    fn action_bot_id_follows_the_active_turn_for_edits() {
+        let config = write_bots_config(&["bot", "pr"]);
+        let database = temp_path("host").with_extension("sqlite");
+        let (registry, mut repository) = load_host(&config, &database).expect("load");
+        dispatch_ingest(
+            registry.bots(),
+            &mut repository,
+            &trigger_action("pr", 'e', "pr: hello"),
+        )
+        .expect("pr");
+        let target = botserver_domain::EventId::parse_hex(&"e".repeat(64)).expect("target");
+        let edit = IngestAction::Edit {
+            event_id: botserver_domain::EventId::parse_hex(&"f".repeat(64)).expect("edit"),
+            target_event_id: target,
+            replacement: None,
+        };
+        assert_eq!(
+            action_bot_id(&repository, &edit)
+                .expect("bot id")
+                .expect("present")
+                .as_str(),
+            "pr"
+        );
+        assert_eq!(
+            action_bot_id(&repository, &trigger_action("bot", 'a', "bot: hello"))
+                .expect("candidate")
+                .expect("present")
+                .as_str(),
+            "bot"
+        );
+    }
+
+    #[test]
+    fn actor_for_bot_selects_the_matching_actor() {
+        let config = write_bots_config(&["bot", "pr"]);
+        let database = temp_path("host").with_extension("sqlite");
+        let (registry, _) = load_host(&config, &database).expect("load");
+        let mut actors = registry
+            .bots()
+            .iter()
+            .map(|bot| {
+                BotActor::new(
+                    bot.clone(),
+                    SqliteRepository::open(&database).expect("db"),
+                    HerdrPaneAllocator::default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let pr = BotId::new("pr").expect("id");
+        assert_eq!(
+            actor_for_bot(&mut actors, &pr)
+                .expect("actor")
+                .bot()
+                .id()
+                .as_str(),
+            "pr"
+        );
+        assert!(actor_for_bot(&mut actors, &BotId::new("review").expect("id")).is_none());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use botserver_domain::{Bot, EventId, SessionName};
+use botserver_domain::{Bot, BotId, EventId, SessionName};
 
 use crate::ask_body::{render_ask_body, AskContextCursor};
 use crate::inbox::InboxDelivery;
@@ -376,17 +376,23 @@ where
         })?;
         if action == InboxAction::Ack {
             if let Some(ask_id) = delivery.reply_to() {
-                if self
-                    .repository
-                    .turn_by_ask_id(ask_id)
-                    .map_err(ActorError::Repository)?
-                    .is_some_and(|turn| turn.state == TurnState::Posted)
-                {
-                    self.resume_queued(kelpie, waiter)?;
-                }
+                self.resume_if_posted(kelpie, waiter, ask_id)?;
             }
         }
         Ok(action)
+    }
+
+    /// Return the bot that owns a turn identified by its ask id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence cannot read the turn.
+    pub fn bot_id_for_ask(&self, ask_id: &str) -> Result<Option<BotId>, ActorError<R::Error>> {
+        Ok(self
+            .repository
+            .turn_by_ask_id(ask_id)
+            .map_err(ActorError::Repository)?
+            .map(|turn| turn.bot_id))
     }
 
     /// Resume this bot's queue after its turn reached `posted`.
