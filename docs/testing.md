@@ -349,6 +349,9 @@ DELETE=$(tr -d '\n' < "$PROOF/delete-channel.id")
 LONGWORK=$(tr -d '\n' < "$PROOF/longwork-channel.id")
 POSTED=$(tr -d '\n' < "$PROOF/posted-channel.id")
 
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz users presence \
+  --pubkeys "$OPERATOR_PUB" > "$PROOF/presence-before.json"
+
 rm -f "$PROOF/host.sqlite"
 PANE=$(herdr tab create --cwd "$ROOT" --label botserver-host --no-focus \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
@@ -378,12 +381,19 @@ print(found[-1] if found else "")
 ' "$1"
 }
 
-# Flow 6: DM trigger, then an unprefixed DM line.
-# Expect: one session, one turn; unprefixed line does not add a turn.
+bot_stamped() {
+  env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+    --channel "$1" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+print(sum(1 for it in items if str(it.get("content","")).startswith("[bot]:")))'
+}
+
+# Flow 6: DM trigger, then an unprefixed DM line that still mentions so the
+# host sees it. Expect: one session, one turn.
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$DM" --mention "$OPERATOR_PUB" --content 'bot: ping'
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
-  --channel "$DM" --content 'unprefixed dm line'
+  --channel "$DM" --mention "$OPERATOR_PUB" --content 'unprefixed dm line'
 sqlite3 "$PROOF/host.sqlite" "SELECT count(*) FROM sessions WHERE channel_id='$DM';"
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DM';"
@@ -416,13 +426,16 @@ for _ in $(seq 1 50); do
   sleep 1
 done
 sqlite3 "$PROOF/host.sqlite" \
-  "SELECT count(*), t.state, occupant_logical_id = '$LID' FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$RECOVER';"
+  "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$RECOVER';"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT t.state, occupant_logical_id = '$LID' FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$RECOVER';"
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
 HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   "$ROOT/target/debug/botcli" send --stdin \
   --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$RECOVER" <<'EOF'
 recovered hello
 EOF
+bot_stamped "$RECOVER"
 
 # Flow 10 edit: wait until open, then edit the trigger to bot: latest.
 # Expect: cancelled then open; one [bot]: answering latest.
@@ -447,6 +460,7 @@ HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$EDIT" <<'EOF'
 latest from example-bot
 EOF
+bot_stamped "$EDIT"
 
 # Flow 10 delete before publish: no [bot]:.
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
@@ -460,8 +474,12 @@ sleep 2
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete --event "$DELETE_EVENT"
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DELETE';"
+bot_stamped "$DELETE"
 
 # Flow 10 posted reply stays up after delete of the trigger.
+# After publish the turn is no longer active, so mutation fetch does not
+# ingest that delete (D24). The witness is the stamped body still on the
+# channel, not sqlite seeing the delete event.
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$POSTED" --mention "$OPERATOR_PUB" --content 'bot: stay up' \
   > "$PROOF/posted-trigger.json"
@@ -481,6 +499,7 @@ POSTED_EVENT=$(tr -d '\n' < "$PROOF/posted-trigger.id")
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete --event "$POSTED_EVENT"
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$POSTED';"
+bot_stamped "$POSTED"
 
 # Flow 11: one ask while the occupant works; one stamped reply; no working ping.
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
@@ -497,10 +516,17 @@ HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_AUTH_TAG envchain botserver-proof \
   --database "$PROOF/host.sqlite" --ask-id "$ASK_ID" --channel "$LONGWORK" <<'EOF'
 long job done
 EOF
+bot_stamped "$LONGWORK"
 
 # Flow 12: host does not publish presence or typing as the operator.
+# Expect: presence-after equals presence-before. Typing is not published:
+# the host subscriber has no signing keys and never calls send.
 env -u BUZZ_AUTH_TAG envchain botserver-proof buzz users presence \
   --pubkeys "$OPERATOR_PUB" > "$PROOF/presence-after.json"
+python3 -c 'import json,sys
+b=json.load(open(sys.argv[1])); a=json.load(open(sys.argv[2]))
+raise SystemExit(0 if a==b else 1)' \
+  "$PROOF/presence-before.json" "$PROOF/presence-after.json"
 ```
 
 Wrap binaries with envchain. Do not pass `--envchain` (D29):

@@ -802,6 +802,14 @@ mod tests {
         fn sessions_with_pending_turns(&self) -> Result<Vec<SessionRecord>, Self::Error> {
             unreachable!()
         }
+
+        fn known_channel_ids(&self) -> Result<Vec<String>, Self::Error> {
+            unreachable!()
+        }
+
+        fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error> {
+            unreachable!()
+        }
     }
 
     fn event(kind: u16, content: &str, tags: impl IntoIterator<Item = Tag>) -> Event {

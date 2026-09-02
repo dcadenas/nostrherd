@@ -162,37 +162,21 @@ where
         &self.bot
     }
 
-    /// Channel ids and triggering event ids with queued or open work.
+    /// Known session channels and queued or open triggering event ids.
     ///
     /// # Errors
     ///
-    /// Returns an error when persistence cannot list pending turns.
+    /// Returns an error when persistence cannot list sessions or turns.
     pub fn pending_scope(&self) -> Result<PendingScope, ActorError<R::Error>> {
-        let sessions = self
-            .repository
-            .sessions_with_pending_turns()
-            .map_err(ActorError::Repository)?;
-        let mut channel_ids = sessions
-            .iter()
-            .map(|session| session.channel_id.clone())
-            .collect::<Vec<_>>();
-        channel_ids.sort();
-        channel_ids.dedup();
-        let mut active_event_ids = Vec::new();
-        for session in sessions {
-            for turn in self
-                .repository
-                .turns_for_session(&session.bot_id, &session.channel_id)
-                .map_err(ActorError::Repository)?
-            {
-                if matches!(turn.state, TurnState::Queued | TurnState::Open) {
-                    active_event_ids.push(turn.event_id);
-                }
-            }
-        }
         Ok(PendingScope {
-            channel_ids,
-            active_event_ids,
+            channel_ids: self
+                .repository
+                .known_channel_ids()
+                .map_err(ActorError::Repository)?,
+            active_event_ids: self
+                .repository
+                .active_event_ids()
+                .map_err(ActorError::Repository)?,
         })
     }
 
@@ -1355,8 +1339,15 @@ mod tests {
             .handle_trigger(&kelpie, &waiter, &trigger)
             .expect("asked");
         let scope = actor.pending_scope().expect("scope");
-        assert_eq!(scope.channel_ids, vec![trigger.channel_id]);
-        assert_eq!(scope.active_event_ids, vec![trigger.event_id]);
+        assert_eq!(scope.channel_ids, vec![trigger.channel_id.clone()]);
+        assert_eq!(scope.active_event_ids, vec![trigger.event_id.clone()]);
+        actor
+            .repository
+            .set_turn_state("ask-1", TurnState::Posted)
+            .expect("posted");
+        let posted = actor.pending_scope().expect("posted scope");
+        assert_eq!(posted.channel_ids, vec![trigger.channel_id]);
+        assert!(posted.active_event_ids.is_empty());
     }
 
     #[test]
