@@ -2640,4 +2640,60 @@ mod tests {
             .iter()
             .all(|call| call.0.iter().all(|arg| arg != "reactions")));
     }
+
+    #[test]
+    fn late_final_on_edited_trigger_keeps_in_flight_reaction() {
+        let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            cancelled(),
+            whoami(),
+            asked("ask-2"),
+        ]);
+        let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", Some('c'));
+        index_trigger(&mut actor, &trigger);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("first");
+        let replacement =
+            botserver_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
+        actor
+            .handle_ingest(
+                &kelpie,
+                &waiter,
+                &crate::relay::IngestAction::Edit {
+                    event_id: event_id('e'),
+                    target_event_id: trigger.event_id.clone(),
+                    replacement: Some(replacement),
+                },
+                &trigger.channel_display,
+            )
+            .expect("replaced");
+        actor
+            .handle_occupant_delivery(
+                &kelpie,
+                &waiter,
+                &FakeOutbound {
+                    event_id: "d".repeat(64),
+                },
+                &occupant_final("ask-1", "stale"),
+            )
+            .expect("cancelled final");
+        assert!(recorded.removes.lock().expect("removes").is_empty());
+        assert_eq!(
+            actor
+                .repository
+                .turn_by_ask_id("ask-2")
+                .unwrap()
+                .unwrap()
+                .state,
+            TurnState::Open
+        );
+    }
 }

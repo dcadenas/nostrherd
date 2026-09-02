@@ -398,12 +398,7 @@ where
             }
             Ok(InboxAction::Hold)
         }
-        Decision::AckWithoutPublish => {
-            if let Some(turn) = &turn {
-                clear_in_flight_if_terminal(reactions, turn);
-            }
-            Ok(InboxAction::Ack)
-        }
+        Decision::AckWithoutPublish => Ok(InboxAction::Ack),
         Decision::Publish { body } => match turn {
             Some(turn) => {
                 complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
@@ -551,15 +546,6 @@ where
         .map_err(OutboxError::Repository)?;
     reactions.remove(&turn.event_id);
     Ok(InboxAction::Ack)
-}
-
-fn clear_in_flight_if_terminal(reactions: &impl InFlightReaction, turn: &TurnRecord) {
-    if matches!(
-        turn.state,
-        TurnState::Posted | TurnState::Failed | TurnState::Cancelled
-    ) {
-        reactions.remove(&turn.event_id);
-    }
 }
 
 #[cfg(test)]
