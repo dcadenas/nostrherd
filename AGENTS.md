@@ -5,9 +5,9 @@ Map for agents working in this repository. Not the product spec.
 ## What this repo is
 
 A DDD host: one process, one actor per configured bot, SQLite for host
-state, `botcli` for occupant publish. Occupants live in **corpus repos**
-(not this tree). Kelpie is the pane/obligation bus. The Nostr human is
-never `kelpie from=`.
+state. Occupants live in **corpus repos** (not this tree). The host
+publishes; the occupant only `kelpie reply --final`. Kelpie is the
+pane/obligation bus. The Nostr human is never `kelpie from=`.
 
 ## Read order
 

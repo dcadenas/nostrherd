@@ -33,19 +33,20 @@ Corpus git stores personality. No nsecs in SQLite.
 
 ## D4. botcli is the occupant publish path
 
-Status: accepted
+Status: retracted
 
-Occupants MUST NOT call the relay SDK with a raw key. `botcli` stamps
-the prefix, publishes with envchain, then `kelpie reply --final` as the
-owing occupant.
+Retracted as the occupant publish path. Occupants MUST answer with
+`kelpie reply --final` and unstamped prose. The host is the only Nostr
+publisher (D31). The leftover `botcli` crate remains until a later
+removal issue.
 
 ## D5. Kelpie ask, not tell, for triggered work
 
 Status: accepted
 
 Triggered Nostr work is an ask so pending, reminders, and amnesia work.
-The waiter is `botserver`. Successful out-of-band post completes with
-final, never cancel.
+The waiter is `botserver`. The occupant completes with `kelpie reply
+--final`, never cancel. The host then publishes and `inbox.ack`.
 
 ## D6. Renew is wall-clock
 
@@ -82,7 +83,7 @@ Inbound: the event MUST `p`-tag the operator pubkey and the body MUST
 have `bot:` as the first token after an optional leading mention.
 Example: `@daniel bot: hello`.
 
-Outbound: `botcli` MUST prefix the published body with `[bot]:`.
+Outbound: the host MUST prefix the published body with `[bot]:`.
 Occupants MUST NOT stamp it themselves. Own `[bot]:` posts MUST NOT
 trigger a new turn (`ignore_self`).
 
@@ -96,8 +97,9 @@ NIP-10 reply targets inside that session, not separate occupants. DMs
 are channels with their own UUID.
 
 Session name is `<botid>-<channel-slug>` (slug from channel display +
-stable id as needed to stay unique and ≤32 chars). Reply-to event id
-travels on the Turn for `botcli`, not in the session name.
+stable id as needed to stay unique and ≤32 chars). The triggering
+EventId travels on the Turn as outbound `--reply-to`, not in the
+session name.
 
 ## D11. The operator may trigger their own bot
 
@@ -118,8 +120,10 @@ channel is another session and MUST NOT wait on the first.
 
 Status: accepted
 
-`@daniel bot:` inside a thread still addresses `bot-<channel>`. The
-thread id is `botcli --reply-to` on that Turn. No extra occupant.
+`@daniel bot:` inside a thread still addresses `bot-<channel>`.
+Outbound `--reply-to` is the triggering EventId (D31). Keep the
+trigger's existing parent separately when snapshots need thread-root
+context. No extra occupant.
 
 ## D14. Edits collapse to one reply that matches the latest text
 
@@ -128,11 +132,11 @@ Status: accepted
 User-visible: at most one `[bot]:` for that triggering event, and it
 answers the **latest** body.
 
-Turn transition, if `botcli` has not published: `kelpie cancel` the
+Turn transition, if the host has not published: `kelpie cancel` the
 open ask (abandoned: the question changed), then open a **new** Turn /
-ask on the same `EventId` with the new body. `botcli` MUST NOT publish
-if its ask is already cancelled (so a late occupant cannot post the
-stale text).
+ask on the same `EventId` with the new body. The host MUST NOT publish
+if that ask is already cancelled (I10; a late occupant final cannot
+post the stale text).
 
 If a `[bot]:` already landed, later edits of the trigger are ignored
 unless a new `@daniel bot:` arrives.
@@ -158,7 +162,8 @@ Reactions, huddles, canvas, kind:0, and file-only events without a
 Status: accepted
 
 Closes Q5. No `[bot]: working…` protocol. The occupant may take time;
-people see one stamped reply when `botcli` runs.
+people see one stamped reply when the host publishes after occupant
+final. Progress replies ACK and MUST NOT publish (D33).
 
 ## D18. Silent subscriber
 
@@ -207,12 +212,11 @@ from the baseline, it MUST edit the issue body (scope, acceptance,
 deps) and the baseline SHA. A comment alone is not enough.
 ## D22. botcli is send, stdin body, JSON receipt
 
-Status: accepted
+Status: retracted
 
-`botcli` publishes to Nostr as the operator. It is not Kelpie. The
-command is `send`. Body is `--stdin` or `--file` only. Default stdout
-is a JSON receipt. Closing the Kelpie ask after a successful post is
-an implementation side effect, not the occupant-facing verb.
+Retracted as the occupant publish path. Occupants MUST NOT use `botcli`
+to post. The leftover crate may still have this CLI shape until a later
+removal issue. Host publish is D31.
 
 ## D23. Live tests use the throwaway local relay
 
@@ -285,37 +289,38 @@ writes one file per channel session at
 that channel UUID only, in the window `[now - 7 days, now + 900s]` (the
 upper slack is Buzz's accepted clock drift from D24). Corpus
 `startup.md` points at `.botserver/places/<your public Kelpie name>.md`.
-Occupant start and each new Turn refresh that file. After start, the
-host tries to arm `kelpie renew --every 45m --on-timeout abort` on the
-occupant's exact incarnation. Prepare writes `progress.md`. Resume reads
-`startup.md` and the snapshot. A Kelpie failure leaving `renew_id` unset
-does not block the ask; the next turn retries the arm. D19's MUST is the
-file contents, not occupant filesystem isolation: occupants share the
-corpus cwd (D7). Token-count renew remains later (Q6).
+Occupant start and each new Turn refresh that file. The occupant
+self-renews (`kelpie renew --every 45m --on-timeout abort` on its own
+incarnation). The host MUST NOT arm occupant renew with `--sender-id`
+of waiter `botserver` (D32). Prepare writes `progress.md`. Resume reads
+`startup.md` and the snapshot. D19's MUST is the file contents, not
+occupant filesystem isolation: occupants share the corpus cwd (D7).
+Token-count renew remains later (Q6).
 
 ## D28. Publish reservation is a claim, not a TurnState
 
 Status: accepted
 
-`botcli` and the host share one SQLite claim on an `open` turn. `botcli`
-MUST set the claim before relay publish. Host edit/delete cancel MUST
-UPDATE only `queued` rows or `open` rows whose claim is clear. A claimed
-turn is treated as already landing: later edits and deletes of that
-EventId are ignored (D14 after publish). A failed publish MUST clear the
-claim so retry can proceed. Do not add a `publishing` TurnState.
+The host claims an `open` turn before relay publish. Host edit/delete
+cancel MUST UPDATE only `queued` rows or `open` rows whose claim is
+clear. A claimed turn is treated as already landing: later edits and
+deletes of that EventId are ignored (D14 after publish). A failed
+publish MUST clear the claim so retry can proceed. Do not add a
+`publishing` TurnState. Crash-safe outbox (same event id on retry) is
+a later issue.
 
 ## D29. envchain wraps the process; binaries only read env
 
 Status: accepted
 
 `envchain NAMESPACE CMD` injects secrets into CMD's environment.
-`botcli` and `botserver` MUST read `BUZZ_PRIVATE_KEY` and
-`BUZZ_RELAY_URL` from the environment when present. They MUST NOT take
-`--envchain` and MUST NOT exec `envchain` themselves.
+The host MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` from the
+environment when present. Binaries MUST NOT take `--envchain` and MUST
+NOT exec `envchain` themselves. Occupants MUST NOT receive the nsec.
 
-Occupant calls look like `envchain botserver-proof botcli send --stdin
-…`, or an alias/wrapper on PATH that does that exec. The namespace name
-is not a secret. The nsec MUST NOT be standing pane-env.
+Wrap the host: `envchain botserver-proof botserver …` (live tests) or
+`envchain botserver botserver …` (operator). The namespace name is not
+a secret. The nsec MUST NOT be standing pane-env.
 
 Supersedes the `--envchain` flag shipped in #6.
 
@@ -323,9 +328,66 @@ Supersedes the `--envchain` flag shipped in #6.
 
 Status: accepted
 
-Personal host and occupant wraps use envchain namespace `botserver`
-with `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL`. That namespace is
-distinct from throwaway `botserver-proof` / `botserver-proof-peer`
-(D23 live-test relay). Do not point `BUZZ_RELAY_URL` at a production
-relay. Commands:
-`docs/operator-runbook.md`.
+Personal host wrap uses envchain namespace `botserver` with
+`BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL`. Occupants do not wrap a
+publish binary. That namespace is distinct from throwaway
+`botserver-proof` / `botserver-proof-peer` (D23 live-test relay). Do
+not point `BUZZ_RELAY_URL` at a production relay. The operator runbook
+still describes leftover `botcli` until a later issue.
+
+## D31. Host publishes; occupant only kelpie final
+
+Status: accepted
+
+Retracts D4/D22 as the occupant path. The occupant is an ordinary
+Kelpie peer of waiter `botserver`. It answers with `kelpie reply
+--final` and unstamped prose.
+
+The host is the only Nostr publisher. It stamps `[bot]:`, posts from
+sqlite coordinates, then `inbox.ack`. Occupants never get the operator
+nsec.
+
+Outbound `--reply-to` is the triggering EventId, including the first
+call. Keep the trigger's existing parent separately when snapshots need
+thread-root context.
+
+The host MUST `--mention` the indexed event's effective author (not the
+raw relay signer, not an arbitrary `p` tag), including operator-authored
+triggers. `ignore_self` still blocks retrigger.
+
+I10 is a host MUST: a late occupant final on a cancelled ask MUST NOT
+publish.
+
+Shipping README, operator-runbook, `docs/testing.md`,
+`corpus/example-bot`, and the D23 live-test proof harness still describe
+leftover `botcli`. This revision does not rewrite them: the shipping
+publish path is still occupant-side `botcli`, and flipping occupant
+recipes would break D23 live-test proofs before a later host-publish
+issue lands.
+
+## D32. Occupant self-renews
+
+Status: accepted
+
+Amends D27. Snapshot files stay. The occupant arms its own wall-clock
+renew. The host MUST NOT arm occupant renew with `--sender-id` of
+waiter `botserver`, so this inbox only sees channel asks the host
+created. Host runtime at this SHA still arms that way; a later issue
+removes it. `renew_id` remains until then.
+
+## D33. Inbox ACK after the host decides
+
+Status: accepted
+
+Keep the claimed inbox connection and the reply body. ACK only after
+the host decides. Do not ACK in the drain thread before the body is
+durable.
+
+Classify by `reply_to` in the host's Turn ids:
+
+- Empty or whitespace-only final: do not ACK if a later valid final
+  should still be allowed.
+- Progress: ACK, do not publish.
+- Cancelled turn: ACK, do not publish.
+- Already posted: ACK.
+- Unknown `reply_to`: do not publish.
