@@ -3,7 +3,9 @@
 use std::fmt;
 use std::time::Duration;
 
-use botserver_domain::{EventId, TriggerMatch, INBOUND_TRIGGER};
+use botserver_domain::{
+    place_display as usable_place_display, EventId, TriggerMatch, INBOUND_TRIGGER,
+};
 use futures::Stream;
 use nostr_sdk::prelude::{
     Client, ClientNotification, Event, Filter, Kind, PublicKey, SingleLetterTag, SubscriptionId,
@@ -17,6 +19,8 @@ const STREAM_MESSAGE_V2_KIND: u16 = 40_002;
 const MESSAGE_EDIT_KIND: u16 = 40_003;
 const NIP09_DELETE_KIND: u16 = 5;
 const BUZZ_DELETE_KIND: u16 = 9_005;
+const GROUP_METADATA_KIND: u16 = 39_000;
+const PROFILE_KIND: u16 = 0;
 
 /// Relay event emitted to the per-bot actor layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,6 +490,47 @@ impl RelaySubscriber {
             .await
     }
 
+    /// Resolve a readable place label from Buzz group metadata.
+    ///
+    /// Kind 39000 supplies the channel `name`. A generic 1-1 `DM` title
+    /// uses the other participant's kind-0 profile display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an SDK error when the fetch cannot complete.
+    pub async fn place_display(
+        &self,
+        operator_pubkey: &str,
+        channel_id: &str,
+    ) -> Result<String, RelaySubscribeError> {
+        let events = self
+            .fetch_filtered(Some(place_metadata_filter(channel_id)))
+            .await?;
+        let Some(event) = newest_event(&events) else {
+            return Ok(String::new());
+        };
+        let tags = event_tags(event);
+        let metadata = parse_place_metadata(&tags);
+        let peer = other_participant(operator_pubkey, &metadata.participants);
+        let peer_display = if wants_peer_display(&metadata.name) {
+            match peer {
+                Some(pubkey) => self.profile_display(pubkey).await?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok(usable_place_display(
+            &metadata.name,
+            peer_display.as_deref(),
+        ))
+    }
+
+    async fn profile_display(&self, pubkey: &str) -> Result<Option<String>, RelaySubscribeError> {
+        let events = self.fetch_filtered(profile_filter(pubkey)).await?;
+        Ok(newest_event(&events).and_then(|event| parse_profile_display(&event.content)))
+    }
+
     async fn fetch_filtered(
         &self,
         filter: Option<Filter>,
@@ -628,6 +673,85 @@ fn mutation_filter(active_event_ids: &[EventId], since: Timestamp) -> Option<Fil
             )
             .since(since),
     )
+}
+
+fn place_metadata_filter(channel_id: &str) -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(GROUP_METADATA_KIND))
+        .identifier(channel_id)
+        .limit(10)
+}
+
+fn profile_filter(pubkey: &str) -> Option<Filter> {
+    let author = PublicKey::parse(pubkey).ok()?;
+    Some(
+        Filter::new()
+            .kind(Kind::Custom(PROFILE_KIND))
+            .author(author)
+            .limit(10),
+    )
+}
+
+fn event_tags(event: &Event) -> Vec<Vec<String>> {
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .collect()
+}
+
+fn newest_event(events: &[Event]) -> Option<&Event> {
+    events.iter().max_by_key(|event| event.created_at.as_secs())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlaceMetadata {
+    name: String,
+    participants: Vec<String>,
+}
+
+fn parse_place_metadata(tags: &[Vec<String>]) -> PlaceMetadata {
+    PlaceMetadata {
+        name: tag_value(tags, "name").unwrap_or("").to_owned(),
+        participants: tag_values(tags, "p")
+            .filter(|value| is_pubkey(value))
+            .map(str::to_ascii_lowercase)
+            .collect(),
+    }
+}
+
+fn wants_peer_display(channel_name: &str) -> bool {
+    channel_name.trim().is_empty() || botserver_domain::is_generic_dm_title(channel_name)
+}
+
+fn other_participant<'a>(operator_pubkey: &str, participants: &'a [String]) -> Option<&'a str> {
+    let mut other = None;
+    for participant in participants {
+        if participant.eq_ignore_ascii_case(operator_pubkey) {
+            continue;
+        }
+        match other {
+            None => other = Some(participant.as_str()),
+            Some(existing) if existing.eq_ignore_ascii_case(participant) => {}
+            Some(_) => return None,
+        }
+    }
+    other
+}
+
+fn parse_profile_display(content: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(content).ok()?;
+    for key in ["display_name", "displayName", "name"] {
+        if let Some(name) = value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return Some(name.to_owned());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1284,6 +1408,68 @@ mod tests {
         assert_eq!(mutation_json["#e"], serde_json::json!(["b".repeat(64)]));
         assert_eq!(mutation_json["since"], 42);
         assert!(mutation_filter(&[], since).is_none());
+
+        let metadata_json = serde_json::to_value(place_metadata_filter(
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+        ))
+        .unwrap();
+        assert_eq!(metadata_json["kinds"], serde_json::json!([39_000]));
+        assert_eq!(
+            metadata_json["#d"],
+            serde_json::json!(["ab12cd34-5678-90ab-cdef-0123456789ab"])
+        );
+        assert_eq!(metadata_json["limit"], 10);
+    }
+
+    #[test]
+    fn place_metadata_uses_stream_name_and_dm_peer() {
+        let operator = "a".repeat(64);
+        let peer = "b".repeat(64);
+        let stream = parse_place_metadata(&[
+            vec![
+                "d".to_owned(),
+                "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
+            ],
+            vec!["name".to_owned(), "#eng".to_owned()],
+            vec!["t".to_owned(), "stream".to_owned()],
+        ]);
+        assert_eq!(stream.name, "#eng");
+        assert!(!wants_peer_display(&stream.name));
+        assert_eq!(usable_place_display(&stream.name, None), "#eng");
+
+        let dm = parse_place_metadata(&[
+            vec![
+                "d".to_owned(),
+                "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
+            ],
+            vec!["name".to_owned(), "DM".to_owned()],
+            vec!["hidden".to_owned()],
+            vec!["t".to_owned(), "dm".to_owned()],
+            vec!["p".to_owned(), operator.clone()],
+            vec!["p".to_owned(), peer.clone()],
+        ]);
+        assert!(wants_peer_display(&dm.name));
+        assert_eq!(
+            other_participant(&operator, &dm.participants),
+            Some(peer.as_str())
+        );
+        let duplicated = [peer.clone(), peer.clone()];
+        assert_eq!(
+            other_participant(&operator, &duplicated),
+            Some(peer.as_str())
+        );
+        assert_eq!(
+            usable_place_display(&dm.name, Some("Sebastian")),
+            "Sebastian"
+        );
+        assert_eq!(
+            parse_profile_display(r#"{"display_name":"Sebastian","name":"seb"}"#).as_deref(),
+            Some("Sebastian")
+        );
+        assert_eq!(
+            parse_profile_display(r#"{"name":"seb"}"#).as_deref(),
+            Some("seb")
+        );
     }
 
     fn indexed_target(event_id: &EventId, author: &Keys) -> IndexedRelayEvent {

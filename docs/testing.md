@@ -50,7 +50,19 @@ with leftover `botcli`. Occupant steps below match the current path
 
 ## Live local relay
 
-Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, and 34 require it.
+Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, and 41 require it.
+
+Issue 41 names new occupants from Buzz place display. Create a stream
+with `--name eng`, trigger it, then:
+
+```bash
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT session_name FROM sessions;"
+```
+
+The name MUST be `bot-eng`, not a UUID slug. A 1-1 DM whose kind-39000
+title is `DM` MUST use the peer's kind-0 `display_name` or `name`
+(`bot-sebastian`). Existing `session_name` rows stay as stored.
 
 ```bash
 ./tools/local-relay up

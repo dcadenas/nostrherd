@@ -170,6 +170,36 @@ impl SessionName {
     }
 }
 
+/// True when a Buzz 1-1 DM title is not a human name.
+#[must_use]
+pub fn is_generic_dm_title(display: &str) -> bool {
+    display.trim().eq_ignore_ascii_case("dm")
+}
+
+/// Choose the occupant place label from channel metadata.
+///
+/// Stream titles win. A generic `DM` title uses the peer display instead.
+///
+/// # Examples
+///
+/// ```
+/// use botserver_domain::place_display;
+///
+/// assert_eq!(place_display("#eng", None), "#eng");
+/// assert_eq!(place_display("DM", Some("Sebastian")), "Sebastian");
+/// ```
+#[must_use]
+pub fn place_display(channel_display: &str, peer_display: Option<&str>) -> String {
+    let channel = channel_display.trim();
+    if !channel.is_empty() && !is_generic_dm_title(channel) {
+        return channel.to_owned();
+    }
+    if let Some(peer) = peer_display.map(str::trim).filter(|peer| !peer.is_empty()) {
+        return peer.to_owned();
+    }
+    channel.to_owned()
+}
+
 fn slugify(display: &str) -> String {
     let mut slug = String::new();
     let mut separator_pending = false;
@@ -546,6 +576,29 @@ mod tests {
         assert_eq!(first_name.as_str(), "a-b-c");
         assert_ne!(first_name.as_str(), second_name.as_str());
         assert!(second_name.as_str().starts_with("a-b-c-"));
+    }
+
+    #[test]
+    fn place_display_keeps_a_usable_stream_title() {
+        assert_eq!(place_display("#eng", Some("Sebastian")), "#eng");
+        assert!(!is_generic_dm_title("#eng"));
+    }
+
+    #[test]
+    fn place_display_uses_peer_when_the_channel_title_is_generic_dm() {
+        assert!(is_generic_dm_title("DM"));
+        assert!(is_generic_dm_title(" dm "));
+        assert_eq!(place_display("DM", Some("Sebastian")), "Sebastian");
+        assert_eq!(place_display("DM", None), "DM");
+        let bot = BotId::new("bot").expect("bot");
+        let name = SessionName::from_bot_and_channel(
+            &bot,
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+            &place_display("DM", Some("Sebastian")),
+            |_| false,
+        )
+        .expect("name");
+        assert_eq!(name.as_str(), "bot-sebastian");
     }
 
     #[test]
