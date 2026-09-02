@@ -118,9 +118,10 @@ an accepted send uses that same outbound event id (D28).
 
 The host MUST add a NIP-25 kind-7 `⏳` on the triggering EventId when
 a turn becomes queued or open, and MUST remove it (NIP-09 kind 5 of
-that kind-7) when the turn is posted, cancelled, or failed (D35).
-Occupants MUST NOT publish a reaction. A failed add or remove MUST
-NOT fail the turn.
+that kind-7) when work on that EventId ends: posted, failed, or a
+cancel that does not re-queue the same EventId (D35). An edit that
+replaces the turn keeps the marker up. Occupants MUST NOT publish a
+reaction. A failed add or remove MUST NOT fail the turn.
 
 ## Inbox
 
@@ -185,8 +186,8 @@ subset.
     After it posted: leave `[bot]:` up. A late occupant final on a
     cancelled ask MUST NOT publish (I10, host).
 11. **Long work.** One stamped reply when done. No working ping in v1.
-    The host marks the trigger with `⏳` while the turn is queued or
-    open, and removes it when the turn ends (D35).
+    The host marks the trigger with `⏳` while work on that EventId is
+    queued or open, and removes it when that work ends (D35).
 12. **Desktop.** Buzz desktop is still Daniel. The host does not mark
     him typing or rewrite his presence.
 

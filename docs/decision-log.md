@@ -420,9 +420,11 @@ Status: accepted
 
 The host adds a NIP-25 kind-7 `⏳` on the triggering EventId when a
 turn becomes queued or open, and removes it with NIP-09 kind 5 when
-the turn is posted, cancelled, or failed (`buzz reactions add|remove
---event <id> --emoji ⏳`). Occupants never publish a reaction. This is
-not a second `[bot]:` (D17) and not presence or typing (D18).
+work on that EventId ends: posted, failed, or a cancel that does not
+re-queue the same EventId (`buzz reactions add|remove --event <id>
+--emoji ⏳`). An edit that replaces the turn keeps the marker up.
+Occupants never publish a reaction. This is not a second `[bot]:`
+(D17) and not presence or typing (D18).
 
 The marker is visually distinct from Buzz ACP `👀` / `💬`. Failures are
 best-effort: a failed add or remove MUST NOT fail the turn. A stale
