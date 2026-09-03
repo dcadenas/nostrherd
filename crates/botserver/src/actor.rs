@@ -1077,6 +1077,8 @@ mod tests {
     use rusqlite::Connection;
     use serde_json::Value;
 
+    use nostr_sdk::prelude::FinalizeEvent as _;
+
     use super::*;
     use crate::sqlite::SqliteRepository;
     use crate::{occupant_bootstrap, CommandOutput, CommandRunner, IndexedRelayEvent, WAITER_NAME};
@@ -2601,11 +2603,27 @@ mod tests {
     impl OutboundPublisher for FakeOutbound {
         type Error = crate::outbox::PublishError;
 
-        fn publish(&self, attempt: &crate::outbox::OutboundAttempt) -> Result<String, Self::Error> {
-            if let Some(event_id) = &attempt.outbound_event_id {
-                return Ok(event_id.clone());
-            }
-            Ok(self.event_id.clone())
+        fn prepare(
+            &self,
+            attempt: &crate::outbox::OutboundAttempt,
+        ) -> Result<crate::outbox::PreparedOutbound, Self::Error> {
+            let created_at = attempt.prepared_created_at.unwrap_or(1_700_000_000);
+            let signed =
+                nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(9), "")
+                    .finalize(&nostr_sdk::prelude::Keys::generate())
+                    .expect("dummy event");
+            Ok(crate::outbox::PreparedOutbound::from_parts(
+                signed,
+                self.event_id.clone(),
+                created_at,
+            ))
+        }
+
+        fn publish(
+            &self,
+            prepared: &crate::outbox::PreparedOutbound,
+        ) -> Result<String, Self::Error> {
+            Ok(prepared.event_id().to_owned())
         }
 
         fn retryable(error: &Self::Error) -> bool {

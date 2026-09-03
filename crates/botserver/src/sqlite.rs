@@ -69,6 +69,43 @@ fn add_column_if_missing(connection: &Connection, sql: &str) -> rusqlite::Result
     Ok(())
 }
 
+/// Column migrations and the nullable-reply rebuild, in order.
+///
+/// The prepared-id columns are added after the rebuild: a pre-#54 table
+/// is recreated without them and gains them here (D43).
+fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE turns ADD COLUMN publish_claimed INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE outbound_attempts ADD COLUMN dispatched INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE sessions ADD COLUMN ask_context_event_id TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE sessions ADD COLUMN ask_context_created_at INTEGER",
+    )?;
+    migrate_outbound_reply_to_nullable(connection)?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE outbound_attempts ADD COLUMN thread_root_event_id TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE outbound_attempts ADD COLUMN prepared_event_id TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE outbound_attempts ADD COLUMN prepared_created_at INTEGER",
+    )?;
+    Ok(())
+}
+
 /// SQLite-backed host repository.
 #[derive(Debug)]
 pub struct SqliteRepository {
@@ -176,30 +213,21 @@ impl SqliteRepository {
                    reply_to_event_id TEXT CHECK(
                        reply_to_event_id IS NULL OR length(reply_to_event_id) = 64
                    ),
+                   thread_root_event_id TEXT CHECK(
+                       thread_root_event_id IS NULL OR length(thread_root_event_id) = 64
+                   ),
                    mention TEXT NOT NULL,
                    outbound_event_id TEXT CHECK(
                        outbound_event_id IS NULL OR length(outbound_event_id) = 64
                    ),
+                   prepared_event_id TEXT CHECK(
+                       prepared_event_id IS NULL OR length(prepared_event_id) = 64
+                   ),
+                   prepared_created_at INTEGER,
                    dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1))
                ) STRICT;",
         )?;
-        add_column_if_missing(
-            &connection,
-            "ALTER TABLE turns ADD COLUMN publish_claimed INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(
-            &connection,
-            "ALTER TABLE outbound_attempts ADD COLUMN dispatched INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(
-            &connection,
-            "ALTER TABLE sessions ADD COLUMN ask_context_event_id TEXT",
-        )?;
-        add_column_if_missing(
-            &connection,
-            "ALTER TABLE sessions ADD COLUMN ask_context_created_at INTEGER",
-        )?;
-        migrate_outbound_reply_to_nullable(&connection)?;
+        run_column_migrations(&connection)?;
         Ok(Self { connection })
     }
 
@@ -776,17 +804,30 @@ impl HostRepository for SqliteRepository {
     fn save_outbound_attempt(&mut self, attempt: &OutboundAttempt) -> Result<(), Self::Error> {
         self.connection.execute(
             "INSERT INTO outbound_attempts(
-                 ask_id, body, channel_id, reply_to_event_id, mention,
-                 outbound_event_id, dispatched
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ask_id, body, channel_id, reply_to_event_id, thread_root_event_id,
+                 mention, outbound_event_id, prepared_event_id, prepared_created_at,
+                 dispatched
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(ask_id) DO UPDATE SET
                  body = excluded.body,
                  channel_id = excluded.channel_id,
                  reply_to_event_id = excluded.reply_to_event_id,
+                 thread_root_event_id = COALESCE(
+                     outbound_attempts.thread_root_event_id,
+                     excluded.thread_root_event_id
+                 ),
                  mention = excluded.mention,
                  outbound_event_id = COALESCE(
                      outbound_attempts.outbound_event_id,
                      excluded.outbound_event_id
+                 ),
+                 prepared_event_id = COALESCE(
+                     outbound_attempts.prepared_event_id,
+                     excluded.prepared_event_id
+                 ),
+                 prepared_created_at = COALESCE(
+                     outbound_attempts.prepared_created_at,
+                     excluded.prepared_created_at
                  ),
                  dispatched = excluded.dispatched",
             params![
@@ -794,8 +835,11 @@ impl HostRepository for SqliteRepository {
                 attempt.body,
                 attempt.channel_id,
                 attempt.reply_to_event_id.as_ref().map(EventId::as_str),
+                attempt.thread_root_event_id.as_ref().map(EventId::as_str),
                 attempt.mention,
                 attempt.outbound_event_id,
+                attempt.prepared_event_id,
+                attempt.prepared_created_at,
                 i64::from(attempt.dispatched)
             ],
         )?;
@@ -805,13 +849,15 @@ impl HostRepository for SqliteRepository {
     fn outbound_attempt(&self, ask_id: &str) -> Result<Option<OutboundAttempt>, Self::Error> {
         self.connection
             .query_row(
-                "SELECT ask_id, body, channel_id, reply_to_event_id, mention,
-                        outbound_event_id, dispatched
+                "SELECT ask_id, body, channel_id, reply_to_event_id, thread_root_event_id,
+                        mention, outbound_event_id, prepared_event_id, prepared_created_at,
+                        dispatched
                  FROM outbound_attempts WHERE ask_id = ?1",
                 [ask_id],
                 |row| {
                     let reply_to: Option<String> = row.get(3)?;
-                    let dispatched: i64 = row.get(6)?;
+                    let thread_root: Option<String> = row.get(4)?;
+                    let dispatched: i64 = row.get(9)?;
                     Ok(OutboundAttempt {
                         ask_id: row.get(0)?,
                         body: row.get(1)?,
@@ -820,8 +866,14 @@ impl HostRepository for SqliteRepository {
                             .as_deref()
                             .map(|value| parse_event_id(value, 3))
                             .transpose()?,
-                        mention: row.get(4)?,
-                        outbound_event_id: row.get(5)?,
+                        thread_root_event_id: thread_root
+                            .as_deref()
+                            .map(|value| parse_event_id(value, 4))
+                            .transpose()?,
+                        mention: row.get(5)?,
+                        outbound_event_id: row.get(6)?,
+                        prepared_event_id: row.get(7)?,
+                        prepared_created_at: row.get(8)?,
                         dispatched: dispatched != 0,
                     })
                 },

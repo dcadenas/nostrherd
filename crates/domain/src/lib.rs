@@ -2,6 +2,8 @@
 //!
 //! No I/O. SQLite, Kelpie, Herdr, and the relay live in adapters.
 
+pub mod buzz;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 
