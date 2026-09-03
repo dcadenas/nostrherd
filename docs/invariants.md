@@ -18,6 +18,7 @@ this file and SPEC disagree.
 | I11 | Binaries MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` when set, and MUST NOT take `--envchain` | `operator_env_reads_buzz_private_key_and_relay_url`, `runtime_requires_operator_key_from_env`, `runtime_requires_relay_url_from_env`, `botserver_parser_rejects_envchain` |
 | I12 | SQLite MUST NOT store nsecs | `sqlite_does_not_persist_an_nsec`, `sqlite_schema_has_no_nsec_columns` |
 | I13 | Host MUST add `⏳` on queued/open and remove it when work on that EventId ends; an edit that re-queues the same EventId keeps the marker; occupants MUST NOT react | `trigger_adds_in_flight_reaction`, `queued_trigger_adds_its_own_in_flight_reaction`, `delete_removes_in_flight_reaction`, `occupant_final_removes_in_flight_reaction`, `late_final_on_edited_trigger_keeps_in_flight_reaction`, `posted_turn_removes_in_flight_reaction`, `failed_turn_removes_in_flight_reaction`, `progress_does_not_remove_in_flight_reaction` |
+| I14 | Host stamp is `[{bot-id}]:`; occupants MUST NOT stamp; own stamped posts MUST NOT retrigger | `stamp_outbound_prefixes_once`, `bot_uses_id_as_inbound_trigger_and_rejects_empty_kind`, `pr_bot_final_publishes_pr_stamp_once`, `final_with_text_publishes_then_acks`, `stamped_self_posts_do_not_emit_triggers` |
 
 SPEC user-visible flows are the product matrix in `docs/testing.md`.
 

@@ -48,13 +48,13 @@ Live columns are issues 18–20. Occupant start/ask from the running host
 proof. Issue 18 is the live proof of flows 1–2: silence until a trigger,
 then a `[bot]:` body. Issue 19 is the live proof of flows 3–5 and 7–8.
 Issue 34 is the live E2E that the occupant only `kelpie reply --final`
-and the host stamps `[bot]:` (D31). Issues 18–20 and 27 were live-proved
+and the host stamps `[{id}]:` (D31, D37). Issues 18–20 and 27 were live-proved
 with leftover `botcli`. Occupant steps below match the current path
 (`kelpie reply --final`); do not invoke a send crate.
 
 ## Live local relay
 
-Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, and 43 require it.
+Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, 43, and 48 require it.
 
 Issue 41 names new occupants from Buzz place display. Create a stream
 with `--name eng`, trigger it, then:
@@ -1006,7 +1006,60 @@ wait "$HOST_PID" 2>/dev/null || true
 ```
 
 Expect two session rows (`bot` and `pr`). Occupants still MUST NOT get
-the nsec. Outbound stamp stays `[bot]:`.
+the nsec. Outbound stamp is `[{id}]:` (issue 48).
+
+### Per-bot outbound stamp (issue 48)
+
+Same two-bot channel as issue 43. Occupant finals MUST publish
+`[bot]: …` for `bot:` and `[pr]: …` for `pr:`. Own stamped posts MUST
+NOT open a turn. Unit proof: `stamp_outbound_prefixes_once`,
+`pr_bot_final_publishes_pr_stamp_once`,
+`stamped_self_posts_do_not_emit_triggers`.
+
+```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is48
+mkdir -p "$PROOF/bot" "$PROOF/pr"
+cp -a "$ROOT/corpus/example-bot/." "$PROOF/bot/"
+cp -a "$ROOT/corpus/example-bot/." "$PROOF/pr/"
+./tools/local-relay up
+cargo build -p botserver
+
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$PROOF/bot"
+kind = "opencode"
+[[bots]]
+id = "pr"
+corpus = "$PROOF/pr"
+kind = "opencode"
+EOF
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
+  --name botserver-is48 --type stream --visibility open > "$PROOF/channel.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
+  "$PROOF/channel.json" "$PROOF/channel.id"
+CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
+
+rm -f "$PROOF/host.sqlite"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
+  >"$PROOF/host.log" 2>&1 &
+HOST_PID=$!
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'pr: hello'
+# Wait for two open asks; kelpie reply --final unstamped from each occupant.
+# Expect channel bodies starting with [bot]: and [pr]:. A later [pr]:
+# line MUST NOT open another pr turn.
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
+```
 
 Wrap the host with envchain. Do not pass `--envchain` (D29):
 

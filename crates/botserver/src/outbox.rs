@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use botserver_domain::{stamp_outbound, EventId, TurnState};
+use botserver_domain::{outbound_prefix_for, stamp_outbound, EventId, TurnState};
 
 use crate::inbox::InboxDelivery;
 use crate::{HostRepository, IndexedRelayEvent, TurnRecord};
@@ -29,6 +29,7 @@ pub struct OutboundAttempt {
     pub mention: String,
     pub outbound_event_id: Option<String>,
     pub dispatched: bool,
+    pub outbound_prefix: String,
 }
 
 /// Failure while classifying or publishing an occupant final.
@@ -234,7 +235,7 @@ impl OutboundPublisher for BuzzPublisher {
             .stdin
             .take()
             .expect("piped stdin is available")
-            .write_all(stamp_outbound(&attempt.body).as_bytes());
+            .write_all(stamp_outbound(&attempt.body, &attempt.outbound_prefix).as_bytes());
         let output = child.wait_with_output().map_err(|error| {
             PublishError::AcceptedUnrecorded(format!("buzz wait failed after start: {error}"))
         })?;
@@ -470,7 +471,9 @@ where
             mention,
             outbound_event_id: None,
             dispatched: false,
+            outbound_prefix: outbound_prefix_for(&turn.bot_id),
         });
+    attempt.outbound_prefix = outbound_prefix_for(&turn.bot_id);
     if attempt.outbound_event_id.is_none() && !attempt.dispatched {
         if let Some(body) = body {
             body.clone_into(&mut attempt.body);
@@ -597,7 +600,10 @@ mod tests {
             if let Some(event_id) = &attempt.outbound_event_id {
                 return Ok(event_id.clone());
             }
-            self.calls.lock().expect("calls").push(attempt.body.clone());
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(stamp_outbound(&attempt.body, &attempt.outbound_prefix));
             if *self.fail.lock().expect("fail") {
                 return Err(PublishError::InvalidReceipt("rejected".to_owned()));
             }
@@ -653,16 +659,20 @@ mod tests {
     }
 
     fn open_repo() -> (SqliteRepository, FakePublisher) {
+        open_repo_for("bot")
+    }
+
+    fn open_repo_for(bot: &str) -> (SqliteRepository, FakePublisher) {
         let mut repository =
             SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
                 .expect("repository");
-        let bot_id = BotId::new("bot").expect("bot");
+        let bot_id = BotId::new(bot).expect("bot");
         let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
         repository
             .save_session(&SessionRecord {
                 bot_id: bot_id.clone(),
                 channel_id: channel_id.to_owned(),
-                session_name: "bot-foobar".to_owned(),
+                session_name: format!("{bot}-foobar"),
                 occupant_logical_id: Some("occupant-agent".to_owned()),
                 renew_id: None,
                 ask_context_event_id: None,
@@ -687,7 +697,7 @@ mod tests {
                     author_pubkey: "c".repeat(64),
                     created_at: 1,
                     kind: 9,
-                    content: "bot: hello".to_owned(),
+                    content: format!("{bot}: hello"),
                     tags_json: "[]".to_owned(),
                     channel_id: Some(channel_id.to_owned()),
                     target_event_id: None,
@@ -786,7 +796,7 @@ mod tests {
         assert_eq!(action, InboxAction::Ack);
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["hello".to_owned()]
+            &["[bot]: hello".to_owned()]
         );
         let turn = repository.turn_by_ask_id("ask-1").unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Posted);
@@ -797,6 +807,39 @@ mod tests {
         );
         assert_eq!(attempt.reply_to_event_id, event_id('a'));
         assert_eq!(attempt.mention, "c".repeat(64));
+        assert!(
+            !attempt.body.starts_with("[bot]:"),
+            "stored body stays unstamped"
+        );
+    }
+
+    #[test]
+    fn pr_bot_final_publishes_pr_stamp_once() {
+        let (mut repository, publisher) = open_repo_for("pr");
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("final", "ask-1", "hello"),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[pr]: hello".to_owned()]
+        );
+        let (mut repository, publisher) = open_repo_for("pr");
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("final", "ask-1", "  [pr]: already  "),
+        )
+        .expect("handle");
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[pr]: already".to_owned()]
+        );
     }
 
     #[test]
@@ -811,6 +854,7 @@ mod tests {
                 mention: "c".repeat(64),
                 outbound_event_id: Some("d".repeat(64)),
                 dispatched: true,
+                outbound_prefix: "[bot]:".to_owned(),
             })
             .unwrap();
         repository.claim_turn_for_publish("ask-1").unwrap();
@@ -841,6 +885,7 @@ mod tests {
                 mention: "c".repeat(64),
                 outbound_event_id: None,
                 dispatched: true,
+                outbound_prefix: "[bot]:".to_owned(),
             })
             .unwrap();
         repository.claim_turn_for_publish("ask-1").unwrap();
