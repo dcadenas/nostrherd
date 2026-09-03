@@ -1497,6 +1497,18 @@ pub trait HostRepository {
     /// Returns an adapter error when the session cannot be read.
     fn session_by_name(&self, session_name: &str) -> Result<Option<SessionRecord>, Self::Error>;
 
+    /// Find a session by its bound occupant logical id.
+    ///
+    /// Unknown or ambiguous ids return `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the session cannot be read.
+    fn session_by_occupant_logical_id(
+        &self,
+        occupant_logical_id: &str,
+    ) -> Result<Option<SessionRecord>, Self::Error>;
+
     /// Bind the oldest queued turn to a new ask.
     ///
     /// # Errors

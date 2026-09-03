@@ -452,6 +452,68 @@ impl TurnTransition {
     }
 }
 
+/// Channel body parsed from an occupant tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OccupantTell {
+    /// Unstamped prose to publish.
+    pub body: String,
+    /// Exact channel UUID or known slug. `None` is this session's channel.
+    pub to: Option<String>,
+}
+
+/// Parse a nested `<botserver>` routing tag from an occupant tell body.
+///
+/// No tag posts the whole body. A tag posts only its inner text. More than one
+/// tag, a malformed tag, or empty publishable text is `None`.
+///
+/// # Examples
+///
+/// ```
+/// use botserver_domain::parse_occupant_tell;
+///
+/// let parsed = parse_occupant_tell(
+///     "scratch\n<botserver to=\"eng\">\nqueue is clear\n</botserver>\n",
+/// )
+/// .expect("tag");
+/// assert_eq!(parsed.body, "queue is clear");
+/// assert_eq!(parsed.to.as_deref(), Some("eng"));
+/// ```
+#[must_use]
+pub fn parse_occupant_tell(raw: &str) -> Option<OccupantTell> {
+    const OPEN: &str = "<botserver";
+    const CLOSE: &str = "</botserver>";
+    let Some(open_at) = raw.find(OPEN) else {
+        let body = raw.trim();
+        return (!body.is_empty()).then(|| OccupantTell {
+            body: body.to_owned(),
+            to: None,
+        });
+    };
+    if raw[open_at + OPEN.len()..].contains(OPEN) {
+        return None;
+    }
+    let after_name = open_at + OPEN.len();
+    let relative_gt = raw[after_name..].find('>')?;
+    let attr = raw[after_name..after_name + relative_gt].trim();
+    let to = if attr.is_empty() {
+        None
+    } else {
+        let rest = attr.strip_prefix("to=\"")?;
+        let value = rest.strip_suffix('"')?;
+        (!value.is_empty()).then(|| value.to_owned())
+    };
+    let inner_at = after_name + relative_gt + 1;
+    let close_at = raw[inner_at..].find(CLOSE)? + inner_at;
+    if raw[close_at + CLOSE.len()..].contains(OPEN) {
+        return None;
+    }
+    let body = raw[inner_at..close_at].trim();
+    (!body.is_empty()).then(|| OccupantTell {
+        body: body.to_owned(),
+        to,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,5 +896,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn occupant_tell_without_tag_posts_the_whole_body() {
+        let parsed = parse_occupant_tell("  queue is clear  ").expect("body");
+        assert_eq!(parsed.body, "queue is clear");
+        assert_eq!(parsed.to, None);
+    }
+
+    #[test]
+    fn occupant_tell_tag_posts_inner_text_and_drops_scratch() {
+        let parsed = parse_occupant_tell(
+            "scratch the human should not see\n\n<botserver to=\"eng\">\nqueue is clear except divine-mobile#8013\n</botserver>\n",
+        )
+        .expect("tag");
+        assert_eq!(parsed.body, "queue is clear except divine-mobile#8013");
+        assert_eq!(parsed.to.as_deref(), Some("eng"));
+    }
+
+    #[test]
+    fn occupant_tell_tag_without_to_uses_this_session() {
+        let parsed = parse_occupant_tell("<botserver>\nping\n</botserver>").expect("tag");
+        assert_eq!(parsed.body, "ping");
+        assert_eq!(parsed.to, None);
+    }
+
+    #[test]
+    fn occupant_tell_rejects_empty_malformed_and_multiple_tags() {
+        assert!(parse_occupant_tell("").is_none());
+        assert!(parse_occupant_tell("   ").is_none());
+        assert!(parse_occupant_tell("<botserver to=\"eng\"></botserver>").is_none());
+        assert!(parse_occupant_tell("<botserver to=eng>x</botserver>").is_none());
+        assert!(parse_occupant_tell("<botserver to=\"eng\">x").is_none());
+        assert!(
+            parse_occupant_tell("<botserver to=\"eng\">a</botserver><botserver>b</botserver>")
+                .is_none()
+        );
     }
 }

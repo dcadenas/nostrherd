@@ -6,13 +6,15 @@ channel convention (`{bot-id}: …` in, `[{bot-id}]:` out; id `bot` →
 
 This is not an ACP child and not a Buzz managed-agent. The daemon watches
 the relay as your pubkey, wakes a corpus occupant per bot+channel, and
-publishes the occupant's `kelpie reply --final` as `[{bot-id}]:`.
+publishes occupant `kelpie reply --final` (trigger answers) and occupant
+`kelpie tell` (bot-initiated posts) as `[{bot-id}]:`.
 
 ## Binaries
 
 - `botserver` — host process (Kelpie waiter `botserver`) plus per-bot actors
 
-The occupant answers with `kelpie reply --final` and unstamped prose.
+The occupant answers a trigger with `kelpie reply --final` and unstamped
+prose, and MAY `kelpie tell botserver` for a bot-initiated post (D38).
 The host is the only Nostr publisher (D31). Occupants MUST NOT receive
 the operator nsec.
 

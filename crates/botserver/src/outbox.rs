@@ -5,10 +5,13 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use botserver_domain::{outbound_prefix_for, stamp_outbound, EventId, TurnState};
+use botserver_domain::{
+    outbound_prefix_for, parse_occupant_tell, stamp_outbound, BotId, EventId, OccupantTell,
+    TurnState,
+};
 
 use crate::inbox::InboxDelivery;
-use crate::{HostRepository, IndexedRelayEvent, TurnRecord};
+use crate::{HostRepository, IndexedRelayEvent, SessionRecord, TurnRecord};
 
 /// Whether the claimed inbox delivery may be acknowledged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +28,7 @@ pub struct OutboundAttempt {
     pub ask_id: String,
     pub body: String,
     pub channel_id: String,
-    pub reply_to_event_id: EventId,
+    pub reply_to_event_id: Option<EventId>,
     pub mention: String,
     pub outbound_event_id: Option<String>,
     pub dispatched: bool,
@@ -218,9 +221,10 @@ impl OutboundPublisher for BuzzPublisher {
             attempt.channel_id.clone(),
             "--content".to_owned(),
             "-".to_owned(),
-            "--reply-to".to_owned(),
-            attempt.reply_to_event_id.as_str().to_owned(),
         ];
+        if let Some(reply_to) = &attempt.reply_to_event_id {
+            arguments.extend(["--reply-to".to_owned(), reply_to.as_str().to_owned()]);
+        }
         if !attempt.mention.is_empty() {
             arguments.extend(["--mention".to_owned(), attempt.mention.clone()]);
         }
@@ -298,6 +302,9 @@ fn classify_buzz_failure(status: String, stderr: &str) -> PublishError {
 /// Classify one inbox delivery against a persisted turn.
 #[must_use]
 pub fn classify_delivery(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> InboxAction {
+    if delivery.kind() == "tell" {
+        return InboxAction::Ack;
+    }
     match decide(delivery, turn) {
         Decision::Hold => InboxAction::Hold,
         Decision::AckWithoutPublish | Decision::Publish { .. } => InboxAction::Ack,
@@ -337,6 +344,192 @@ fn decide(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> Decision {
             body: delivery.body().to_owned(),
         },
         TurnState::Queued => Decision::Hold,
+    }
+}
+
+fn handle_occupant_tell<R, P>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    delivery: &InboxDelivery,
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+{
+    let Some(session) = occupant_session(repository, delivery).map_err(OutboxError::Repository)?
+    else {
+        return Ok(InboxAction::Ack);
+    };
+    let Some(parsed) = parse_occupant_tell(delivery.body()) else {
+        notice(&format!(
+            "occupant tell {} from {} had no publishable body",
+            delivery.message_id(),
+            session.session_name
+        ));
+        return Ok(InboxAction::Ack);
+    };
+    let Some(destination) =
+        route_tell(repository, &session, &parsed).map_err(OutboxError::Repository)?
+    else {
+        notice(&format!(
+            "occupant tell {} from {} did not route",
+            delivery.message_id(),
+            session.session_name
+        ));
+        return Ok(InboxAction::Ack);
+    };
+    publish_initiated(
+        repository,
+        publisher,
+        notice,
+        delivery.message_id(),
+        &parsed.body,
+        &destination,
+        &session.bot_id,
+    )
+}
+
+fn occupant_session<R: HostRepository>(
+    repository: &R,
+    delivery: &InboxDelivery,
+) -> Result<Option<SessionRecord>, R::Error> {
+    let name = delivery.sender_public_name();
+    let id = delivery.sender_agent_id();
+    let by_name = name
+        .map(|value| repository.session_by_name(value))
+        .transpose()?
+        .flatten();
+    let by_id = id
+        .map(|value| repository.session_by_occupant_logical_id(value))
+        .transpose()?
+        .flatten();
+    Ok(match (name, id, by_name, by_id) {
+        (Some(_), Some(id), Some(named), Some(bound))
+            if named == bound && named.occupant_logical_id.as_deref() == Some(id) =>
+        {
+            Some(named)
+        }
+        (Some(_), None, Some(named), None) => Some(named),
+        (None, Some(_), None, Some(bound)) => Some(bound),
+        _ => None,
+    })
+}
+
+fn route_tell<R: HostRepository>(
+    repository: &R,
+    session: &SessionRecord,
+    parsed: &OccupantTell,
+) -> Result<Option<SessionRecord>, R::Error> {
+    let Some(to) = parsed.to.as_deref() else {
+        return Ok(Some(session.clone()));
+    };
+    let mut matches = Vec::new();
+    push_unique(&mut matches, repository.session(&session.bot_id, to)?);
+    push_unique(
+        &mut matches,
+        named_for_bot(repository, &session.bot_id, to)?,
+    );
+    let prefixed = format!("{}-{to}", session.bot_id.as_str());
+    if prefixed != to {
+        push_unique(
+            &mut matches,
+            named_for_bot(repository, &session.bot_id, &prefixed)?,
+        );
+    }
+    Ok((matches.len() == 1).then(|| matches.remove(0)))
+}
+
+fn named_for_bot<R: HostRepository>(
+    repository: &R,
+    bot_id: &BotId,
+    name: &str,
+) -> Result<Option<SessionRecord>, R::Error> {
+    Ok(repository
+        .session_by_name(name)?
+        .filter(|session| session.bot_id == *bot_id))
+}
+
+fn push_unique(matches: &mut Vec<SessionRecord>, session: Option<SessionRecord>) {
+    if let Some(session) = session {
+        if !matches
+            .iter()
+            .any(|existing| existing.channel_id == session.channel_id)
+        {
+            matches.push(session);
+        }
+    }
+}
+
+fn publish_initiated<R, P>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    message_id: &str,
+    body: &str,
+    destination: &SessionRecord,
+    bot_id: &BotId,
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+{
+    let mut attempt = repository
+        .outbound_attempt(message_id)
+        .map_err(OutboxError::Repository)?
+        .unwrap_or_else(|| OutboundAttempt {
+            ask_id: message_id.to_owned(),
+            body: body.to_owned(),
+            channel_id: destination.channel_id.clone(),
+            reply_to_event_id: None,
+            mention: String::new(),
+            outbound_event_id: None,
+            dispatched: false,
+        });
+    if attempt.outbound_event_id.is_none() && !attempt.dispatched {
+        body.clone_into(&mut attempt.body);
+        attempt.channel_id.clone_from(&destination.channel_id);
+        attempt.reply_to_event_id = None;
+        attempt.mention.clear();
+    }
+    repository
+        .save_outbound_attempt(&attempt)
+        .map_err(OutboxError::Repository)?;
+    if attempt.outbound_event_id.is_some() {
+        return Ok(InboxAction::Ack);
+    }
+    if attempt.dispatched {
+        notice(&format!(
+            "not retrying outbound for tell {message_id}; send already invoked"
+        ));
+        return Ok(InboxAction::Ack);
+    }
+    attempt.dispatched = true;
+    repository
+        .save_outbound_attempt(&attempt)
+        .map_err(OutboxError::Repository)?;
+    let mut to_publish = attempt.clone();
+    to_publish.body = stamp_outbound(&attempt.body, &outbound_prefix_for(bot_id));
+    match publisher.publish(&to_publish) {
+        Ok(event_id) => {
+            let _ = repository
+                .mark_outbound_accepted(message_id, &event_id)
+                .map_err(OutboxError::Repository)?;
+            Ok(InboxAction::Ack)
+        }
+        Err(error) if !P::retryable(&error) => {
+            notice(&format!(
+                "not retrying outbound for tell {message_id}: {error}"
+            ));
+            Ok(InboxAction::Ack)
+        }
+        Err(error) => {
+            attempt.dispatched = false;
+            repository
+                .save_outbound_attempt(&attempt)
+                .map_err(OutboxError::Repository)?;
+            Err(OutboxError::Publish(error))
+        }
     }
 }
 
@@ -383,6 +576,9 @@ where
     P: OutboundPublisher,
     I: InFlightReaction,
 {
+    if delivery.kind() == "tell" {
+        return handle_occupant_tell(repository, publisher, notice, delivery);
+    }
     let Some(ask_id) = delivery.reply_to() else {
         return Ok(InboxAction::Ack);
     };
@@ -466,7 +662,7 @@ where
             ask_id: ask_id.to_owned(),
             body: body.unwrap_or("").to_owned(),
             channel_id: turn.channel_id.clone(),
-            reply_to_event_id: turn.event_id.clone(),
+            reply_to_event_id: Some(turn.event_id.clone()),
             mention,
             outbound_event_id: None,
             dispatched: false,
@@ -476,7 +672,7 @@ where
             body.clone_into(&mut attempt.body);
         }
         attempt.channel_id.clone_from(&turn.channel_id);
-        attempt.reply_to_event_id.clone_from(&turn.event_id);
+        attempt.reply_to_event_id = Some(turn.event_id.clone());
     }
     repository
         .save_outbound_attempt(&attempt)
@@ -588,6 +784,7 @@ mod tests {
     #[derive(Debug)]
     struct FakePublisher {
         calls: Mutex<Vec<String>>,
+        reply_to: Mutex<Vec<Option<String>>>,
         event_id: String,
         fail: Mutex<bool>,
     }
@@ -600,6 +797,12 @@ mod tests {
                 return Ok(event_id.clone());
             }
             self.calls.lock().expect("calls").push(attempt.body.clone());
+            self.reply_to.lock().expect("reply_to").push(
+                attempt
+                    .reply_to_event_id
+                    .as_ref()
+                    .map(|event_id| event_id.as_str().to_owned()),
+            );
             if *self.fail.lock().expect("fail") {
                 return Err(PublishError::InvalidReceipt("rejected".to_owned()));
             }
@@ -703,6 +906,7 @@ mod tests {
             .unwrap();
         let publisher = FakePublisher {
             calls: Mutex::new(Vec::new()),
+            reply_to: Mutex::new(Vec::new()),
             event_id: "d".repeat(64),
             fail: Mutex::new(false),
         };
@@ -801,7 +1005,7 @@ mod tests {
             attempt.outbound_event_id.as_deref(),
             Some("d".repeat(64).as_str())
         );
-        assert_eq!(attempt.reply_to_event_id, event_id('a'));
+        assert_eq!(attempt.reply_to_event_id, Some(event_id('a')));
         assert_eq!(attempt.mention, "c".repeat(64));
         assert!(
             !attempt.body.starts_with("[bot]:"),
@@ -846,7 +1050,7 @@ mod tests {
                 ask_id: "ask-1".to_owned(),
                 body: "hello".to_owned(),
                 channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
-                reply_to_event_id: event_id('a'),
+                reply_to_event_id: Some(event_id('a')),
                 mention: "c".repeat(64),
                 outbound_event_id: Some("d".repeat(64)),
                 dispatched: true,
@@ -876,7 +1080,7 @@ mod tests {
                 ask_id: "ask-1".to_owned(),
                 body: "hello".to_owned(),
                 channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
-                reply_to_event_id: event_id('a'),
+                reply_to_event_id: Some(event_id('a')),
                 mention: "c".repeat(64),
                 outbound_event_id: None,
                 dispatched: true,
@@ -919,6 +1123,203 @@ mod tests {
         assert_eq!(
             repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
             TurnState::Open
+        );
+    }
+
+    fn occupant_tell(
+        message_id: &str,
+        body: &str,
+        sender_name: Option<&str>,
+        sender_id: Option<&str>,
+    ) -> InboxDelivery {
+        crate::inbox::parse_delivery(&serde_json::json!({
+            "method": "inbox.delivery",
+            "params": {
+                "message_id": message_id,
+                "kind": "tell",
+                "body": body,
+                "sender_public_name": sender_name,
+                "sender_agent_id": sender_id
+            }
+        }))
+        .expect("delivery")
+    }
+
+    #[test]
+    fn agreeing_tell_identity_posts() {
+        let (mut repository, publisher) = open_repo();
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell(
+                "tell-both",
+                "both fields",
+                Some("bot-foobar"),
+                Some("occupant-agent"),
+            ),
+        )
+        .expect("handle");
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[bot]: both fields".to_owned()]
+        );
+    }
+
+    #[test]
+    fn known_occupant_tell_posts_without_trigger_reply_to() {
+        let (mut repository, publisher) = open_repo();
+        let reactions = RecordingInFlightReaction::default();
+        let action = handle_delivery_with(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-1", "queue is clear", Some("bot-foobar"), None),
+            &reactions,
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[bot]: queue is clear".to_owned()]
+        );
+        assert_eq!(
+            publisher.reply_to.lock().expect("reply_to").as_slice(),
+            &[None]
+        );
+        assert!(reactions.adds.lock().expect("adds").is_empty());
+        assert!(reactions.removes.lock().expect("removes").is_empty());
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Open
+        );
+        let attempt = repository.outbound_attempt("tell-1").unwrap().unwrap();
+        assert!(attempt.reply_to_event_id.is_none());
+        assert!(attempt.mention.is_empty());
+    }
+
+    #[test]
+    fn occupant_tell_tag_routes_and_drops_scratch() {
+        let (mut repository, publisher) = open_repo();
+        let eng = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        repository
+            .save_session(&SessionRecord {
+                bot_id: BotId::new("bot").expect("bot"),
+                channel_id: eng.to_owned(),
+                session_name: "bot-eng".to_owned(),
+                occupant_logical_id: Some("eng-occupant".to_owned()),
+                renew_id: None,
+                ask_context_event_id: None,
+                ask_context_created_at: None,
+            })
+            .unwrap();
+        let body = "scratch the human should not see\n\n<botserver to=\"eng\">\nqueue is clear except divine-mobile#8013\n</botserver>\n";
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-2", body, Some("bot-foobar"), None),
+        )
+        .expect("handle");
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[bot]: queue is clear except divine-mobile#8013".to_owned()]
+        );
+        let attempt = repository.outbound_attempt("tell-2").unwrap().unwrap();
+        assert_eq!(attempt.channel_id, eng);
+        assert!(attempt.reply_to_event_id.is_none());
+    }
+
+    #[test]
+    fn unknown_tell_destination_does_not_post() {
+        let (mut repository, publisher) = open_repo();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell(
+                "tell-3",
+                "<botserver to=\"missing\">nope</botserver>",
+                Some("bot-foobar"),
+                None,
+            ),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Open
+        );
+    }
+
+    #[test]
+    fn unknown_named_sender_tell_does_not_post() {
+        let (mut repository, publisher) = open_repo();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-5", "hi", Some("stranger"), None),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Open
+        );
+    }
+
+    #[test]
+    fn disagreeing_tell_identity_does_not_post() {
+        let (mut repository, publisher) = open_repo();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-6", "hi", Some("bot-foobar"), Some("other-occupant")),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+    }
+
+    #[test]
+    fn known_occupant_unroutable_tell_notices() {
+        let (mut repository, publisher) = open_repo();
+        let mut notices = Vec::new();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut |notice| notices.push(notice.to_owned()),
+            &occupant_tell(
+                "tell-7",
+                "<botserver to=\"missing\">nope</botserver>",
+                Some("bot-foobar"),
+                None,
+            ),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("did not route"));
+    }
+
+    #[test]
+    fn occupant_logical_id_tell_posts_to_that_session() {
+        let (mut repository, publisher) = open_repo();
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-4", "from id", None, Some("occupant-agent")),
+        )
+        .expect("handle");
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[bot]: from id".to_owned()]
         );
     }
 
