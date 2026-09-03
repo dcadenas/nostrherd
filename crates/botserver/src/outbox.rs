@@ -380,21 +380,23 @@ impl InFlightReaction for BuzzPublisher {
     fn add(&self, trigger_event_id: &EventId) {
         let publisher = self.clone();
         let trigger = trigger_event_id.clone();
-        self.handle.spawn(async move {
-            if let Err(error) = publisher.add_reaction(&trigger).await {
-                eprintln!("operator notice: in-flight reaction add failed: {error}");
-            }
-        });
+        let handle = publisher.handle.clone();
+        if let Err(error) = tokio::task::block_in_place(move || {
+            handle.block_on(async move { publisher.add_reaction(&trigger).await })
+        }) {
+            eprintln!("operator notice: in-flight reaction add failed: {error}");
+        }
     }
 
     fn remove(&self, trigger_event_id: &EventId) {
         let publisher = self.clone();
         let trigger = trigger_event_id.clone();
-        self.handle.spawn(async move {
-            if let Err(error) = publisher.remove_reaction(&trigger).await {
-                eprintln!("operator notice: in-flight reaction remove failed: {error}");
-            }
-        });
+        let handle = publisher.handle.clone();
+        if let Err(error) = tokio::task::block_in_place(move || {
+            handle.block_on(async move { publisher.remove_reaction(&trigger).await })
+        }) {
+            eprintln!("operator notice: in-flight reaction remove failed: {error}");
+        }
     }
 }
 
@@ -612,7 +614,10 @@ where
             prepared_created_at: None,
             dispatched: false,
         });
-    if attempt.outbound_event_id.is_none() && !attempt.dispatched {
+    if attempt.outbound_event_id.is_none()
+        && attempt.prepared_event_id.is_none()
+        && !attempt.dispatched
+    {
         body.clone_into(&mut attempt.body);
         attempt.channel_id.clone_from(&destination.channel_id);
         attempt.reply_to_event_id = None;
@@ -852,7 +857,10 @@ where
             prepared_created_at: None,
             dispatched: false,
         });
-    if attempt.outbound_event_id.is_none() && !attempt.dispatched {
+    if attempt.outbound_event_id.is_none()
+        && attempt.prepared_event_id.is_none()
+        && !attempt.dispatched
+    {
         if let Some(body) = body {
             body.clone_into(&mut attempt.body);
         }
@@ -1237,6 +1245,37 @@ mod tests {
             attempt.body, "[bot]: hello",
             "the row records the stamped body the prepared id signed"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn buzz_publisher_reprepares_recorded_attempt_with_same_id() {
+        let keys = Keys::generate();
+        let publisher =
+            BuzzPublisher::new(Client::builder().build(), keys.clone(), "ws://127.0.0.1:1");
+        let mut attempt = OutboundAttempt {
+            ask_id: "ask-1".to_owned(),
+            body: "[bot]: hello".to_owned(),
+            channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
+            reply_to_event_id: Some(event_id('a')),
+            thread_root_event_id: None,
+            mention: keys.public_key().to_hex(),
+            outbound_event_id: None,
+            prepared_event_id: None,
+            prepared_created_at: None,
+            dispatched: false,
+        };
+
+        let first = publisher.prepare(&attempt).expect("first prepare");
+        attempt.prepared_event_id = Some(first.event_id().to_owned());
+        attempt.prepared_created_at = Some(first.created_at());
+        let rebuilt = publisher.prepare(&attempt).expect("reprepare");
+        assert_eq!(rebuilt.event_id(), first.event_id());
+
+        attempt.prepared_event_id = Some("f".repeat(64));
+        assert!(matches!(
+            publisher.prepare(&attempt),
+            Err(PublishError::Build(_))
+        ));
     }
 
     #[test]

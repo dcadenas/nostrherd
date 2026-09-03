@@ -137,7 +137,7 @@ pub fn reply_thread_root(
 ) -> Option<EventId> {
     let mut markers = (None, None);
     for tag in trigger_tags {
-        let [name, value, _, marker] = tag.as_slice() else {
+        let [name, value, _, marker, ..] = tag.as_slice() else {
             continue;
         };
         if name != "e" {
@@ -315,6 +315,17 @@ mod tests {
                 ],
             ]
         );
+    }
+
+    #[test]
+    fn extended_nip10_tags_still_resolve_the_thread_root() {
+        let trigger = event_id('a');
+        let root = event_id('b');
+        let tags = trigger_tags(&[
+            &["e", root.as_str(), "", "root", &"c".repeat(64)],
+            &["e", trigger.as_str(), "", "reply", &"d".repeat(64)],
+        ]);
+        assert_eq!(reply_thread_root(&trigger, &tags), Some(root));
     }
 
     #[test]
