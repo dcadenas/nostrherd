@@ -333,14 +333,17 @@ cancel MUST UPDATE only `queued` rows or `open` rows whose claim is
 clear. A claimed turn is treated as already landing: later edits and
 deletes of that EventId are ignored (D14 after publish). A failed
 publish MUST clear the claim so retry can proceed. Do not add a
-`publishing` TurnState. The host records `dispatched` before calling send. After relay accept it
-stores the outbound event id. A crash after dispatch without an id does
-not call send again. `buzz messages send` has no prebuilt-id flag.
-Retry consults buzz stderr JSON `retryable`. `retryable: false`
-(including `delivery_unknown`) and an unparseable failure do not send
-again. `retryable: true` may send again: that follows buzz's last-error
-classification, which can be true after an earlier attempt already
-stored the event. Closing that mixed-attempt case is a buzz change.
+`publishing` TurnState.
+
+Publish is in-process over the host's own nostr connection (D43,
+amending the original CLI wording here): the host prepares and signs
+the stamped event, records `dispatched` with the prepared event id and
+timestamp before calling send, and stores the accepted id after relay
+accept. A crash after that record redelivers the same event and the
+relay dedups it, closing the mixed-attempt case this decision
+originally deferred to a buzz change. Transport failures (relay did
+not accept: drop, timeout) may redeliver; explicit relay rejections
+and build failures do not send again.
 
 The same record-before-send rule applies to the progress post's
 create and to each of its edits (D42).
@@ -451,8 +454,9 @@ Status: accepted
 The host adds a NIP-25 kind-7 `⏳` on the triggering EventId when a
 turn becomes queued or open, and removes it with NIP-09 kind 5 when
 work on that EventId ends: posted, failed, or a cancel that does not
-re-queue the same EventId (`buzz reactions add|remove --event <id>
---emoji ⏳`). An edit that replaces the turn keeps the marker up.
+re-queue the same EventId (both published by the host over its own
+nostr connection per D43; removal finds the operator's kind-7 and
+deletes it). An edit that replaces the turn keeps the marker up.
 Occupants never publish a reaction. This is the code-side marker; the
 prose side is the progress post (D42). Progress never adds or removes
 the marker. It is not presence or typing (D18).
@@ -565,8 +569,9 @@ An occupant MAY report progress on an open trigger ask with
 `kelpie reply <ask-id> --progress` and unstamped prose from `--stdin`
 or `--file`. Each body is the full current status, not a delta. The
 host relays it as one kind 9 post per ask: created once, then edited
-in place with Buzz kind 40003 (`buzz messages edit --event <id>`).
-Never a series of posts, and never invented by the host.
+in place with Buzz kind 40003 over the host's own connection (D43
+amends the original `buzz messages edit` wording). Never a series of
+posts, and never invented by the host.
 
 Shape: stamped `[{bot-id}]:` (D37), `--reply-to` the triggering
 EventId (same thread as the final, D31), no `--mention`, no marker
@@ -584,8 +589,8 @@ best-effort.
 
 Lifecycle: on final the host publishes a new stamped post (D31) and
 leaves the progress post up. A cancel that abandons or replaces the
-ask (D14, D15, D28) issues a Buzz delete (kind 9005, `buzz messages
-delete --event <id>`) on that ask's progress post, best-effort; a
+ask (D14, D15, D28) issues a Buzz delete (kind 9005) on that ask's
+progress post over the host's own connection (D43), best-effort; a
 replacement ask starts with no progress post. Recovery (D20) continues
 the same ask and therefore the same post. A failed turn keeps the
 post. Queued turns have no ask id and therefore no progress. Progress

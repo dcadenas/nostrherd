@@ -523,7 +523,8 @@ bot_stamped "$LONGWORK"
 
 # Flow 12: host does not publish presence or typing as the operator.
 # Expect: presence-after equals presence-before. Typing is not published:
-# the host subscriber has no signing keys and never calls send.
+# the host publishes only the SPEC outbound events (stamped replies,
+# progress posts, in-flight reactions) over its own connection (D43).
 env -u BUZZ_AUTH_TAG envchain botserver-proof buzz users presence \
   --pubkeys "$OPERATOR_PUB" > "$PROOF/presence-after.json"
 python3 -c 'import json,sys
@@ -1163,6 +1164,65 @@ envchain botserver-proof botserver --config "$PROOF/bots.toml" --database "$PROO
 
 Throwaway namespaces only: `botserver-proof` and
 `botserver-proof-peer`. Never `nostr-personal` or `buzz-acp`.
+
+### Host publish over its own connection (issue 54)
+
+The host signs and publishes over the nostr connection it already
+holds; no `buzz` process is on any write path (D43). Unit proof:
+`crash_after_dispatch_with_prepared_event_redelivers_same_id`,
+`legacy_dispatch_without_prepared_event_does_not_publish_again`, and
+the `buzz` shape tests in `crates/domain/src/buzz.rs`. Live proof: the
+ignored integration test publishes one event of each kind (9, 40003,
+9005, 7 plus the kind-5 reaction removal) through the host publisher
+and proves a redelivered prepared event is relay-deduped to one event
+with the same id. Buzz stays a peer/verification client here: only
+channel setup runs through it.
+
+```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is54
+mkdir -p "$PROOF"
+./tools/local-relay up
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
+  --name botserver-is54 --type stream --visibility open > "$PROOF/channel.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
+  "$PROOF/channel.json" "$PROOF/channel.id"
+export BOTSERVER_LIVE_CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
+
+# Expect: "live publish proof complete" — the test asserts each kind's
+# shape on the relay and that the redelivery of the same prepared event
+# leaves exactly one event with that id.
+env -u BUZZ_AUTH_TAG envchain botserver-proof \
+  cargo test --test live_publish -- --ignored --nocapture
+
+# Full host smoke: the actor path publishes the stamped reply over the
+# same connection and clears the ⏳ marker. Follow the issue-34 recipe
+# in one channel, then verify the stamped body landed.
+rm -f "$PROOF/host.sqlite"
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$ROOT/corpus/example-bot"
+kind = "opencode"
+EOF
+
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
+  >"$PROOF/host.log" 2>&1 &
+HOST_PID=$!
+# …trigger with the issue-34 recipe, occupant `kelpie reply --final`…
+# Expect: one [bot]: body via `buzz messages get` (peer verification),
+# and outbound_attempts.prepared_event_id equals outbound_event_id:
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT prepared_event_id = outbound_event_id,
+          prepared_created_at IS NOT NULL,
+          thread_root_event_id IS NULL OR length(thread_root_event_id) = 64
+   FROM outbound_attempts;"
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
+```
 
 Any issue whose done-when includes the relay MUST run the harness and
 say so in the issue body.

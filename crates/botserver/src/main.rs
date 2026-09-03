@@ -523,9 +523,9 @@ fn start_actors(
     database: &Path,
     kelpie: &KelpieClient,
     waiter: &HostWaiter<'_>,
-    publisher: BuzzPublisher,
+    publisher: &BuzzPublisher,
 ) -> Result<Vec<BotActor<SqliteRepository, HerdrPaneAllocator>>, HostError> {
-    let reactions: Arc<dyn InFlightReaction> = Arc::new(publisher);
+    let reactions: Arc<dyn InFlightReaction> = Arc::new(publisher.clone());
     let mut actors = bots
         .into_iter()
         .map(|bot| {
@@ -547,7 +547,7 @@ fn handle_host_delivery(
     actors: &mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
     kelpie: &KelpieClient,
     waiter: &HostWaiter<'_>,
-    publisher: BuzzPublisher,
+    publisher: &BuzzPublisher,
     inbox: &mut HostInbox,
     delivery: &InboxDelivery,
 ) -> Result<(), HostError> {
@@ -566,7 +566,7 @@ fn handle_host_delivery(
     let Some(actor) = actors.get_mut(idx) else {
         return Err(HostError::NoBots);
     };
-    let action = actor.handle_occupant_delivery(kelpie, waiter, &publisher, delivery);
+    let action = actor.handle_occupant_delivery(kelpie, waiter, publisher, delivery);
     match action {
         Ok(InboxAction::Ack) => {
             if let Some(ask_id) = delivery.reply_to() {
@@ -592,8 +592,19 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
         default_socket(),
         waiter.identity().logical_agent_id().to_owned(),
     );
-    let publisher = BuzzPublisher;
-    let mut actors = start_actors(bots, database, &kelpie, &waiter, publisher)?;
+    let client = Client::builder()
+        .authenticator(SignerAuthenticator::new(operator.keys.clone()))
+        .build();
+    client.add_relay(&operator.relay_url).await?;
+    client.connect().and_wait(CONNECT_TIMEOUT).await;
+    // Constructed inside the runtime so the sync actor layer can bridge
+    // publishes onto the client (D43).
+    let publisher = BuzzPublisher::new(
+        client.clone(),
+        operator.keys.clone(),
+        operator.relay_url.clone(),
+    );
+    let mut actors = start_actors(bots, database, &kelpie, &waiter, &publisher)?;
     let inbound_triggers = actors
         .iter()
         .map(|actor| {
@@ -603,11 +614,6 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
             )
         })
         .collect::<Vec<_>>();
-    let client = Client::builder()
-        .authenticator(SignerAuthenticator::new(operator.keys))
-        .build();
-    client.add_relay(&operator.relay_url).await?;
-    client.connect().and_wait(CONNECT_TIMEOUT).await;
     let subscriber = RelaySubscriber::new(client);
     let mut notifications = pin!(subscriber.notifications());
     let mut ingest = RelayIngest::new(
@@ -666,7 +672,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
                         &mut actors,
                         &kelpie,
                         &waiter,
-                        publisher,
+                        &publisher,
                         &mut inbox,
                         &delivery,
                     )?;

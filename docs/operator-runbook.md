@@ -32,6 +32,10 @@ throwaway, or another non-prod URL). Live proofs in this repo use
 (`waiter.register`, then a reconnecting `inbox.claim`). It does not
 need `HERDR_PANE_ID`. Occupant panes are still Herdr sessions.
 
+The host publishes over this same relay connection (D43); no `buzz`
+process is needed on the publish path. `buzz` stays the peer and
+verification client in live recipes.
+
 ```bash
 envchain botserver botserver \
   --config /path/to/bots.toml \
