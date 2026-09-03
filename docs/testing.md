@@ -11,6 +11,10 @@ cargo test --all-targets
 `crates/botserver/src/spec_flows.rs` is in-process acceptance of SPEC
 flows 1–12. It is not a live relay proof.
 
+`subscription_refresh_replaces_populated_channel_and_mutation_filters` uses
+nostr-sdk's in-process relay to keep fixed-ID refresh behavior in the normal CI
+gate. It replaces populated channel and active-turn scopes with changed values.
+
 `crates/botserver/src/outbox.rs` and `inbox.rs` prove host publish on
 kelpie final, ACK-after-decide, crash-safe retry of the same outbound
 event, best-effort `⏳` add/remove on the trigger, and occupant-tell

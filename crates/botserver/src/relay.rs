@@ -817,7 +817,7 @@ mod tests {
     use std::collections::HashSet;
 
     use botserver_domain::BotId;
-    use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Keys, Tag};
+    use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Keys, LocalRelay, Tag};
 
     use super::*;
     use crate::{NewTurn, SessionRecord, TurnRecord, TurnState};
@@ -1538,6 +1538,62 @@ mod tests {
             serde_json::json!(["ab12cd34-5678-90ab-cdef-0123456789ab"])
         );
         assert_eq!(metadata_json["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn subscription_refresh_replaces_populated_channel_and_mutation_filters() {
+        let relay = LocalRelay::new();
+        relay.run().await.expect("run relay");
+        let client = Client::new();
+        client
+            .add_relay(relay.url().await)
+            .await
+            .expect("add relay");
+        client.connect().and_wait(Duration::from_secs(3)).await;
+        let subscriber = RelaySubscriber::new(client.clone());
+        let operator = Keys::generate().public_key().to_hex();
+        let first = EventId::parse_hex(&"a".repeat(64)).expect("first event");
+        let second = EventId::parse_hex(&"b".repeat(64)).expect("second event");
+
+        subscriber
+            .subscribe(
+                &operator,
+                &["channel-a".to_owned()],
+                std::slice::from_ref(&first),
+                Timestamp::zero(),
+            )
+            .await
+            .expect("initial subscriptions");
+        subscriber
+            .subscribe(
+                &operator,
+                &["channel-b".to_owned()],
+                std::slice::from_ref(&second),
+                Timestamp::zero(),
+            )
+            .await
+            .expect("refreshed subscriptions");
+
+        let subscriptions = client.subscriptions().await;
+        let filter_json = |id: &str| {
+            subscriptions
+                .get(&SubscriptionId::new(id))
+                .and_then(|relays| relays.values().next())
+                .and_then(|filters| filters.first())
+                .and_then(|filter| serde_json::to_value(filter).ok())
+                .expect("registered filter")
+        };
+        assert_eq!(
+            filter_json("botserver-channels")["#h"],
+            serde_json::json!(["channel-b"])
+        );
+        assert_eq!(
+            filter_json("botserver-mutations")["#e"],
+            serde_json::json!([second.as_str()])
+        );
+
+        client.disconnect().await;
+        relay.shutdown();
     }
 
     #[test]
