@@ -1265,7 +1265,9 @@ mod tests {
             dispatched: false,
         };
 
+        attempt.prepared_created_at = Some(1_700_000_000);
         let first = publisher.prepare(&attempt).expect("first prepare");
+        assert_eq!(first.created_at(), 1_700_000_000);
         attempt.prepared_event_id = Some(first.event_id().to_owned());
         attempt.prepared_created_at = Some(first.created_at());
         let rebuilt = publisher.prepare(&attempt).expect("reprepare");
