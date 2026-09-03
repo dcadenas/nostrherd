@@ -1019,6 +1019,7 @@ NOT open a turn. Unit proof: `stamp_outbound_prefixes_once`,
 ```bash
 ROOT=$(pwd)
 PROOF=$HOME/tmp-botserver-proof-is48
+KEYS=$HOME/tmp-botserver-proof
 mkdir -p "$PROOF/bot" "$PROOF/pr"
 cp -a "$ROOT/corpus/example-bot/." "$PROOF/bot/"
 cp -a "$ROOT/corpus/example-bot/." "$PROOF/pr/"
@@ -1036,13 +1037,16 @@ corpus = "$PROOF/pr"
 kind = "opencode"
 EOF
 
+OPERATOR_PUB=$(tr -d ' \n' < "$KEYS/operator.pub")
+PEER_PUB=$(tr -d ' \n' < "$KEYS/peer.pub")
 env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
   --name botserver-is48 --type stream --visibility open > "$PROOF/channel.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
   "$PROOF/channel.json" "$PROOF/channel.id"
 CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
-OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-botserver-proof/operator.pub")
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels add-member \
+  --channel "$CHANNEL" --pubkey "$PEER_PUB" --role member >/dev/null
 
 rm -f "$PROOF/host.sqlite"
 env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
@@ -1054,12 +1058,98 @@ env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
 env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'pr: hello'
-# Wait for two open asks; kelpie reply --final unstamped from each occupant.
-# Expect channel bodies starting with [bot]: and [pr]:. A later [pr]:
-# line MUST NOT open another pr turn.
+
+wait_sql() {
+  local sql=$1 want=$2 got=
+  for _ in $(seq 1 80); do
+    got=$(sqlite3 "$PROOF/host.sqlite" "$sql" 2>/dev/null || true)
+    [ "$got" = "$want" ] && return 0
+    sleep 0.5
+  done
+  echo "sqlite wanted $want got ${got:-empty}" >&2
+  return 1
+}
+wait_sql "SELECT count(*) FROM sessions WHERE channel_id='$CHANNEL';" 2
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';" 2
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT bot_id, session_name FROM sessions WHERE channel_id='$CHANNEL' ORDER BY bot_id;"
+
+occupant_pane() {
+  kelpie --json report --live | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+want=sys.argv[1]
+found=[]
+def walk(obj):
+    if isinstance(obj, dict):
+        incs=obj.get("incarnations")
+        if incs and obj.get("public_name")==want:
+            pane=(incs[0] or {}).get("observed_pane_id")
+            if pane:
+                found.append(pane)
+        for v in obj.values():
+            walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            walk(v)
+walk(d.get("result") or d)
+print(found[-1] if found else "")
+' "$1"
+}
+wait_pane() {
+  local name=$1 pane=
+  for _ in $(seq 1 80); do
+    pane=$(occupant_pane "$name")
+    if [ -n "$pane" ]; then
+      printf '%s' "$pane"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "no occupant pane" >&2
+  return 1
+}
+reply_final() {
+  local pane=$1 ask=$2 body=$3
+  HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+    kelpie reply "$ask" --final --stdin <<EOF
+$body
+EOF
+}
+
+while IFS='|' read -r bot_id sname ask_id; do
+  pane=$(wait_pane "$sname")
+  reply_final "$pane" "$ask_id" "hello from $bot_id"
+done < <(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT s.bot_id, s.session_name, t.ask_id FROM turns t
+   JOIN sessions s ON s.id=t.session_id
+   WHERE s.channel_id='$CHANNEL' AND t.state='open' ORDER BY s.bot_id;")
+
+stamp_counts() {
+  env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+    --channel "$CHANNEL" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+bot=sum(1 for it in items if str(it.get("content","")).startswith("[bot]:"))
+pr=sum(1 for it in items if str(it.get("content","")).startswith("[pr]:"))
+print(bot, pr)
+if bot!=1 or pr!=1:
+    raise SystemExit(1)'
+}
+ok=0
+for _ in $(seq 1 40); do
+  if stamp_counts; then ok=1; break; fi
+  sleep 0.5
+done
+[ "$ok" = 1 ]
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL';"
 kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
+
+Expect two session rows, then one `[bot]:` body and one `[pr]:` body.
+Occupants still MUST NOT get the nsec. The host waiter name is
+`botserver`; a standing personal waiter blocks this recipe until that
+process is not holding the name.
 
 Wrap the host with envchain. Do not pass `--envchain` (D29):
 

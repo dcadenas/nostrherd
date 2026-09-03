@@ -762,7 +762,6 @@ impl HostRepository for SqliteRepository {
                         mention: row.get(4)?,
                         outbound_event_id: row.get(5)?,
                         dispatched: dispatched != 0,
-                        outbound_prefix: String::new(),
                     })
                 },
             )
