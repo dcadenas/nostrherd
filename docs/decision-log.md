@@ -609,3 +609,46 @@ progress post would otherwise appear in snapshots and ask Context
 with a stale first body. Place snapshots (D19, D27) and ask Context
 (D5) MUST exclude host progress post event ids. Own stamped posts
 still do not trigger (D9).
+
+## D43. Host publishes over its own nostr connection
+
+Status: accepted
+
+Aligned 2026-09-03 between the operator's investigation session and
+botserver-agent. The host stops shelling out to the `buzz` CLI for
+writes (`buzz messages send|edit|delete`, `buzz reactions
+add|remove`) and publishes through the nostr-sdk client it already
+holds. A small Buzz-specific module in the domain crate owns the
+event shapes — kind 9 + `h` + NIP-10 `e` root/reply + `p`; kind
+40003 + `h` + `e`; kind 9005 + `h` + `e`; kind 7 + `e` — citing the
+reference builders in buzz `crates/buzz-sdk/src/builders.rs`. `buzz`
+remains the peer/human client in live test recipes.
+
+Reasons: the Buzz relay accepts every kind the host publishes over
+plain websocket; the shapes are tiny; the CLI's extras (@name
+resolution, members-only guard, relay-side thread-root lookup, file
+upload) are paths the host never uses; and in-process signing gives
+the event id before send, so a retry republishes the same id and the
+relay dedups — closing the mixed-attempt case D28 deferred. Publishes
+ride the already NIP-42-authenticated connection instead of spawning
+a connecting process per write.
+
+Containment and guard: the OutboundPublisher/InFlightReaction seam
+stays — BuzzPublisher becomes a nostr-client adapter, still the only
+implementation behind existing tests. The copied shapes are pinned by
+D23's relay contract; the live E2E publishes one event of each kind
+(9, 40003, 9005, 7) so schema drift fails tests, not production.
+Thread root comes from the trigger's own `e` tags (id-only markers
+are valid); a markerless trigger falls back to a reply marker only.
+Mention paths are unchanged: finals mention the trigger's effective
+author (D31); tells and progress carry none.
+
+Amends D28: `buzz messages send` is no longer the publish path; the
+no-prebuilt-id paragraph and the mixed-attempt deferral are
+superseded — record-before-send now includes the event id, and a
+redelivered event is relay-deduped. Amends D35: the marker is
+added/removed by the host client, not `buzz reactions`. Amends D42:
+progress edits and deletes go through the same client, not `buzz
+messages`. SPEC "Host publish" and "Inbox" are unchanged (they never
+named the CLI). docs/testing.md and docs/operator-runbook.md recipes
+flip buzz to peer/verification only; skills/local-relay is unchanged.
