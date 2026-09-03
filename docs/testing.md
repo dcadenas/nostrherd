@@ -24,6 +24,9 @@ Ask body shape (request, then capped Context) is proved by
 `crates/botserver/src/ask_body.rs` and
 `ask_context_includes_unprefixed_line_between_triggers`.
 
+Occupant Herdr allocation argv (`workspace create`, not `tab create`)
+is `allocate_uses_workspace_create_not_tab_create` (D39, I16).
+
 Invariants and their tests: `docs/invariants.md`.
 
 ## SPEC flow matrix

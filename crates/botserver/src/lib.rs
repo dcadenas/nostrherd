@@ -177,10 +177,10 @@ impl From<io::Error> for KelpieError {
 
 #[derive(Debug)]
 pub(crate) struct CommandOutput {
-    success: bool,
-    status: String,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    pub(crate) success: bool,
+    pub(crate) status: String,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
 pub(crate) trait CommandRunner: fmt::Debug + Send + Sync {
@@ -188,8 +188,16 @@ pub(crate) trait CommandRunner: fmt::Debug + Send + Sync {
 }
 
 #[derive(Debug)]
-struct ProcessRunner {
+pub(crate) struct ProcessRunner {
     program: PathBuf,
+}
+
+impl ProcessRunner {
+    pub(crate) fn new(program: impl AsRef<Path>) -> Self {
+        Self {
+            program: program.as_ref().to_owned(),
+        }
+    }
 }
 
 impl CommandRunner for ProcessRunner {
@@ -237,9 +245,7 @@ impl KelpieClient {
     #[must_use]
     pub fn new(program: impl AsRef<Path>) -> Self {
         Self {
-            runner: Box::new(ProcessRunner {
-                program: program.as_ref().to_owned(),
-            }),
+            runner: Box::new(ProcessRunner::new(program)),
         }
     }
 

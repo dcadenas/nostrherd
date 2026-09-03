@@ -34,11 +34,11 @@ pub trait OccupantPaneAllocator {
     /// Allocator failure type.
     type Error: fmt::Display;
 
-    /// Create an empty pane in the occupant corpus directory.
+    /// Allocate a session-named Herdr workspace whose root pane hosts the occupant.
     ///
     /// # Errors
     ///
-    /// Returns an error when Herdr cannot create the pane.
+    /// Returns an error when Herdr cannot create the workspace.
     fn allocate(&self, session_name: &str, cwd: &Path) -> Result<OccupantPane, Self::Error>;
 }
 
