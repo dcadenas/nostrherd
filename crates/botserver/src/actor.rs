@@ -11,7 +11,9 @@ use botserver_domain::{Bot, BotId, EventId, SessionName};
 use crate::ask_body::{render_ask_body, AskContextCursor};
 use crate::inbox::InboxDelivery;
 use crate::outbox::{
-    self, InFlightReaction, InboxAction, NoopInFlightReaction, OutboundPublisher, OutboxError,
+    self, InFlightReaction, InboxAction, NoopInFlightReaction, NoopProgressPublisher,
+    OutboundAttempt, OutboundPublisher, OutboxError, PreparedOutbound, ProgressPublisher,
+    PublishError,
 };
 use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
 use crate::{
@@ -164,6 +166,47 @@ impl InFlightReaction for ReactionHost {
     }
 }
 
+#[derive(Clone)]
+struct ProgressHost {
+    inner: Arc<dyn ProgressPublisher>,
+}
+
+impl fmt::Debug for ProgressHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProgressHost")
+    }
+}
+
+impl ProgressPublisher for ProgressHost {
+    fn prepare_progress(
+        &self,
+        attempt: &OutboundAttempt,
+    ) -> Result<PreparedOutbound, PublishError> {
+        self.inner.prepare_progress(attempt)
+    }
+
+    fn publish_progress(&self, prepared: &PreparedOutbound) -> Result<(), PublishError> {
+        self.inner.publish_progress(prepared)
+    }
+
+    fn edit_progress(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+        body: &str,
+    ) -> Result<(), PublishError> {
+        self.inner.edit_progress(channel_id, post_event_id, body)
+    }
+
+    fn delete_progress(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
+        self.inner.delete_progress(channel_id, post_event_id)
+    }
+}
+
 /// Serialized in-process actor for one configured bot.
 #[derive(Debug)]
 pub struct BotActor<R, P> {
@@ -171,6 +214,7 @@ pub struct BotActor<R, P> {
     pub(crate) repository: R,
     panes: P,
     reactions: ReactionHost,
+    progress: ProgressHost,
 }
 
 impl<R, P> BotActor<R, P>
@@ -188,6 +232,9 @@ where
             reactions: ReactionHost {
                 inner: Arc::new(NoopInFlightReaction),
             },
+            progress: ProgressHost {
+                inner: Arc::new(NoopProgressPublisher),
+            },
         }
     }
 
@@ -195,6 +242,13 @@ where
     #[must_use]
     pub fn with_reactions(mut self, reactions: Arc<dyn InFlightReaction>) -> Self {
         self.reactions = ReactionHost { inner: reactions };
+        self
+    }
+
+    /// Use the host relay client for progress creates, edits, and deletes.
+    #[must_use]
+    pub fn with_progress(mut self, progress: Arc<dyn ProgressPublisher>) -> Self {
+        self.progress = ProgressHost { inner: progress };
         self
     }
 
@@ -489,6 +543,44 @@ where
         Ok(())
     }
 
+    /// Flush due progress creates and edits for this bot.
+    ///
+    /// Relay failures are notices and never fail the turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable progress state cannot be read or written.
+    pub fn flush_progress(&mut self, now: i64) -> Result<(), ActorError<R::Error>> {
+        let sessions = self
+            .repository
+            .sessions_with_pending_turns()
+            .map_err(ActorError::Repository)?;
+        let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        for session in sessions {
+            if session.bot_id != *self.bot.id() {
+                continue;
+            }
+            let turns = self
+                .repository
+                .turns_for_session(&session.bot_id, &session.channel_id)
+                .map_err(ActorError::Repository)?;
+            for turn in turns
+                .into_iter()
+                .filter(|turn| turn.state == TurnState::Open)
+            {
+                outbox::flush_progress(
+                    &mut self.repository,
+                    &self.progress,
+                    &turn,
+                    now,
+                    &mut notice,
+                )
+                .map_err(ActorError::Repository)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Drain the next queued turn after an in-flight turn is posted.
     ///
     /// # Errors
@@ -638,6 +730,7 @@ where
                 .map_err(ActorError::Repository)?;
             return Ok(TriggerOutcome::Declined);
         };
+        self.delete_progress_post(&replaced.cancelled)?;
         if let Some(ask_id) = replaced.cancelled.ask_id.as_deref() {
             waiter
                 .cancel(ask_id, "trigger edited")
@@ -674,6 +767,7 @@ where
                 .map_err(ActorError::Repository)?;
             return Ok(TriggerOutcome::Declined);
         };
+        self.delete_progress_post(&cancelled)?;
         if let Some(ask_id) = cancelled.ask_id.as_deref() {
             waiter.cancel(ask_id, reason).map_err(ActorError::Kelpie)?;
         }
@@ -683,6 +777,26 @@ where
             .map_err(ActorError::Repository)?;
         self.resume_queued(kelpie, waiter)?;
         Ok(TriggerOutcome::Cancelled)
+    }
+
+    fn delete_progress_post(&self, turn: &crate::TurnRecord) -> Result<(), ActorError<R::Error>> {
+        let Some(ask_id) = turn.ask_id.as_deref() else {
+            return Ok(());
+        };
+        let progress = self
+            .repository
+            .progress_post(ask_id)
+            .map_err(ActorError::Repository)?;
+        let Some(post_event_id) = progress.and_then(|progress| progress.post_event_id) else {
+            return Ok(());
+        };
+        if let Err(error) = self
+            .progress
+            .delete_progress(&turn.channel_id, &post_event_id)
+        {
+            eprintln!("operator notice: progress delete for ask {ask_id} failed: {error}");
+        }
+        Ok(())
     }
 
     fn queued_ask_body(&self, event_id: &EventId) -> Result<Option<String>, ActorError<R::Error>> {
@@ -2629,6 +2743,94 @@ mod tests {
         fn retryable(error: &Self::Error) -> bool {
             error.is_retryable()
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingProgress {
+        deletes: Mutex<Vec<(String, String)>>,
+    }
+
+    impl ProgressPublisher for RecordingProgress {
+        fn prepare_progress(
+            &self,
+            _attempt: &OutboundAttempt,
+        ) -> Result<PreparedOutbound, PublishError> {
+            Err(PublishError::Build("not used".to_owned()))
+        }
+
+        fn publish_progress(&self, _prepared: &PreparedOutbound) -> Result<(), PublishError> {
+            Ok(())
+        }
+
+        fn edit_progress(
+            &self,
+            _channel_id: &str,
+            _post_event_id: &EventId,
+            _body: &str,
+        ) -> Result<(), PublishError> {
+            Ok(())
+        }
+
+        fn delete_progress(
+            &self,
+            channel_id: &str,
+            post_event_id: &EventId,
+        ) -> Result<(), PublishError> {
+            self.deletes
+                .lock()
+                .expect("deletes")
+                .push((channel_id.to_owned(), post_event_id.as_str().to_owned()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cancelled_progress_post_deleted() {
+        let progress = Arc::new(RecordingProgress::default());
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            cancelled(),
+        ]);
+        let mut actor = actor.with_progress(Arc::clone(&progress) as Arc<dyn ProgressPublisher>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("asked");
+        actor
+            .repository
+            .save_progress_post(&crate::ProgressPostRecord {
+                ask_id: "ask-1".to_owned(),
+                post_event_id: Some(event_id('b')),
+                body: "[bot]: working".to_owned(),
+                dispatched: false,
+                edit_count: 0,
+                last_send_at: Some(1),
+                pending_body: None,
+                notice_sent: false,
+            })
+            .unwrap();
+
+        let outcome = actor
+            .handle_ingest(
+                &kelpie,
+                &waiter,
+                &crate::relay::IngestAction::Delete {
+                    event_id: event_id('d'),
+                    target_event_id: trigger.event_id,
+                },
+                &trigger.channel_display,
+            )
+            .expect("cancelled");
+        assert_eq!(outcome, TriggerOutcome::Cancelled);
+        assert_eq!(
+            progress.deletes.lock().expect("deletes").as_slice(),
+            [(trigger.channel_id, event_id('b').as_str().to_owned())]
+        );
     }
 
     fn occupant_final(ask_id: &str, body: &str) -> InboxDelivery {

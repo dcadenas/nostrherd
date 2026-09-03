@@ -21,6 +21,11 @@ use nostr_sdk::prelude::{
 use crate::inbox::InboxDelivery;
 use crate::{HostRepository, IndexedRelayEvent, SessionRecord, TurnRecord};
 
+const PROGRESS_INITIAL_HOLD_SECS: i64 = 20;
+const PROGRESS_EDIT_INTERVAL_SECS: i64 = 30;
+const PROGRESS_EDIT_LIMIT: u16 = 20;
+const PROGRESS_BODY_LIMIT: usize = 1024;
+
 /// Whether the claimed inbox delivery may be acknowledged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboxAction {
@@ -382,6 +387,122 @@ impl OutboundPublisher for BuzzPublisher {
     }
 }
 
+/// Best-effort Buzz side effects used by durable progress state.
+pub trait ProgressPublisher: Send + Sync {
+    /// Prepare the initial progress post without sending it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the event cannot be built or signed.
+    fn prepare_progress(&self, attempt: &OutboundAttempt)
+        -> Result<PreparedOutbound, PublishError>;
+    /// Send a prepared initial progress post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no relay accepts the event.
+    fn publish_progress(&self, prepared: &PreparedOutbound) -> Result<(), PublishError>;
+    /// Edit an existing progress post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the edit cannot be built or accepted.
+    fn edit_progress(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+        body: &str,
+    ) -> Result<(), PublishError>;
+    /// Delete a cancelled ask's progress post.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the delete cannot be built or accepted.
+    fn delete_progress(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), PublishError>;
+}
+
+/// Ignore progress relay side effects.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopProgressPublisher;
+
+impl ProgressPublisher for NoopProgressPublisher {
+    fn prepare_progress(
+        &self,
+        _attempt: &OutboundAttempt,
+    ) -> Result<PreparedOutbound, PublishError> {
+        Err(PublishError::Build(
+            "progress publisher is not configured".to_owned(),
+        ))
+    }
+
+    fn publish_progress(&self, _prepared: &PreparedOutbound) -> Result<(), PublishError> {
+        Ok(())
+    }
+
+    fn edit_progress(
+        &self,
+        _channel_id: &str,
+        _post_event_id: &EventId,
+        _body: &str,
+    ) -> Result<(), PublishError> {
+        Ok(())
+    }
+
+    fn delete_progress(
+        &self,
+        _channel_id: &str,
+        _post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
+        Ok(())
+    }
+}
+
+impl ProgressPublisher for BuzzPublisher {
+    fn prepare_progress(
+        &self,
+        attempt: &OutboundAttempt,
+    ) -> Result<PreparedOutbound, PublishError> {
+        <Self as OutboundPublisher>::prepare(self, attempt)
+    }
+
+    fn publish_progress(&self, prepared: &PreparedOutbound) -> Result<(), PublishError> {
+        <Self as OutboundPublisher>::publish(self, prepared).map(|_| ())
+    }
+
+    fn edit_progress(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+        body: &str,
+    ) -> Result<(), PublishError> {
+        let publisher = self.clone();
+        let event = buzz::message_edit(channel_id, post_event_id, body);
+        let handle = publisher.handle.clone();
+        tokio::task::block_in_place(move || {
+            handle.block_on(async move { publisher.send_buzz(&event).await })
+        })
+        .map(|_| ())
+    }
+
+    fn delete_progress(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
+        let publisher = self.clone();
+        let event = buzz::message_delete(channel_id, post_event_id);
+        let handle = publisher.handle.clone();
+        tokio::task::block_in_place(move || {
+            handle.block_on(async move { publisher.send_buzz(&event).await })
+        })
+        .map(|_| ())
+    }
+}
+
 impl InFlightReaction for BuzzPublisher {
     fn add(&self, trigger_event_id: &EventId) {
         let publisher = self.clone();
@@ -436,9 +557,11 @@ pub fn classify_delivery(delivery: &InboxDelivery, turn: Option<&TurnRecord>) ->
     if delivery.kind() == "tell" {
         return InboxAction::Ack;
     }
-    match decide(delivery, turn) {
+    match decide(delivery, turn, false) {
         Decision::Hold => InboxAction::Hold,
-        Decision::AckWithoutPublish | Decision::Publish { .. } => InboxAction::Ack,
+        Decision::AckWithoutPublish | Decision::Progress { .. } | Decision::Publish { .. } => {
+            InboxAction::Ack
+        }
     }
 }
 
@@ -446,15 +569,25 @@ pub fn classify_delivery(delivery: &InboxDelivery, turn: Option<&TurnRecord>) ->
 enum Decision {
     AckWithoutPublish,
     Hold,
+    Progress { body: String },
     Publish { body: String },
 }
 
-fn decide(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> Decision {
+fn decide(
+    delivery: &InboxDelivery,
+    turn: Option<&TurnRecord>,
+    outbound_dispatched: bool,
+) -> Decision {
     let Some(turn) = turn else {
         return Decision::Hold;
     };
     if delivery.kind() == "reply" && delivery.disposition() == Some("progress") {
-        return Decision::AckWithoutPublish;
+        let body = normalize_progress_body(delivery.body());
+        return if turn.state == TurnState::Open && !outbound_dispatched && !body.is_empty() {
+            Decision::Progress { body }
+        } else {
+            Decision::AckWithoutPublish
+        };
     }
     if delivery.kind() != "reply" {
         return Decision::AckWithoutPublish;
@@ -476,6 +609,20 @@ fn decide(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> Decision {
         },
         TurnState::Queued => Decision::Hold,
     }
+}
+
+fn normalize_progress_body(body: &str) -> String {
+    let body = body.trim();
+    if body.len() <= PROGRESS_BODY_LIMIT {
+        return body.to_owned();
+    }
+    let mut boundary = PROGRESS_BODY_LIMIT - '…'.len_utf8();
+    while !body.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let mut normalized = body[..boundary].to_owned();
+    normalized.push('…');
+    normalized
 }
 
 fn handle_occupant_tell<R, P>(
@@ -767,7 +914,11 @@ where
     let turn = repository
         .turn_by_ask_id(ask_id)
         .map_err(OutboxError::Repository)?;
-    match decide(delivery, turn.as_ref()) {
+    let outbound_dispatched = repository
+        .outbound_attempt(ask_id)
+        .map_err(OutboxError::Repository)?
+        .is_some_and(|attempt| attempt.dispatched);
+    match decide(delivery, turn.as_ref(), outbound_dispatched) {
         Decision::Hold => {
             if delivery.disposition() == Some("final") && delivery.body().trim().is_empty() {
                 notice(&format!(
@@ -777,8 +928,17 @@ where
             Ok(InboxAction::Hold)
         }
         Decision::AckWithoutPublish => Ok(InboxAction::Ack),
+        Decision::Progress { body } => {
+            repository
+                .record_pending_progress(ask_id, &body)
+                .map_err(OutboxError::Repository)?;
+            Ok(InboxAction::Ack)
+        }
         Decision::Publish { body } => match turn {
             Some(turn) => {
+                repository
+                    .clear_pending_progress(ask_id)
+                    .map_err(OutboxError::Repository)?;
                 complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
             }
             None => Ok(InboxAction::Hold),
@@ -934,6 +1094,165 @@ where
     Ok(InboxAction::Ack)
 }
 
+/// Flush one open turn's coalesced progress state on the refresh tick.
+///
+/// # Errors
+///
+/// Returns an error when durable progress state cannot be read or written.
+pub fn flush_progress<R: HostRepository>(
+    repository: &mut R,
+    publisher: &dyn ProgressPublisher,
+    turn: &TurnRecord,
+    now: i64,
+    notice: &mut impl FnMut(&str),
+) -> Result<(), R::Error> {
+    if turn.state != TurnState::Open
+        || turn
+            .opened_at
+            .is_none_or(|opened_at| now.saturating_sub(opened_at) < PROGRESS_INITIAL_HOLD_SECS)
+    {
+        return Ok(());
+    }
+    let Some(ask_id) = turn.ask_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(mut progress) = repository.progress_post(ask_id)? else {
+        return Ok(());
+    };
+    let thread_root_event_id = repository.indexed_event(&turn.event_id)?.and_then(|event| {
+        let tags = serde_json::from_str::<Vec<Vec<String>>>(&event.tags_json).unwrap_or_default();
+        buzz::reply_thread_root(&turn.event_id, &tags)
+    });
+    if progress.dispatched {
+        let Some(post_event_id) = progress.post_event_id.as_ref() else {
+            progress.pending_body = None;
+            if !progress.notice_sent {
+                notice(&format!(
+                    "progress create for ask {ask_id} was dispatched without a stored event id"
+                ));
+                progress.notice_sent = true;
+            }
+            repository.save_progress_post(&progress)?;
+            return Ok(());
+        };
+        let attempt = progress_attempt(
+            turn,
+            &progress.body,
+            thread_root_event_id.clone(),
+            Some(post_event_id),
+            progress.last_send_at,
+        );
+        match publisher
+            .prepare_progress(&attempt)
+            .and_then(|prepared| publisher.publish_progress(&prepared))
+        {
+            Ok(()) => {
+                progress.dispatched = false;
+                repository.save_progress_post(&progress)?;
+            }
+            Err(error) => notice(&format!("progress create for ask {ask_id} failed: {error}")),
+        }
+        return Ok(());
+    }
+    let Some(pending) = progress.pending_body.take() else {
+        return Ok(());
+    };
+    if progress.post_event_id.is_none() {
+        let body = stamp_outbound(&pending, &outbound_prefix_for(&turn.bot_id));
+        let attempt = progress_attempt(turn, &body, thread_root_event_id, None, Some(now));
+        let prepared = match publisher.prepare_progress(&attempt) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                progress.pending_body = Some(pending);
+                notice(&format!("progress create for ask {ask_id} failed: {error}"));
+                return Ok(());
+            }
+        };
+        let Some(event_id) = EventId::parse_hex(prepared.event_id()) else {
+            progress.pending_body = Some(pending);
+            notice(&format!(
+                "progress create for ask {ask_id} produced an invalid event id"
+            ));
+            return Ok(());
+        };
+        progress.post_event_id = Some(event_id);
+        progress.body = body;
+        progress.dispatched = true;
+        progress.last_send_at = Some(prepared.created_at());
+        repository.save_progress_post(&progress)?;
+        match publisher.publish_progress(&prepared) {
+            Ok(()) => {
+                progress.dispatched = false;
+                repository.save_progress_post(&progress)?;
+            }
+            Err(error) => notice(&format!("progress create for ask {ask_id} failed: {error}")),
+        }
+        return Ok(());
+    }
+    flush_progress_edit(repository, publisher, turn, now, notice, progress, pending)
+}
+
+fn flush_progress_edit<R: HostRepository>(
+    repository: &mut R,
+    publisher: &dyn ProgressPublisher,
+    turn: &TurnRecord,
+    now: i64,
+    notice: &mut impl FnMut(&str),
+    mut progress: crate::ProgressPostRecord,
+    pending: String,
+) -> Result<(), R::Error> {
+    let ask_id = progress.ask_id.clone();
+    if progress
+        .last_send_at
+        .is_some_and(|last_send| now.saturating_sub(last_send) < PROGRESS_EDIT_INTERVAL_SECS)
+    {
+        progress.pending_body = Some(pending);
+        repository.save_progress_post(&progress)?;
+        return Ok(());
+    }
+    if progress.edit_count >= PROGRESS_EDIT_LIMIT {
+        if !progress.notice_sent {
+            notice(&format!("progress edit cap reached for ask {ask_id}"));
+            progress.notice_sent = true;
+        }
+        repository.save_progress_post(&progress)?;
+        return Ok(());
+    }
+    let Some(post_event_id) = progress.post_event_id.clone() else {
+        return Ok(());
+    };
+    let body = stamp_outbound(&pending, &outbound_prefix_for(&turn.bot_id));
+    progress.body.clone_from(&body);
+    progress.edit_count += 1;
+    progress.last_send_at = Some(now);
+    repository.save_progress_post(&progress)?;
+    if let Err(error) = publisher.edit_progress(&turn.channel_id, &post_event_id, &body) {
+        notice(&format!("progress edit for ask {ask_id} failed: {error}"));
+    }
+    Ok(())
+}
+
+fn progress_attempt(
+    turn: &TurnRecord,
+    body: &str,
+    thread_root_event_id: Option<EventId>,
+    prepared_event_id: Option<&EventId>,
+    prepared_created_at: Option<i64>,
+) -> OutboundAttempt {
+    OutboundAttempt {
+        ask_id: turn.ask_id.clone().unwrap_or_default(),
+        body: body.to_owned(),
+        channel_id: turn.channel_id.clone(),
+        reply_to_event_id: Some(turn.event_id.clone()),
+        thread_root_event_id,
+        mention: String::new(),
+        outbound_event_id: None,
+        prepared_event_id: prepared_event_id.map(|id| id.as_str().to_owned()),
+        prepared_created_at,
+        dispatched: false,
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct RecordingInFlightReaction {
@@ -974,6 +1293,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         reply_to: Mutex<Vec<Option<String>>>,
         sends: Mutex<Vec<String>>,
+        edits: Mutex<Vec<(String, String, String)>>,
+        deletes: Mutex<Vec<(String, String)>>,
         fail: Mutex<bool>,
     }
 
@@ -1029,6 +1350,45 @@ mod tests {
 
         fn retryable(error: &Self::Error) -> bool {
             error.is_retryable()
+        }
+    }
+
+    impl ProgressPublisher for FakePublisher {
+        fn prepare_progress(
+            &self,
+            attempt: &OutboundAttempt,
+        ) -> Result<PreparedOutbound, PublishError> {
+            <Self as OutboundPublisher>::prepare(self, attempt)
+        }
+
+        fn publish_progress(&self, prepared: &PreparedOutbound) -> Result<(), PublishError> {
+            <Self as OutboundPublisher>::publish(self, prepared).map(|_| ())
+        }
+
+        fn edit_progress(
+            &self,
+            channel_id: &str,
+            post_event_id: &EventId,
+            body: &str,
+        ) -> Result<(), PublishError> {
+            self.edits.lock().expect("edits").push((
+                channel_id.to_owned(),
+                post_event_id.as_str().to_owned(),
+                body.to_owned(),
+            ));
+            Ok(())
+        }
+
+        fn delete_progress(
+            &self,
+            channel_id: &str,
+            post_event_id: &EventId,
+        ) -> Result<(), PublishError> {
+            self.deletes
+                .lock()
+                .expect("deletes")
+                .push((channel_id.to_owned(), post_event_id.as_str().to_owned()));
+            Ok(())
         }
     }
 
@@ -1139,6 +1499,8 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             reply_to: Mutex::new(Vec::new()),
             sends: Mutex::new(Vec::new()),
+            edits: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
             fail: Mutex::new(false),
         };
         (repository, publisher)
@@ -1160,10 +1522,198 @@ mod tests {
         .expect("handle");
         assert_eq!(action, InboxAction::Ack);
         assert!(publisher.calls.lock().expect("calls").is_empty());
+        let progress = repository
+            .progress_post("ask-1")
+            .unwrap()
+            .expect("progress");
+        assert_eq!(progress.pending_body.as_deref(), Some("working"));
         assert_eq!(
             repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
             TurnState::Open
         );
+    }
+
+    #[test]
+    fn progress_is_created_after_hold_then_edited_in_place() {
+        let (mut repository, publisher) = open_repo();
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("progress", "ask-1", "  first status  "),
+        )
+        .expect("record progress");
+        let turn = repository.turn_by_ask_id("ask-1").unwrap().unwrap();
+        let opened_at = turn.opened_at.expect("opened at");
+
+        flush_progress(
+            &mut repository,
+            &publisher,
+            &turn,
+            opened_at + 19,
+            &mut notices(),
+        )
+        .unwrap();
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        flush_progress(
+            &mut repository,
+            &publisher,
+            &turn,
+            opened_at + 20,
+            &mut notices(),
+        )
+        .unwrap();
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            ["[bot]: first status"]
+        );
+        let progress = repository.progress_post("ask-1").unwrap().unwrap();
+        let post_id = progress.post_event_id.clone().expect("post id");
+        assert!(!progress.dispatched);
+        assert!(progress.pending_body.is_none());
+
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("progress", "ask-1", "second status"),
+        )
+        .expect("record edit");
+        flush_progress(
+            &mut repository,
+            &publisher,
+            &turn,
+            opened_at + 49,
+            &mut notices(),
+        )
+        .unwrap();
+        assert!(publisher.edits.lock().expect("edits").is_empty());
+        flush_progress(
+            &mut repository,
+            &publisher,
+            &turn,
+            opened_at + 50,
+            &mut notices(),
+        )
+        .unwrap();
+        assert_eq!(
+            publisher.edits.lock().expect("edits").as_slice(),
+            [(
+                "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
+                post_id.as_str().to_owned(),
+                "[bot]: second status".to_owned()
+            )]
+        );
+        let progress = repository.progress_post("ask-1").unwrap().unwrap();
+        assert_eq!(progress.post_event_id, Some(post_id));
+        assert_eq!(progress.edit_count, 1);
+    }
+
+    #[test]
+    fn progress_body_cap_preserves_utf8_and_ellipsis() {
+        let normalized = normalize_progress_body(&format!("{}é", "x".repeat(1023)));
+        assert_eq!(normalized.len(), PROGRESS_BODY_LIMIT);
+        assert!(normalized.ends_with('…'));
+        assert!(normalized.is_char_boundary(normalized.len()));
+    }
+
+    #[test]
+    fn progress_after_a_dispatched_final_is_acked_and_dropped() {
+        let (mut repository, publisher) = open_repo();
+        repository
+            .save_outbound_attempt(&OutboundAttempt {
+                ask_id: "ask-1".to_owned(),
+                body: "finished".to_owned(),
+                channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
+                reply_to_event_id: Some(event_id('a')),
+                thread_root_event_id: None,
+                mention: "c".repeat(64),
+                outbound_event_id: None,
+                prepared_event_id: Some("d".repeat(64)),
+                prepared_created_at: Some(1),
+                dispatched: true,
+            })
+            .unwrap();
+        assert_eq!(
+            handle_delivery(
+                &mut repository,
+                &publisher,
+                &mut notices(),
+                &delivery("progress", "ask-1", "too late"),
+            )
+            .unwrap(),
+            InboxAction::Ack
+        );
+        assert!(repository.progress_post("ask-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn progress_edit_cap_drops_new_bodies_with_one_notice() {
+        let (mut repository, publisher) = open_repo();
+        let turn = repository.turn_by_ask_id("ask-1").unwrap().unwrap();
+        let opened_at = turn.opened_at.unwrap();
+        repository
+            .save_progress_post(&crate::ProgressPostRecord {
+                ask_id: "ask-1".to_owned(),
+                post_event_id: Some(event_id('b')),
+                body: "[bot]: prior".to_owned(),
+                dispatched: false,
+                edit_count: PROGRESS_EDIT_LIMIT,
+                last_send_at: Some(opened_at),
+                pending_body: Some("new".to_owned()),
+                notice_sent: false,
+            })
+            .unwrap();
+        let mut notices = Vec::new();
+        for now in [opened_at + 30, opened_at + 60] {
+            flush_progress(&mut repository, &publisher, &turn, now, &mut |notice| {
+                notices.push(notice.to_owned());
+            })
+            .unwrap();
+        }
+        assert_eq!(notices.len(), 1);
+        assert!(publisher.edits.lock().expect("edits").is_empty());
+        assert!(repository
+            .progress_post("ask-1")
+            .unwrap()
+            .unwrap()
+            .pending_body
+            .is_none());
+    }
+
+    #[test]
+    fn progress_create_failure_is_best_effort_and_keeps_the_turn_open() {
+        let (mut repository, publisher) = open_repo();
+        *publisher.fail.lock().expect("fail") = true;
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("progress", "ask-1", "working"),
+        )
+        .unwrap();
+        let turn = repository.turn_by_ask_id("ask-1").unwrap().unwrap();
+        let mut notices = Vec::new();
+        flush_progress(
+            &mut repository,
+            &publisher,
+            &turn,
+            turn.opened_at.unwrap() + 20,
+            &mut |notice| notices.push(notice.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Open
+        );
+        assert!(
+            repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .dispatched
+        );
+        assert_eq!(notices.len(), 1);
     }
 
     #[test]

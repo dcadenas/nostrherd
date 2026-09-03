@@ -12,6 +12,11 @@ use serde_json::Value;
 
 use crate::actor::{BotActor, OccupantPane, OccupantPaneAllocator, TriggerOutcome};
 use crate::ask_body::ask_body_request;
+use crate::inbox::InboxDelivery;
+use crate::outbox::{
+    InboxAction, OutboundAttempt, OutboundPublisher, PreparedOutbound, ProgressPublisher,
+    PublishError,
+};
 use crate::relay::{IngestAction, RelayIngest, RelaySubscriber};
 use crate::sqlite::SqliteRepository;
 use crate::{
@@ -202,6 +207,107 @@ struct Harness {
     runner: Arc<FakeRunner>,
     panes: Arc<FakePanes>,
     bot: Bot,
+}
+
+#[derive(Default)]
+struct RecordingProgressPublisher {
+    prepared: Mutex<Vec<(String, Option<String>, String)>>,
+    creates: Mutex<Vec<String>>,
+    edits: Mutex<Vec<(String, String)>>,
+}
+
+impl OutboundPublisher for RecordingProgressPublisher {
+    type Error = PublishError;
+
+    fn prepare(&self, attempt: &OutboundAttempt) -> Result<PreparedOutbound, Self::Error> {
+        self.prepared.lock().expect("prepared").push((
+            attempt.body.clone(),
+            attempt
+                .reply_to_event_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
+            attempt.mention.clone(),
+        ));
+        let id = if attempt.mention.is_empty() { 'b' } else { 'c' };
+        let signed = EventBuilder::new(Kind::Custom(9), "")
+            .finalize(&Keys::generate())
+            .expect("dummy event");
+        Ok(PreparedOutbound::from_parts(
+            signed,
+            id.to_string().repeat(64),
+            attempt.prepared_created_at.unwrap_or(1_700_000_000),
+        ))
+    }
+
+    fn publish(&self, prepared: &PreparedOutbound) -> Result<String, Self::Error> {
+        Ok(prepared.event_id().to_owned())
+    }
+}
+
+impl ProgressPublisher for RecordingProgressPublisher {
+    fn prepare_progress(
+        &self,
+        attempt: &OutboundAttempt,
+    ) -> Result<PreparedOutbound, PublishError> {
+        <Self as OutboundPublisher>::prepare(self, attempt)
+    }
+
+    fn publish_progress(&self, prepared: &PreparedOutbound) -> Result<(), PublishError> {
+        self.creates
+            .lock()
+            .expect("creates")
+            .push(prepared.event_id().to_owned());
+        Ok(())
+    }
+
+    fn edit_progress(
+        &self,
+        _channel_id: &str,
+        post_event_id: &EventId,
+        body: &str,
+    ) -> Result<(), PublishError> {
+        self.edits
+            .lock()
+            .expect("edits")
+            .push((post_event_id.as_str().to_owned(), body.to_owned()));
+        Ok(())
+    }
+
+    fn delete_progress(
+        &self,
+        _channel_id: &str,
+        _post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
+        Ok(())
+    }
+}
+
+fn progress_delivery(body: &str) -> InboxDelivery {
+    crate::inbox::parse_delivery(&serde_json::json!({
+        "method": "inbox.delivery",
+        "params": {
+            "message_id": "progress-message",
+            "kind": "reply",
+            "disposition": "progress",
+            "reply_to": "ask-1",
+            "body": body
+        }
+    }))
+    .expect("progress delivery")
+}
+
+fn final_delivery(body: &str) -> InboxDelivery {
+    crate::inbox::parse_delivery(&serde_json::json!({
+        "method": "inbox.delivery",
+        "params": {
+            "message_id": "final-message",
+            "kind": "reply",
+            "disposition": "final",
+            "reply_to": "ask-1",
+            "body": body
+        }
+    }))
+    .expect("final delivery")
 }
 
 impl Harness {
@@ -852,7 +958,10 @@ fn flow_11_one_ask_while_the_occupant_works() {
     let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
     let message = trigger_event(FOOBAR, "@daniel bot: long job", None);
     let action = harness.ingest(&message).expect("trigger");
-    let mut actor = harness.actor();
+    let publisher = Arc::new(RecordingProgressPublisher::default());
+    let mut actor = harness
+        .actor()
+        .with_progress(Arc::clone(&publisher) as Arc<dyn ProgressPublisher>);
     let waiter = harness.kelpie.register_waiter().expect("waiter");
     actor
         .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
@@ -866,6 +975,68 @@ fn flow_11_one_ask_while_the_occupant_works() {
         1
     );
     assert!(harness.verbs().iter().all(|verb| verb != "tell"));
+
+    assert_eq!(
+        actor
+            .handle_occupant_delivery(
+                &harness.kelpie,
+                &waiter,
+                &*publisher,
+                &progress_delivery("first status"),
+            )
+            .expect("progress"),
+        InboxAction::Ack
+    );
+    let turn = turns(&actor, FOOBAR).remove(0);
+    let opened_at = turn.opened_at.expect("opened at");
+    actor.flush_progress(opened_at + 19).expect("early flush");
+    assert!(publisher.creates.lock().expect("creates").is_empty());
+    actor.flush_progress(opened_at + 20).expect("create flush");
+    assert_eq!(publisher.creates.lock().expect("creates").len(), 1);
+    let prepared = publisher.prepared.lock().expect("prepared");
+    assert_eq!(prepared[0].0, "[bot]: first status");
+    assert_eq!(prepared[0].1.as_deref(), Some(message.id.to_hex().as_str()));
+    assert!(prepared[0].2.is_empty());
+    drop(prepared);
+
+    actor
+        .handle_occupant_delivery(
+            &harness.kelpie,
+            &waiter,
+            &*publisher,
+            &progress_delivery("second status"),
+        )
+        .expect("second progress");
+    actor.flush_progress(opened_at + 49).expect("coalesced");
+    assert!(publisher.edits.lock().expect("edits").is_empty());
+    actor.flush_progress(opened_at + 50).expect("edit flush");
+    assert_eq!(
+        publisher.edits.lock().expect("edits").as_slice(),
+        [("b".repeat(64), "[bot]: second status".to_owned())]
+    );
+    assert_eq!(
+        actor
+            .handle_occupant_delivery(
+                &harness.kelpie,
+                &waiter,
+                &*publisher,
+                &final_delivery("finished"),
+            )
+            .expect("final"),
+        InboxAction::Ack
+    );
+    assert_eq!(turns(&actor, FOOBAR)[0].state, TurnState::Posted);
+    assert_eq!(publisher.prepared.lock().expect("prepared").len(), 2);
+    let progress = actor
+        .repository
+        .progress_post("ask-1")
+        .expect("progress query")
+        .expect("progress row");
+    assert_eq!(
+        progress.post_event_id,
+        Some(EventId::parse_hex(&"b".repeat(64)).unwrap())
+    );
+    assert!(progress.pending_body.is_none());
 }
 
 #[test]

@@ -810,7 +810,7 @@ mod tests {
     use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Keys, Tag};
 
     use super::*;
-    use crate::{NewTurn, SessionRecord, TurnRecord, TurnState};
+    use crate::{NewTurn, ProgressPostRecord, SessionRecord, TurnRecord, TurnState};
 
     #[derive(Debug, Default)]
     struct FakeRepository {
@@ -911,6 +911,29 @@ mod tests {
                 .collect())
         }
 
+        fn record_pending_progress(
+            &mut self,
+            _ask_id: &str,
+            _body: &str,
+        ) -> Result<bool, Self::Error> {
+            unreachable!()
+        }
+
+        fn progress_post(&self, _ask_id: &str) -> Result<Option<ProgressPostRecord>, Self::Error> {
+            unreachable!()
+        }
+
+        fn save_progress_post(
+            &mut self,
+            _progress: &ProgressPostRecord,
+        ) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        fn clear_pending_progress(&mut self, _ask_id: &str) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
         fn enqueue_unprocessed_turn(
             &mut self,
             _turn: &NewTurn,
@@ -1008,6 +1031,7 @@ mod tests {
                     ask_id: Some("ask-id".to_owned()),
                     reply_to_event_id: None,
                     state: TurnState::Open,
+                    opened_at: Some(1),
                 }),
             )
         }

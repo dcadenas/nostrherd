@@ -16,7 +16,7 @@ use botserver::actor::{ActorError, BotActor};
 use botserver::config::{BotRegistry, ConfigError};
 use botserver::herdr::{HerdrError, HerdrPaneAllocator};
 use botserver::inbox::{default_socket, spawn_inbox, HostInbox, InboxDelivery};
-use botserver::outbox::{BuzzPublisher, InFlightReaction, InboxAction};
+use botserver::outbox::{BuzzPublisher, InFlightReaction, InboxAction, ProgressPublisher};
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
@@ -526,12 +526,14 @@ fn start_actors(
     publisher: &BuzzPublisher,
 ) -> Result<Vec<BotActor<SqliteRepository, HerdrPaneAllocator>>, HostError> {
     let reactions: Arc<dyn InFlightReaction> = Arc::new(publisher.clone());
+    let progress: Arc<dyn ProgressPublisher> = Arc::new(publisher.clone());
     let mut actors = bots
         .into_iter()
         .map(|bot| {
             SqliteRepository::open(database).map(|repository| {
                 BotActor::new(bot, repository, HerdrPaneAllocator::default())
                     .with_reactions(Arc::clone(&reactions))
+                    .with_progress(Arc::clone(&progress))
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -541,6 +543,26 @@ fn start_actors(
         }
     }
     Ok(actors)
+}
+
+fn flush_actor_work(
+    actors: &mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
+    kelpie: &KelpieClient,
+    waiter: &HostWaiter<'_>,
+    publisher: &BuzzPublisher,
+) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or_default();
+    for actor in actors {
+        if let Err(error) = actor.flush_progress(now) {
+            eprintln!("progress flush failed: {error}");
+        }
+        if let Err(error) = actor.retry_outbound(kelpie, waiter, publisher) {
+            eprintln!("outbound retry failed: {error}");
+        }
+    }
 }
 
 fn handle_host_delivery(
@@ -660,11 +682,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
                     &mut poll,
                 )
                 .await?;
-                for actor in &mut actors {
-                    if let Err(error) = actor.retry_outbound(&kelpie, &waiter, &publisher) {
-                        eprintln!("outbound retry failed: {error}");
-                    }
-                }
+                flush_actor_work(&mut actors, &kelpie, &waiter, &publisher);
             }
             delivery = inbox.recv() => match delivery {
                 Some(delivery) => {

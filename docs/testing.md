@@ -1226,3 +1226,19 @@ wait "$HOST_PID" 2>/dev/null || true
 
 Any issue whose done-when includes the relay MUST run the harness and
 say so in the issue body.
+
+### Edited progress post (issue 55)
+
+The ignored `live_progress_create_edit_and_delete` integration test
+drives D42's persisted refresh path against the throwaway relay. It
+proves the 20-second hold, one stamped kind 9 without a `p` tag, a kind
+40003 edit targeting the same post after 30 seconds, and a kind 9005
+delete. It registers no Kelpie waiter, so it cannot claim the shared
+`botserver` alias.
+
+```bash
+./tools/local-relay up
+export BOTSERVER_LIVE_CHANNEL=$(tr -d '\n' < "$HOME/tmp-botserver-proof/channel.id")
+env -u BUZZ_AUTH_TAG envchain botserver-proof \
+  cargo test --test live_publish -- --ignored --nocapture
+```

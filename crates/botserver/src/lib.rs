@@ -1377,6 +1377,20 @@ pub struct TurnRecord {
     pub ask_id: Option<String>,
     pub reply_to_event_id: Option<EventId>,
     pub state: TurnState,
+    pub opened_at: Option<i64>,
+}
+
+/// Durable state for one ask's coalesced progress post.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressPostRecord {
+    pub ask_id: String,
+    pub post_event_id: Option<EventId>,
+    pub body: String,
+    pub dispatched: bool,
+    pub edit_count: u16,
+    pub last_send_at: Option<i64>,
+    pub pending_body: Option<String>,
+    pub notice_sent: bool,
 }
 
 /// Result of cancelling unclaimed work and enqueueing a replacement turn.
@@ -1456,6 +1470,34 @@ pub trait HostRepository {
         &self,
         channel_id: &str,
     ) -> Result<Vec<IndexedRelayEvent>, Self::Error>;
+
+    /// Coalesce the latest progress body for an open, undispatched turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when progress state cannot be persisted.
+    fn record_pending_progress(&mut self, ask_id: &str, body: &str) -> Result<bool, Self::Error>;
+
+    /// Load one ask's durable progress state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when progress state cannot be read.
+    fn progress_post(&self, ask_id: &str) -> Result<Option<ProgressPostRecord>, Self::Error>;
+
+    /// Persist one ask's progress state before a relay side effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when progress state cannot be persisted.
+    fn save_progress_post(&mut self, progress: &ProgressPostRecord) -> Result<(), Self::Error>;
+
+    /// Discard progress that has not yet been relayed when a final arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when progress state cannot be persisted.
+    fn clear_pending_progress(&mut self, ask_id: &str) -> Result<(), Self::Error>;
 
     /// Atomically mark a trigger event processed and enqueue its turn.
     ///

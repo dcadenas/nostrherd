@@ -1,5 +1,5 @@
-//! Live publish proof for issue 54 (D43) against the throwaway local
-//! Buzz relay. Skipped unless explicitly requested; run it with the
+//! Live publish proofs for issues 54 and 55 (D43 and D42) against the
+//! throwaway local Buzz relay. Skipped unless explicitly requested; run with the
 //! local-relay harness up (see `skills/local-relay/SKILL.md` and
 //! `docs/testing.md`):
 //!
@@ -11,9 +11,14 @@
 
 use std::time::Duration;
 
-use botserver::outbox::{BuzzPublisher, OutboundAttempt, OutboundPublisher};
-use botserver_domain::{buzz, stamp_outbound, EventId};
-use nostr_sdk::prelude::{Client, Filter, Keys, SignerAuthenticator};
+use botserver::outbox::{
+    flush_progress, BuzzPublisher, OutboundAttempt, OutboundPublisher, ProgressPublisher,
+};
+use botserver::sqlite::SqliteRepository;
+use botserver::{HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord};
+use botserver_domain::{buzz, stamp_outbound, BotId, EventId};
+use nostr_sdk::prelude::{Client, Filter, Keys, Kind, SignerAuthenticator, SingleLetterTag};
+use rusqlite::Connection;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -196,4 +201,172 @@ async fn live_publishes_each_kind_and_dedups_a_redelivery() {
 
     client.disconnect().await;
     println!("live publish proof complete");
+}
+
+struct LiveProgress {
+    client: Client,
+    publisher: BuzzPublisher,
+    channel: String,
+    repository: SqliteRepository,
+    turn: TurnRecord,
+    trigger_id: String,
+}
+
+async fn setup_live_progress() -> LiveProgress {
+    let relay_url = relay_url();
+    let keys = operator_keys();
+    let channel = std::env::var("BOTSERVER_LIVE_CHANNEL").expect("BOTSERVER_LIVE_CHANNEL");
+    let client = connect(keys.clone(), &relay_url).await;
+    let publisher = BuzzPublisher::new(client.clone(), keys, relay_url);
+    let trigger_id = publisher
+        .send_buzz(&buzz::channel_message(
+            &channel,
+            "live progress trigger",
+            &[],
+            None,
+        ))
+        .await
+        .expect("trigger post");
+    let trigger = EventId::parse_hex(&trigger_id).expect("trigger id");
+    let bot_id = BotId::new("bot").expect("bot id");
+    let mut repository =
+        SqliteRepository::from_connection(Connection::open_in_memory().expect("sqlite"))
+            .expect("repository");
+    repository
+        .save_session(&SessionRecord {
+            bot_id: bot_id.clone(),
+            channel_id: channel.clone(),
+            session_name: "bot-live-progress".to_owned(),
+            occupant_logical_id: Some("live-occupant".to_owned()),
+            renew_id: None,
+            ask_context_event_id: None,
+            ask_context_created_at: None,
+        })
+        .expect("session");
+    repository
+        .index_event(
+            &IndexedRelayEvent {
+                event_id: trigger.clone(),
+                author_pubkey: "a".repeat(64),
+                created_at: 1,
+                kind: 9,
+                content: "bot: long work".to_owned(),
+                tags_json: serde_json::to_string(&vec![vec!["h", channel.as_str()]]).expect("tags"),
+                channel_id: Some(channel.clone()),
+                target_event_id: None,
+            },
+            false,
+        )
+        .expect("index trigger");
+    repository
+        .enqueue_turn(&NewTurn {
+            bot_id: bot_id.clone(),
+            channel_id: channel.clone(),
+            event_id: trigger,
+            reply_to_event_id: None,
+        })
+        .expect("queued turn");
+    let turn = repository
+        .open_next_turn(&bot_id, &channel, "live-progress-ask")
+        .expect("open query")
+        .expect("open turn");
+    LiveProgress {
+        client,
+        publisher,
+        channel,
+        repository,
+        turn,
+        trigger_id,
+    }
+}
+
+/// D42's persisted refresh path creates one post, edits that event, and
+/// deletes it on cancellation without registering a host waiter.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live proof; run against tools/local-relay (see docs/testing.md)"]
+async fn live_progress_create_edit_and_delete() {
+    let LiveProgress {
+        client,
+        publisher,
+        channel,
+        mut repository,
+        turn,
+        trigger_id,
+    } = setup_live_progress().await;
+    repository
+        .record_pending_progress("live-progress-ask", "first live status")
+        .expect("record progress");
+    let opened_at = turn.opened_at.expect("opened at");
+    flush_progress(
+        &mut repository,
+        &publisher,
+        &turn,
+        opened_at + 19,
+        &mut |_| {},
+    )
+    .expect("early flush");
+    assert!(repository
+        .progress_post("live-progress-ask")
+        .expect("progress")
+        .expect("progress row")
+        .post_event_id
+        .is_none());
+    flush_progress(
+        &mut repository,
+        &publisher,
+        &turn,
+        opened_at + 20,
+        &mut |_| {},
+    )
+    .expect("create flush");
+    let progress_id = repository
+        .progress_post("live-progress-ask")
+        .expect("progress")
+        .expect("progress row")
+        .post_event_id
+        .expect("progress id");
+    let progress_event = fetch_one(&client, progress_id.as_str())
+        .await
+        .expect("progress create");
+    assert_eq!(progress_event.content, "[bot]: first live status");
+    assert!(tag_values(&progress_event, "p").is_empty());
+    assert_eq!(tag_values(&progress_event, "e"), vec![trigger_id]);
+
+    repository
+        .record_pending_progress("live-progress-ask", "second live status")
+        .expect("record edit");
+    flush_progress(
+        &mut repository,
+        &publisher,
+        &turn,
+        opened_at + 50,
+        &mut |_| {},
+    )
+    .expect("edit flush");
+    let edit_filter = Filter::new()
+        .kind(Kind::Custom(buzz::MESSAGE_EDIT_KIND))
+        .custom_tag(SingleLetterTag::LOWERCASE_E, progress_id.as_str());
+    let edits = client
+        .fetch_events(edit_filter)
+        .timeout(FETCH_TIMEOUT)
+        .await
+        .expect("fetch edits");
+    assert!(edits
+        .iter()
+        .any(|event| event.content == "[bot]: second live status"));
+
+    publisher
+        .delete_progress(&channel, &progress_id)
+        .expect("delete progress");
+    let delete_filter = Filter::new()
+        .kind(Kind::Custom(buzz::MESSAGE_DELETE_KIND))
+        .custom_tag(SingleLetterTag::LOWERCASE_E, progress_id.as_str());
+    let deletes = client
+        .fetch_events(delete_filter)
+        .timeout(FETCH_TIMEOUT)
+        .await
+        .expect("fetch deletes");
+    assert!(!deletes.is_empty());
+    client.disconnect().await;
+    println!("live progress proof complete");
 }
