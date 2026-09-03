@@ -50,6 +50,12 @@ pub struct OutboundAttempt {
     pub dispatched: bool,
 }
 
+impl OutboundAttempt {
+    fn payload_is_mutable(&self) -> bool {
+        self.outbound_event_id.is_none() && self.prepared_event_id.is_none() && !self.dispatched
+    }
+}
+
 /// Failure while classifying or publishing an occupant final.
 #[derive(Debug)]
 pub enum OutboxError<E, P> {
@@ -614,10 +620,7 @@ where
             prepared_created_at: None,
             dispatched: false,
         });
-    if attempt.outbound_event_id.is_none()
-        && attempt.prepared_event_id.is_none()
-        && !attempt.dispatched
-    {
+    if attempt.payload_is_mutable() {
         body.clone_into(&mut attempt.body);
         attempt.channel_id.clone_from(&destination.channel_id);
         attempt.reply_to_event_id = None;
@@ -857,10 +860,7 @@ where
             prepared_created_at: None,
             dispatched: false,
         });
-    if attempt.outbound_event_id.is_none()
-        && attempt.prepared_event_id.is_none()
-        && !attempt.dispatched
-    {
+    if attempt.payload_is_mutable() {
         if let Some(body) = body {
             body.clone_into(&mut attempt.body);
         }
