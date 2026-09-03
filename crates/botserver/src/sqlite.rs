@@ -27,7 +27,8 @@ fn migrate_outbound_reply_to_nullable(connection: &Connection) -> rusqlite::Resu
         return Ok(());
     }
     connection.execute_batch(
-        "CREATE TABLE outbound_attempts_new (
+        "BEGIN IMMEDIATE;
+         CREATE TABLE outbound_attempts_new (
              ask_id TEXT PRIMARY KEY NOT NULL,
              body TEXT NOT NULL,
              channel_id TEXT NOT NULL,
@@ -48,7 +49,8 @@ fn migrate_outbound_reply_to_nullable(connection: &Connection) -> rusqlite::Resu
                 outbound_event_id, dispatched
          FROM outbound_attempts;
          DROP TABLE outbound_attempts;
-         ALTER TABLE outbound_attempts_new RENAME TO outbound_attempts;",
+         ALTER TABLE outbound_attempts_new RENAME TO outbound_attempts;
+         COMMIT;",
     )
 }
 
@@ -1322,6 +1324,57 @@ mod tests {
             .open_next_turn(&bot_id, channel_id, "ask-1")
             .unwrap();
         assert!(repository.claim_turn_for_publish("ask-1").unwrap());
+    }
+
+    #[test]
+    fn outbound_attempts_nullable_reply_to_keeps_existing_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE outbound_attempts (
+                     ask_id TEXT PRIMARY KEY NOT NULL,
+                     body TEXT NOT NULL,
+                     channel_id TEXT NOT NULL,
+                     reply_to_event_id TEXT NOT NULL CHECK(length(reply_to_event_id) = 64),
+                     mention TEXT NOT NULL,
+                     outbound_event_id TEXT,
+                     dispatched INTEGER NOT NULL DEFAULT 1
+                 ) STRICT;
+                 INSERT INTO outbound_attempts(
+                     ask_id, body, channel_id, reply_to_event_id, mention,
+                     outbound_event_id, dispatched
+                 ) VALUES (
+                     'ask-keep',
+                     'hello',
+                     'ab12cd34-5678-90ab-cdef-0123456789ab',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'mention',
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                     1
+                 );",
+            )
+            .unwrap();
+        let repository = SqliteRepository::from_connection(connection).expect("migrated");
+        let attempt = repository
+            .outbound_attempt("ask-keep")
+            .unwrap()
+            .expect("kept");
+        assert_eq!(attempt.body, "hello");
+        assert_eq!(
+            attempt.outbound_event_id.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert!(attempt.dispatched);
+        let notnull: i64 = repository
+            .connection
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('outbound_attempts')
+                 WHERE name = 'reply_to_event_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(notnull, 0);
     }
 
     #[test]

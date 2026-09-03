@@ -302,6 +302,9 @@ fn classify_buzz_failure(status: String, stderr: &str) -> PublishError {
 /// Classify one inbox delivery against a persisted turn.
 #[must_use]
 pub fn classify_delivery(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> InboxAction {
+    if delivery.kind() == "tell" {
+        return InboxAction::Ack;
+    }
     match decide(delivery, turn) {
         Decision::Hold => InboxAction::Hold,
         Decision::AckWithoutPublish | Decision::Publish { .. } => InboxAction::Ack,
@@ -354,16 +357,26 @@ where
     R: HostRepository,
     P: OutboundPublisher,
 {
-    let Some(parsed) = parse_occupant_tell(delivery.body()) else {
-        return Ok(InboxAction::Ack);
-    };
     let Some(session) = occupant_session(repository, delivery).map_err(OutboxError::Repository)?
     else {
+        return Ok(InboxAction::Ack);
+    };
+    let Some(parsed) = parse_occupant_tell(delivery.body()) else {
+        notice(&format!(
+            "occupant tell {} from {} had no publishable body",
+            delivery.message_id(),
+            session.session_name
+        ));
         return Ok(InboxAction::Ack);
     };
     let Some(destination) =
         route_tell(repository, &session, &parsed).map_err(OutboxError::Repository)?
     else {
+        notice(&format!(
+            "occupant tell {} from {} did not route",
+            delivery.message_id(),
+            session.session_name
+        ));
         return Ok(InboxAction::Ack);
     };
     publish_initiated(
@@ -381,20 +394,24 @@ fn occupant_session<R: HostRepository>(
     repository: &R,
     delivery: &InboxDelivery,
 ) -> Result<Option<SessionRecord>, R::Error> {
-    let by_name = delivery
-        .sender_public_name()
-        .map(|name| repository.session_by_name(name))
+    let name = delivery.sender_public_name();
+    let id = delivery.sender_agent_id();
+    let by_name = name
+        .map(|value| repository.session_by_name(value))
         .transpose()?
         .flatten();
-    let by_id = delivery
-        .sender_agent_id()
-        .map(|id| repository.session_by_occupant_logical_id(id))
+    let by_id = id
+        .map(|value| repository.session_by_occupant_logical_id(value))
         .transpose()?
         .flatten();
-    Ok(match (by_name, by_id) {
-        (Some(named), Some(bound)) if named == bound => Some(named),
-        (Some(named), None) => Some(named),
-        (None, Some(bound)) => Some(bound),
+    Ok(match (name, id, by_name, by_id) {
+        (Some(_), Some(id), Some(named), Some(bound))
+            if named == bound && named.occupant_logical_id.as_deref() == Some(id) =>
+        {
+            Some(named)
+        }
+        (Some(_), None, Some(named), None) => Some(named),
+        (None, Some(_), None, Some(bound)) => Some(bound),
         _ => None,
     })
 }
@@ -1213,6 +1230,60 @@ mod tests {
             repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
             TurnState::Open
         );
+    }
+
+    #[test]
+    fn unknown_named_sender_tell_does_not_post() {
+        let (mut repository, publisher) = open_repo();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-5", "hi", Some("stranger"), None),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Open
+        );
+    }
+
+    #[test]
+    fn disagreeing_tell_identity_does_not_post() {
+        let (mut repository, publisher) = open_repo();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-6", "hi", Some("bot-foobar"), Some("other-occupant")),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+    }
+
+    #[test]
+    fn known_occupant_unroutable_tell_notices() {
+        let (mut repository, publisher) = open_repo();
+        let mut notices = Vec::new();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut |notice| notices.push(notice.to_owned()),
+            &occupant_tell(
+                "tell-7",
+                "<botserver to=\"missing\">nope</botserver>",
+                Some("bot-foobar"),
+                None,
+            ),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("did not route"));
     }
 
     #[test]
