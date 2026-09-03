@@ -941,6 +941,13 @@ mod tests {
             unreachable!()
         }
 
+        fn session_by_occupant_logical_id(
+            &self,
+            _occupant_logical_id: &str,
+        ) -> Result<Option<SessionRecord>, Self::Error> {
+            unreachable!()
+        }
+
         fn open_next_turn(
             &mut self,
             _bot_id: &BotId,

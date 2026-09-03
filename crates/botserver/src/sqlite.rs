@@ -14,6 +14,44 @@ use crate::{
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn migrate_outbound_reply_to_nullable(connection: &Connection) -> rusqlite::Result<()> {
+    let notnull: Option<i64> = connection
+        .query_row(
+            "SELECT \"notnull\" FROM pragma_table_info('outbound_attempts')
+             WHERE name = 'reply_to_event_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if notnull != Some(1) {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "CREATE TABLE outbound_attempts_new (
+             ask_id TEXT PRIMARY KEY NOT NULL,
+             body TEXT NOT NULL,
+             channel_id TEXT NOT NULL,
+             reply_to_event_id TEXT CHECK(
+                 reply_to_event_id IS NULL OR length(reply_to_event_id) = 64
+             ),
+             mention TEXT NOT NULL,
+             outbound_event_id TEXT CHECK(
+                 outbound_event_id IS NULL OR length(outbound_event_id) = 64
+             ),
+             dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1))
+         ) STRICT;
+         INSERT INTO outbound_attempts_new(
+             ask_id, body, channel_id, reply_to_event_id, mention,
+             outbound_event_id, dispatched
+         )
+         SELECT ask_id, body, channel_id, reply_to_event_id, mention,
+                outbound_event_id, dispatched
+         FROM outbound_attempts;
+         DROP TABLE outbound_attempts;
+         ALTER TABLE outbound_attempts_new RENAME TO outbound_attempts;",
+    )
+}
+
 fn add_column_if_missing(connection: &Connection, sql: &str) -> rusqlite::Result<()> {
     if let Err(error) = connection.execute(sql, []) {
         let duplicate_column = match &error {
@@ -130,16 +168,18 @@ impl SqliteRepository {
                    ON turns(session_id, sequence);
 
               CREATE TABLE IF NOT EXISTS outbound_attempts (
-                  ask_id TEXT PRIMARY KEY NOT NULL,
-                  body TEXT NOT NULL,
-                  channel_id TEXT NOT NULL,
-                  reply_to_event_id TEXT NOT NULL CHECK(length(reply_to_event_id) = 64),
-                  mention TEXT NOT NULL,
-                  outbound_event_id TEXT CHECK(
-                      outbound_event_id IS NULL OR length(outbound_event_id) = 64
-                  ),
-                  dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1))
-              ) STRICT;",
+                   ask_id TEXT PRIMARY KEY NOT NULL,
+                   body TEXT NOT NULL,
+                   channel_id TEXT NOT NULL,
+                   reply_to_event_id TEXT CHECK(
+                       reply_to_event_id IS NULL OR length(reply_to_event_id) = 64
+                   ),
+                   mention TEXT NOT NULL,
+                   outbound_event_id TEXT CHECK(
+                       outbound_event_id IS NULL OR length(outbound_event_id) = 64
+                   ),
+                   dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1))
+               ) STRICT;",
         )?;
         add_column_if_missing(
             &connection,
@@ -157,6 +197,7 @@ impl SqliteRepository {
             &connection,
             "ALTER TABLE sessions ADD COLUMN ask_context_created_at INTEGER",
         )?;
+        migrate_outbound_reply_to_nullable(&connection)?;
         Ok(Self { connection })
     }
 
@@ -424,6 +465,21 @@ impl HostRepository for SqliteRepository {
                 Self::read_session,
             )
             .optional()
+    }
+
+    fn session_by_occupant_logical_id(
+        &self,
+        occupant_logical_id: &str,
+    ) -> Result<Option<SessionRecord>, Self::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id,
+                    ask_context_event_id, ask_context_created_at
+             FROM sessions WHERE occupant_logical_id = ?1",
+        )?;
+        let mut sessions = statement
+            .query_map([occupant_logical_id], Self::read_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((sessions.len() == 1).then(|| sessions.remove(0)))
     }
 
     fn open_next_turn(
@@ -735,7 +791,7 @@ impl HostRepository for SqliteRepository {
                 attempt.ask_id,
                 attempt.body,
                 attempt.channel_id,
-                attempt.reply_to_event_id.as_str(),
+                attempt.reply_to_event_id.as_ref().map(EventId::as_str),
                 attempt.mention,
                 attempt.outbound_event_id,
                 i64::from(attempt.dispatched)
@@ -752,13 +808,16 @@ impl HostRepository for SqliteRepository {
                  FROM outbound_attempts WHERE ask_id = ?1",
                 [ask_id],
                 |row| {
-                    let reply_to: String = row.get(3)?;
+                    let reply_to: Option<String> = row.get(3)?;
                     let dispatched: i64 = row.get(6)?;
                     Ok(OutboundAttempt {
                         ask_id: row.get(0)?,
                         body: row.get(1)?,
                         channel_id: row.get(2)?,
-                        reply_to_event_id: parse_event_id(&reply_to, 3)?,
+                        reply_to_event_id: reply_to
+                            .as_deref()
+                            .map(|value| parse_event_id(value, 3))
+                            .transpose()?,
                         mention: row.get(4)?,
                         outbound_event_id: row.get(5)?,
                         dispatched: dispatched != 0,
@@ -950,9 +1009,21 @@ mod tests {
         );
         assert_eq!(
             repository.session_by_name(&expected.session_name).unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            repository
+                .session_by_occupant_logical_id("logical-agent-id")
+                .unwrap(),
             Some(expected)
         );
         assert_eq!(repository.session_by_name("missing").unwrap(), None);
+        assert_eq!(
+            repository
+                .session_by_occupant_logical_id("missing")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -465,3 +465,22 @@ The host stamp is `[{bot-id}]:`. `stamp_outbound` takes that bot's
 prefix. Occupants still MUST NOT stamp. Own `[pr]:` / `[bot]:` posts
 MUST NOT open a turn. Do not keep a global `[bot]:` constant as the
 only stamp.
+
+## D38. Occupant tell is a bot-initiated channel post
+
+Status: accepted
+
+A Kelpie tell from a known occupant is a bot-initiated kind 9, not a
+trigger answer (D5). Identity is `sender_public_name` matching
+`session_name`, or `sender_agent_id` matching `occupant_logical_id`.
+Disagreeing or missing identity is unknown: ACK, do not post.
+
+Hang point is that occupant's channel. Nested `<botserver to="…">` in
+the tell body is host routing, not a Kelpie flag. Inner text is the
+body; prose outside the tag is scratch. No tag, or a tag with no `to`,
+posts to this session's channel. `to` is an exact channel UUID or an
+exact slug this bot already knows. Unknown or ambiguous `to` does not
+post. Tells do not `--reply-to` a trigger, do not add `⏳`, and MUST
+NOT close a `{id}:` turn. Stamp stays `[{bot-id}]:` (D37). Occupants
+still have no nsec (D31). `--due-in` is Kelpie holding the delivery;
+the host publishes when the tell is delivered.

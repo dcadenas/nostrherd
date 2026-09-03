@@ -13,12 +13,12 @@ flows 1–12. It is not a live relay proof.
 
 `crates/botserver/src/outbox.rs` and `inbox.rs` prove host publish on
 kelpie final, ACK-after-decide, crash-safe retry of the same outbound
-event, and best-effort `⏳` add/remove on the trigger. That is not a
-live relay proof.
+event, best-effort `⏳` add/remove on the trigger, and occupant-tell
+routing (D38). That is not a live relay proof.
 
-`TriggerMatch` and `TurnTransition` are parsed types in
-`crates/domain`. Illegal trigger text and illegal turn changes are
-`None`, not stringly-typed later.
+`TriggerMatch`, `TurnTransition`, and `parse_occupant_tell` are parsed
+types in `crates/domain`. Illegal trigger text, illegal turn changes,
+and malformed tell tags are `None`, not stringly-typed later.
 
 Ask body shape (request, then capped Context) is proved by
 `crates/botserver/src/ask_body.rs` and
@@ -42,6 +42,7 @@ Invariants and their tests: `docs/invariants.md`.
 | 10 Edit / delete | `flow_10_edit_answers_latest_text_and_delete_abandons`, `flow_10_claimed_turn_keeps_the_landing_reply`, `flow_10_posted_turn_is_left_up_after_delete`, `spec_flow_10_cancelled_turn_never_reaches_buzz` | landed (`dcadenas/botserver#20`) |
 | 11 Long work | `flow_11_one_ask_while_the_occupant_works`, `spec_flow_11_one_stamped_reply_then_final` | landed (`dcadenas/botserver#20`) |
 | 12 Desktop | `flow_12_host_does_not_publish_presence_or_typing` | landed (`dcadenas/botserver#20`) |
+| 13 Bot-initiated tell | `known_occupant_tell_posts_without_trigger_reply_to`, `occupant_tell_tag_routes_and_drops_scratch` | optional |
 
 Live columns are issues 18–20. Occupant start/ask from the running host
 (`dcadenas/botserver#17`) uses the local relay; it is not the flow 2 live

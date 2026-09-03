@@ -29,7 +29,8 @@ created_at).
 Work owed for one triggering Nostr event. Holds: event id, Kelpie ask
 id, `TurnState` (`queued`, `open`, `posted`, `failed`, `cancelled`).
 Completing a turn is occupant `kelpie reply --final`, then host
-publish, then `inbox.ack`, not cancel. Publish reservation is a claim,
+publish, then `inbox.ack`, not cancel. An occupant tell is not a turn
+(D38): it is a bot-initiated post on a known session channel. Publish reservation is a claim,
 not a state (D28). The host keeps a durable outbound attempt (body,
 channel, trigger EventId, mention, accepted event id) so retry cannot
 mint a second stamp. While work on a trigger EventId is queued or open

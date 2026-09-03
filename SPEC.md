@@ -27,9 +27,10 @@ selected by convention, posting with a visible bot stamp.
 5. Inject a Kelpie **ask** whose waiter is `botserver`. Body is the
    trigger remainder, then a marked Context section of unread
    channel events. `from=` MUST be `botserver`, never a relay pubkey.
-6. Occupant answers with `kelpie reply --final` and unstamped prose.
-    The host is the only Nostr publisher: it stamps `[{bot-id}]:`, posts
-    from sqlite coordinates, then `inbox.ack`.
+6. Occupant answers a trigger with `kelpie reply --final` and unstamped
+    prose. It MAY `kelpie tell botserver` for a bot-initiated channel
+    post (D38). The host is the only Nostr publisher: it stamps
+    `[{bot-id}]:`, posts from sqlite coordinates, then `inbox.ack`.
 7. Persist host state (sessions, turns, processed events) in SQLite.
 8. Bound occupant context with Kelpie renew (wall-clock). Durable
    context lives in files, not only in the model.
@@ -86,7 +87,9 @@ untrusted indexed channel delta
 ```
 
 Tells MUST NOT be used for triggered channel work: they create no
-obligation or reminder.
+obligation or reminder. A tell from a known occupant is a bot-initiated
+post (D38), parsed by the host for an optional nested
+`<botserver to="…">` routing tag.
 
 `from=botserver` is the waiter public name, not a pane and not a relay
 pubkey (D2).
@@ -99,6 +102,10 @@ and unstamped prose. The final body MUST come from `--stdin` or
 `--file`, never from a shell-expanded argument. It MUST NOT stamp
 `[{id}]:`, MUST NOT call the relay, and MUST NOT receive the operator
 nsec. Cancel MUST NOT be used for a successful answer.
+
+A tell body MAY contain one `<botserver to="slug-or-uuid">…</botserver>`
+tag. Inner text is the published body. Text outside the tag MUST NOT be
+posted. No tag, or a tag with no `to`, posts to that occupant's channel.
 
 The occupant self-renews. The host MUST NOT arm occupant renew with
 `--sender-id` of waiter `botserver`, so this inbox only sees channel
@@ -114,6 +121,10 @@ Occupants never get the operator nsec.
 Outbound `--reply-to` is the triggering EventId, including the first
 call. Keep the trigger's existing parent separately when snapshots need
 thread-root context.
+
+A known-occupant tell (D38) MUST stamp the same way and MUST NOT pass
+`--reply-to` or add `⏳`. Unknown senders, unknown `to=`, and empty
+bodies MUST NOT post. Tells MUST NOT close a trigger turn.
 
 The host MUST `--mention` the indexed event's effective author (not the
 raw relay signer, not an arbitrary `p` tag), including operator-authored
@@ -143,6 +154,8 @@ Classify by `reply_to` in the host's Turn ids:
 - Cancelled turn: ACK, do not publish.
 - Already posted: ACK.
 - Unknown `reply_to`: do not publish.
+- Known-occupant tell: publish as a bot-initiated post, then ACK.
+  Unknown sender: ACK, do not publish.
 
 ## Persistence
 
@@ -196,6 +209,10 @@ subset.
     queued or open, and removes it when that work ends (D35).
 12. **Desktop.** Buzz desktop is still Daniel. The host does not mark
     him typing or rewrite his presence.
+13. **Bot-initiated line.** Occupant `kelpie tell botserver` with no
+    inner tag posts one stamped kind 9 in that session's channel, not
+    as a reply to a `{id}:` event. A nested `<botserver to="eng">`
+    routes to that known place. Scratch outside the tag is not posted.
 
 ## Issue work
 

@@ -22,6 +22,8 @@ pub struct InboxDelivery {
     kind: String,
     disposition: Option<String>,
     reply_to: Option<String>,
+    sender_agent_id: Option<String>,
+    sender_public_name: Option<String>,
     body: String,
 }
 
@@ -54,6 +56,18 @@ impl InboxDelivery {
     #[must_use]
     pub fn body(&self) -> &str {
         &self.body
+    }
+
+    /// Return the sender logical id when the delivery names one.
+    #[must_use]
+    pub fn sender_agent_id(&self) -> Option<&str> {
+        self.sender_agent_id.as_deref()
+    }
+
+    /// Return the sender public name when the delivery names one.
+    #[must_use]
+    pub fn sender_public_name(&self) -> Option<&str> {
+        self.sender_public_name.as_deref()
     }
 }
 
@@ -221,6 +235,8 @@ pub fn parse_delivery(event: &Value) -> Result<InboxDelivery, KelpieError> {
             .get("reply_to")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
+        sender_agent_id: optional_text(params, "sender_agent_id"),
+        sender_public_name: optional_text(params, "sender_public_name"),
         body: params
             .get("body")
             .and_then(Value::as_str)
@@ -228,6 +244,14 @@ pub fn parse_delivery(event: &Value) -> Result<InboxDelivery, KelpieError> {
             .to_owned(),
         message_id,
     })
+}
+
+fn optional_text(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// Spawn a reconnecting inbox that keeps the claim until the host ACKs.
