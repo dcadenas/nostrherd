@@ -500,8 +500,10 @@ terminal id.
 Do not `herdr tab create`. That adds a tab to whatever workspace the
 host process is in.
 
-Reuse by label is not reliable in this issue: Herdr `workspace create`
-always mints a new workspace, labels are display names (not unique
-ids), and cwd-derived labels can drift. Recovery of a gone pane
-therefore creates another session-named workspace. It MUST NOT attach
-to the host's workspace.
+Reuse by label is not reliable in this issue. Herdr `workspace create`
+always mints a new workspace; there is no atomic get-or-create. Labels
+are not unique, and a workspace that already has that label may already
+host a live occupant on its root pane. Recovery of a gone pane therefore
+creates another session-named workspace. It MUST NOT attach to the
+host's workspace. Reclaim of leaked occupant workspaces is out of
+scope here.
