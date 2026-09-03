@@ -1,7 +1,7 @@
-//! Live publish proof for issue 54 (D43) against the throwaway local
-//! Buzz relay. Skipped unless explicitly requested; run it with the
-//! local-relay harness up (see `skills/local-relay/SKILL.md` and
-//! `docs/testing.md`):
+//! Live publish and subscription-refresh proofs for issues 54 and 57
+//! against the throwaway local Buzz relay. Skipped unless explicitly
+//! requested; run it with the local-relay harness up (see
+//! `skills/local-relay/SKILL.md` and `docs/testing.md`):
 //!
 //! ```bash
 //! ./tools/local-relay up
@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use botserver::outbox::{BuzzPublisher, OutboundAttempt, OutboundPublisher};
 use botserver_domain::{buzz, stamp_outbound, EventId};
-use nostr_sdk::prelude::{Client, Filter, Keys, SignerAuthenticator};
+use futures::StreamExt;
+use nostr_sdk::prelude::{
+    Client, ClientNotification, Filter, Keys, SignerAuthenticator, SubscriptionId, Timestamp,
+};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -72,6 +75,28 @@ fn attempt_for(channel: &str, trigger: &EventId, body: &str) -> OutboundAttempt 
         prepared_created_at: None,
         dispatched: false,
     }
+}
+
+async fn assert_refresh_filters(client: &Client, channel: &str, trigger: &EventId) {
+    let subscriptions = client.subscriptions().await;
+    let channel_filter = subscriptions
+        .get(&SubscriptionId::new("botserver-channels"))
+        .and_then(|relays| relays.values().next())
+        .and_then(|filters| filters.first())
+        .expect("channel subscription");
+    let mutation_filter = subscriptions
+        .get(&SubscriptionId::new("botserver-mutations"))
+        .and_then(|relays| relays.values().next())
+        .and_then(|filters| filters.first())
+        .expect("mutation subscription");
+    assert_eq!(
+        serde_json::to_value(channel_filter).expect("channel filter json")["#h"],
+        serde_json::json!([channel])
+    );
+    assert_eq!(
+        serde_json::to_value(mutation_filter).expect("mutation filter json")["#e"],
+        serde_json::json!([trigger.as_str()])
+    );
 }
 
 /// One event of each kind (9, 40003, 9005, 7 plus the kind-5 removal),
@@ -196,4 +221,101 @@ async fn live_publishes_each_kind_and_dedups_a_redelivery() {
 
     client.disconnect().await;
     println!("live publish proof complete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live proof; run against tools/local-relay (see docs/testing.md)"]
+async fn live_refresh_replaces_channel_and_active_turn_filters() {
+    let relay_url = relay_url();
+    let keys = operator_keys();
+    let operator = keys.public_key().to_hex();
+    let channel = std::env::var("BOTSERVER_LIVE_CHANNEL").expect(
+        "BOTSERVER_LIVE_CHANNEL (a channel UUID the operator is a member of, \
+         created by the docs/testing.md recipe)",
+    );
+    let client = connect(keys.clone(), &relay_url).await;
+    let publisher = BuzzPublisher::new(client.clone(), keys, relay_url);
+    let subscriber = botserver::relay::RelaySubscriber::new(client.clone());
+    let mut notifications = subscriber.notifications();
+
+    subscriber
+        .subscribe(&operator, &[], &[], Timestamp::now())
+        .await
+        .expect("initial subscriptions");
+
+    let trigger_id = publisher
+        .send_buzz(&buzz::channel_message(
+            &channel,
+            "subscription refresh trigger",
+            &[],
+            None,
+        ))
+        .await
+        .expect("trigger post");
+    let trigger = EventId::parse_hex(&trigger_id).expect("trigger id");
+
+    subscriber
+        .subscribe(
+            &operator,
+            std::slice::from_ref(&channel),
+            std::slice::from_ref(&trigger),
+            Timestamp::now(),
+        )
+        .await
+        .expect("refreshed subscriptions");
+    assert_refresh_filters(&client, &channel, &trigger).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let channel_event = publisher
+        .send_buzz(&buzz::channel_message(
+            &channel,
+            "event after subscription refresh",
+            &[],
+            None,
+        ))
+        .await
+        .expect("channel post");
+    let mutation_event = publisher
+        .send_buzz(&buzz::message_edit(
+            &channel,
+            &trigger,
+            "edit after subscription refresh",
+        ))
+        .await
+        .expect("mutation post");
+
+    let mut channel_received = false;
+    let received = tokio::time::timeout(FETCH_TIMEOUT, async {
+        while !channel_received {
+            let Some(notification) = notifications.next().await else {
+                panic!("relay notifications ended");
+            };
+            if let ClientNotification::Event {
+                subscription_id,
+                event,
+                ..
+            } = notification
+            {
+                channel_received |= subscription_id == SubscriptionId::new("botserver-channels")
+                    && event.id.to_hex() == channel_event;
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_ok(),
+        "refreshed channel filter did not receive its matching event"
+    );
+    let stored_mutations = subscriber
+        .fetch_mutations(std::slice::from_ref(&trigger), Timestamp::zero())
+        .await
+        .expect("fetch mutations");
+    assert!(
+        stored_mutations
+            .iter()
+            .any(|event| event.id.to_hex() == mutation_event),
+        "changed active-turn scope did not match the stored mutation"
+    );
+
+    client.disconnect().await;
 }
