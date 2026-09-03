@@ -473,7 +473,9 @@ Status: accepted
 A Kelpie tell from a known occupant is a bot-initiated kind 9, not a
 trigger answer (D5). Identity is `sender_public_name` matching
 `session_name`, or `sender_agent_id` matching `occupant_logical_id`.
-Disagreeing or missing identity is unknown: ACK, do not post.
+When both are present they MUST agree. Disagreeing or missing identity
+is unknown: ACK, do not post. The host reads those fields from
+`inbox.delivery` when Kelpie includes them. Absent fields fail closed.
 
 Hang point is that occupant's channel. Nested `<botserver to="…">` in
 the tell body is host routing, not a Kelpie flag. Inner text is the

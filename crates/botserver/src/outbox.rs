@@ -1146,6 +1146,27 @@ mod tests {
     }
 
     #[test]
+    fn agreeing_tell_identity_posts() {
+        let (mut repository, publisher) = open_repo();
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell(
+                "tell-both",
+                "both fields",
+                Some("bot-foobar"),
+                Some("occupant-agent"),
+            ),
+        )
+        .expect("handle");
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[bot]: both fields".to_owned()]
+        );
+    }
+
+    #[test]
     fn known_occupant_tell_posts_without_trigger_reply_to() {
         let (mut repository, publisher) = open_repo();
         let reactions = RecordingInFlightReaction::default();
