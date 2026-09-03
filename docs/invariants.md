@@ -21,6 +21,7 @@ this file and SPEC disagree.
 | I14 | Host stamp is `[{bot-id}]:`; occupants MUST NOT stamp; own stamped posts MUST NOT retrigger | `stamp_outbound_prefixes_once`, `bot_uses_id_as_inbound_trigger_and_rejects_empty_kind`, `pr_bot_final_publishes_pr_stamp_once`, `final_with_text_publishes_then_acks`, `stamped_self_posts_do_not_emit_triggers` |
 | I15 | Known-occupant tell posts a stamped kind 9 with no trigger `--reply-to` and MUST NOT close a turn; unknown sender or `to=` MUST NOT post | `known_occupant_tell_posts_without_trigger_reply_to`, `occupant_tell_tag_routes_and_drops_scratch`, `unknown_tell_destination_does_not_post`, `unknown_named_sender_tell_does_not_post`, `disagreeing_tell_identity_does_not_post`, `missing_reply_to_acks_without_publish`, `occupant_tell_without_tag_posts_the_whole_body` |
 | I16 | Occupant panes MUST be allocated with `herdr workspace create`, never `tab create` | `allocate_uses_workspace_create_not_tab_create` |
+| I17 | One progress post per ask (D42): host-created and host-edited, no `--mention`, kept on final, Buzz-deleted (kind 9005) on cancel, excluded from snapshots and ask Context | `progress_acks_without_publish` (extended), `flow_11_one_ask_while_the_occupant_works` (extended), `snapshot_progress_post_excluded` (new), `cancelled_progress_post_deleted` (new); new tests land with the D42 implementation |
 
 SPEC user-visible flows are the product matrix in `docs/testing.md`.
 

@@ -11,6 +11,10 @@ EOF
 
 Do not stamp `[{id}]:`. Do not call the relay. Do not wrap envchain.
 
+For long work, send progress first: `kelpie reply <ask-id> --progress
+--stdin` with the full current status; it resets the reply reminder.
+Always finish with `--final`.
+
 <!-- botserver-place-snapshots -->
 Read `.botserver/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.
 <!-- /botserver-place-snapshots -->

@@ -1,7 +1,7 @@
 # SPEC.md
 
 Normative contract for `botserver`. The host publishes; the occupant
-only `kelpie reply --final`.
+only `kelpie reply`.
 If this file and another document disagree, this file wins unless the
 other document is a later accepted decision in `docs/decision-log.md`.
 
@@ -29,8 +29,10 @@ selected by convention, posting with a visible bot stamp.
    channel events. `from=` MUST be `botserver`, never a relay pubkey.
 6. Occupant answers a trigger with `kelpie reply --final` and unstamped
     prose. It MAY `kelpie tell botserver` for a bot-initiated channel
-    post (D38). The host is the only Nostr publisher: it stamps
-    `[{bot-id}]:`, posts from sqlite coordinates, then `inbox.ack`.
+    post (D38). It MAY report progress with `kelpie reply --progress`;
+    the host relays that as one edited stamped post (D42). The host is
+    the only Nostr publisher: it stamps `[{bot-id}]:`, posts from
+    sqlite coordinates, then `inbox.ack`.
 7. Persist host state (sessions, turns, processed events) in SQLite.
 8. Bound occupant context with Kelpie renew (wall-clock). Durable
    context lives in files, not only in the model.
@@ -101,7 +103,10 @@ and renew stay. It MUST answer a trigger ask with `kelpie reply --final`
 and unstamped prose. The final body MUST come from `--stdin` or
 `--file`, never from a shell-expanded argument. It MUST NOT stamp
 `[{id}]:`, MUST NOT call the relay, and MUST NOT receive the operator
-nsec. Cancel MUST NOT be used for a successful answer.
+nsec. Cancel MUST NOT be used for a successful answer. It MAY send
+`kelpie reply <ask-id> --progress` with the full current status,
+unstamped, from `--stdin` or `--file`. Progress never replaces the
+final (D42).
 
 A tell body MAY contain one `<botserver to="slug-or-uuid">…</botserver>`
 tag. Inner text is the published body. Text outside the tag MUST NOT be
@@ -128,7 +133,15 @@ bodies MUST NOT post. Tells MUST NOT close a trigger turn.
 
 The host MUST `--mention` the indexed event's effective author (not the
 raw relay signer, not an arbitrary `p` tag), including operator-authored
-triggers. `ignore_self` still blocks retrigger.
+triggers. `ignore_self` still blocks retrigger. The progress post (D42)
+is the exception: it carries no `--mention`.
+
+On progress for an open ask the host MUST relay one stamped kind 9 per
+ask, `--reply-to` the trigger, without `--mention`, created after the
+initial hold and then edited in place (kind 40003) under the D42
+interval and edit cap. A cancel that abandons or replaces the ask MUST
+issue a Buzz delete (kind 9005) on that post, best-effort. The final
+leaves it up. Progress failures MUST NOT fail the turn.
 
 The host persists a durable outbound attempt before publish. Retry of
 an accepted send uses that same outbound event id (D28).
@@ -150,7 +163,9 @@ Classify by `reply_to` in the host's Turn ids:
 
 - Empty or whitespace-only final: do not ACK if a later valid final
   should still be allowed.
-- Progress: ACK, do not publish.
+- Progress: relay per D42 (create or edit, best-effort), then ACK.
+  Progress on a non-open turn or a dispatched attempt: ACK, do not
+  relay.
 - Cancelled turn: ACK, do not publish.
 - Already posted: ACK.
 - Unknown `reply_to`: do not publish.
@@ -195,18 +210,24 @@ subset.
 7. **Thread.** `@daniel bot:` in a foobar thread still uses
    `bot-foobar` and replies into that thread.
 8. **Busy.** Two `@daniel bot:` in `#foobar` before the first reply:
-   one occupant, two turns in order.
+   one occupant, two turns in order. The queued turn has no progress
+   post until it opens.
 9. **Gone pane.** Occupant process died with an open ask: recover that
    logical agent, do not start a namesake twin. The user still gets at
-   most one `[bot]:` for that call.
+   most one final `[bot]:` for that call.
 10. **Edit / delete.** Edit of the triggering message before the bot
     posts: the one eventual `[bot]:` answers the **latest** text
     (cancel the old ask, ask again). Delete before it posts: no post.
     After it posted: leave `[bot]:` up. A late occupant final on a
-    cancelled ask MUST NOT publish (I10, host).
-11. **Long work.** One stamped reply when done. No working ping in v1.
-    The host marks the trigger with `⏳` while work on that EventId is
-    queued or open, and removes it when that work ends (D35).
+    cancelled ask MUST NOT publish (I10, host). A progress post for
+    the cancelled ask is deleted (kind 9005).
+11. **Long work.** After 20 s of open work the host posts one stamped
+    progress post in the thread from the occupant's `--progress` prose
+    and edits it in place as newer bodies arrive (D42). People in the
+    thread see it appear once and change; the final is a second
+    stamped post. The host marks the trigger with `⏳` while work on
+    that EventId is queued or open, and removes it when that work ends
+    (D35).
 12. **Desktop.** Buzz desktop is still Daniel. The host does not mark
     him typing or rewrite his presence.
 13. **Bot-initiated line.** Occupant `kelpie tell botserver` with no

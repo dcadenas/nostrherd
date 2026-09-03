@@ -152,8 +152,9 @@ context. No extra occupant.
 
 Status: accepted
 
-User-visible: at most one `[bot]:` for that triggering event, and it
-answers the **latest** body.
+User-visible: at most one final `[bot]:` for that triggering event, and it
+answers the **latest** body. A progress post (D42) is not a second answer
+and is deleted when the ask is replaced.
 
 Turn transition, if the host has not published: `kelpie cancel` the
 open ask (abandoned: the question changed), then open a **new** Turn /
@@ -184,9 +185,10 @@ Reactions, huddles, canvas, kind:0, and file-only events without a
 
 Status: accepted
 
-Closes Q5. No `[bot]: working…` protocol. The occupant may take time;
-people see one stamped reply when the host publishes after occupant
-final. Progress replies ACK and MUST NOT publish (D33).
+Closes Q5. The occupant may take time; people see one final stamped
+reply when the host publishes after occupant final. The host never
+posts an invented working ping. Progress prose is relayed as one
+host-edited progress post per ask (D42), never as a series of posts.
 
 ## D18. Silent subscriber
 
@@ -221,7 +223,7 @@ pane already exists.
 The original ask stays open. Recovery MUST NOT send a second ask.
 Kelpie's reminder delivers the original question.
 
-User-visible: still at most one eventual `[bot]:` for that Turn
+User-visible: still at most one eventual final `[bot]:` for that Turn
 (recovery MUST NOT double-post).
 
 ## D21. Issue contract baseline is a SHA, not a comment
@@ -340,6 +342,9 @@ again. `retryable: true` may send again: that follows buzz's last-error
 classification, which can be true after an earlier attempt already
 stored the event. Closing that mixed-attempt case is a buzz change.
 
+The same record-before-send rule applies to the progress post's
+create and to each of its edits (D42).
+
 ## D29. envchain wraps the process; binaries only read env
 
 Status: accepted
@@ -375,7 +380,8 @@ Kelpie peer of waiter `botserver`. It answers with `kelpie reply
 
 The host is the only Nostr publisher. It stamps `[{bot-id}]:`, posts
 from sqlite coordinates, then `inbox.ack`. Occupants never get the
-operator nsec.
+operator nsec. That includes the progress post (D42), stamped the
+same way.
 
 Outbound `--reply-to` is the triggering EventId, including the first
 call. Keep the trigger's existing parent separately when snapshots need
@@ -383,7 +389,8 @@ thread-root context.
 
 The host MUST `--mention` the indexed event's effective author (not the
 raw relay signer, not an arbitrary `p` tag), including operator-authored
-triggers. `ignore_self` still blocks retrigger.
+triggers. `ignore_self` still blocks retrigger. The progress post (D42)
+is the exception: it carries no `--mention`.
 
 I10 is a host MUST: a late occupant final on a cancelled ask MUST NOT
 publish.
@@ -415,7 +422,9 @@ Classify by `reply_to` in the host's Turn ids:
 
 - Empty or whitespace-only final: do not ACK if a later valid final
   should still be allowed.
-- Progress: ACK, do not publish.
+- Progress: relay per D42 (create or edit, best-effort), then ACK.
+  Progress on a non-open turn or a dispatched attempt: ACK, do not
+  relay.
 - Cancelled turn: ACK, do not publish.
 - Already posted: ACK.
 - Unknown `reply_to`: do not publish.
@@ -444,8 +453,9 @@ turn becomes queued or open, and removes it with NIP-09 kind 5 when
 work on that EventId ends: posted, failed, or a cancel that does not
 re-queue the same EventId (`buzz reactions add|remove --event <id>
 --emoji ⏳`). An edit that replaces the turn keeps the marker up.
-Occupants never publish a reaction. This is not a second stamped body
-(D17) and not presence or typing (D18).
+Occupants never publish a reaction. This is the code-side marker; the
+prose side is the progress post (D42). Progress never adds or removes
+the marker. It is not presence or typing (D18).
 
 The marker is visually distinct from Buzz ACP `👀` / `💬`. Failures are
 best-effort: a failed add or remove MUST NOT fail the turn. A stale
@@ -507,3 +517,95 @@ host a live occupant on its root pane. Recovery of a gone pane therefore
 creates another session-named workspace. It MUST NOT attach to the
 host's workspace. Reclaim of leaked occupant workspaces is out of
 scope here.
+
+## D40. Occupant progress is relayed prose
+
+Status: accepted; mechanism is D42
+
+Daniel ruled 2026-09-03 that the progress gap is a feature: the ⏳
+marker (D35) is the code-side signal, while occupant `--progress`
+bodies are prose carrying reasoning and semantics the marker cannot
+express. The host should relay progress prose to the channel.
+
+Q7 is closed by D42.
+
+## D41. Waiter transport split: correlated reply, uncorrelated tell
+
+Status: accepted (alignment, recorded 2026-09-03)
+
+The host waiter is pane-less (D2): its transport is the claimed socket
+inbox, not a Herdr pane prompt. The two repos align as follows.
+`kelpie reply` resolves the durable obligation and routes by the
+waiter's `delivery_transport` (`socket_inbox`); it works today and is
+the only correlated reporting path. `kelpie tell botserver` needs
+alias resolution to dispatch on transport; until Kelpie ships
+socket-waiter alias delivery for unsolicited tells, D38's interface is
+blocked, not broken: the host side (register-once, reconnecting claim,
+fail-closed sender identity) is complete and unchanged. `ask` to a
+socket waiter is a Kelpie product decision; botserver MUST NOT build
+on it.
+
+Confirmed during the 2026-09-03 kelpied restart: waiter identity
+survives the daemon and the host reclaims its inbox within seconds
+without re-registering; no host restart is needed. Diagnostics bugs
+named to Kelpie: lazy-adoption errors that mask an active waiter-owned
+alias ("socket waiter … already holds public name botserver", then
+"no Ready binding and matches 0 unbound live agents"), and `name-info`
+reporting an actively-claimed waiter not-live.
+
+## D42. Progress is one host-edited stamped post per ask
+
+Status: accepted
+
+Closes Q7 (the mechanism for D40). Amends D14, D17, D20, D28, D31,
+D33, D35, D40. D38 is unchanged: a tell is not progress and progress
+is not a tell.
+
+An occupant MAY report progress on an open trigger ask with
+`kelpie reply <ask-id> --progress` and unstamped prose from `--stdin`
+or `--file`. Each body is the full current status, not a delta. The
+host relays it as one kind 9 post per ask: created once, then edited
+in place with Buzz kind 40003 (`buzz messages edit --event <id>`).
+Never a series of posts, and never invented by the host.
+
+Shape: stamped `[{bot-id}]:` (D37), `--reply-to` the triggering
+EventId (same thread as the final, D31), no `--mention`, no marker
+tag. The ⏳ reaction (D35) stays the code-side signal and is untouched
+by progress; this post is the prose side.
+
+Timing: the host creates the post only once the ask has been open for
+the initial hold (20 s) and a non-empty body exists; a final that
+arrives first discards the pending body. Later bodies coalesce: only
+the newest pending body is sent, at most one edit per 30 s, at most 20
+edits per ask; past the cap the host ACKs and drops with one operator
+notice. Bodies are trimmed and capped at 1024 bytes on a char boundary
+with a trailing `…`. Flush runs on the host refresh tick; timing is
+best-effort.
+
+Lifecycle: on final the host publishes a new stamped post (D31) and
+leaves the progress post up. A cancel that abandons or replaces the
+ask (D14, D15, D28) issues a Buzz delete (kind 9005, `buzz messages
+delete --event <id>`) on that ask's progress post, best-effort; a
+replacement ask starts with no progress post. Recovery (D20) continues
+the same ask and therefore the same post. A failed turn keeps the
+post. Queued turns have no ask id and therefore no progress. Progress
+for a turn that is not open, or whose outbound attempt is already
+dispatched, ACKs without relay.
+
+Durability (D28): the host records the progress row (post id,
+dispatched flag, edit count, last send time, pending body) before it
+ACKs the delivery, before `send`, and before each `edit`; relay
+happens on the refresh tick, never in the delivery handler. A crash
+after dispatch without a stored id never creates a second progress
+post for that ask; a create that was dispatched but never stored an id
+ends progress for that ask with one operator notice. A lost edit is
+superseded by the next body. Progress publish and edit failures MUST
+NOT fail the turn and MUST NOT hold the ACK. `retryable` is not
+consulted for progress.
+
+Indexing: the host indexes its own stamped kind 9 but does not fetch
+its own kind 40003 edits or kind 5/9005 deletes (D24 filters), so a
+progress post would otherwise appear in snapshots and ask Context
+with a stale first body. Place snapshots (D19, D27) and ask Context
+(D5) MUST exclude host progress post event ids. Own stamped posts
+still do not trigger (D9).

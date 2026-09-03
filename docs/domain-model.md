@@ -36,7 +36,10 @@ channel, trigger EventId, mention, accepted event id) so retry cannot
 mint a second stamp. While work on a trigger EventId is queued or open
 the host marks it with `⏳` and removes the marker when that work ends
 (D35).
-An edit that re-queues the same EventId keeps the marker up.
+An edit that re-queues the same EventId keeps the marker up. Relayed
+progress (D42) is one host-created, host-edited stamped post per ask —
+kept on final, Buzz-deleted (kind 9005) on cancel, excluded from
+snapshots and ask Context — with its own durable progress row (D28).
 
 ## Values
 
