@@ -387,16 +387,25 @@ async fn refresh_subscription(
 
 struct RelayPoll {
     announced: bool,
+    last_subscription_error: Option<String>,
     last_retry_error: Option<String>,
     last_queued_resume: Instant,
     last_channel_ids: Vec<String>,
     last_active_event_ids: Vec<EventId>,
 }
 
-fn note_retry(last_retry_error: &mut Option<String>, message: String) {
-    if last_retry_error.as_ref() != Some(&message) {
-        eprintln!("{message}");
+fn update_retry(last_retry_error: &mut Option<String>, message: String) -> Option<&str> {
+    if last_retry_error.as_ref() == Some(&message) {
+        None
+    } else {
         *last_retry_error = Some(message);
+        last_retry_error.as_deref()
+    }
+}
+
+fn note_retry(last_retry_error: &mut Option<String>, message: String) {
+    if let Some(message) = update_retry(last_retry_error, message) {
+        eprintln!("{message}");
     }
 }
 
@@ -450,7 +459,7 @@ async fn poll_relay(
         .await
         {
             Ok(()) => {
-                poll.last_retry_error = None;
+                poll.last_subscription_error = None;
                 poll.last_channel_ids.clone_from(&scope.channel_ids);
                 poll.last_active_event_ids
                     .clone_from(&scope.active_event_ids);
@@ -460,7 +469,7 @@ async fn poll_relay(
                 }
             }
             Err(error) => {
-                note_retry(&mut poll.last_retry_error, error.to_string());
+                note_retry(&mut poll.last_subscription_error, error.to_string());
             }
         }
         if !poll.announced {
@@ -626,6 +635,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut poll = RelayPoll {
         announced: false,
+        last_subscription_error: None,
         last_retry_error: None,
         last_queued_resume: Instant::now(),
         last_channel_ids: Vec::new(),
@@ -762,6 +772,21 @@ mod tests {
         ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn persistent_retry_notice_is_emitted_once_until_the_error_changes() {
+        let mut last = None;
+
+        assert_eq!(
+            update_retry(&mut last, "first failure".to_owned()),
+            Some("first failure")
+        );
+        assert_eq!(update_retry(&mut last, "first failure".to_owned()), None);
+        assert_eq!(
+            update_retry(&mut last, "different failure".to_owned()),
+            Some("different failure")
+        );
     }
 
     struct EnvRestore {

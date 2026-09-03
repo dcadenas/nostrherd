@@ -65,14 +65,20 @@ pub enum RelaySubscribeError {
     /// The Nostr client rejected the subscription request.
     Client(nostr_sdk::error::Error),
     /// No configured relay accepted the subscription.
-    NoRelayAccepted,
+    NoRelayAccepted(Vec<(String, String)>),
 }
 
 impl fmt::Display for RelaySubscribeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Client(error) => write!(formatter, "relay subscription failed: {error}"),
-            Self::NoRelayAccepted => formatter.write_str("no relay accepted the subscription"),
+            Self::NoRelayAccepted(failures) => {
+                formatter.write_str("no relay accepted the subscription")?;
+                for (relay, reason) in failures {
+                    write!(formatter, "; {relay}: {reason}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -81,7 +87,7 @@ impl std::error::Error for RelaySubscribeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Client(error) => Some(error),
-            Self::NoRelayAccepted => None,
+            Self::NoRelayAccepted(_) => None,
         }
     }
 }
@@ -474,13 +480,17 @@ impl RelaySubscriber {
     }
 
     async fn subscribe_filter(&self, id: &str, filter: Filter) -> Result<(), RelaySubscribeError> {
-        let output = self
-            .client
-            .subscribe(filter)
-            .with_id(SubscriptionId::new(id))
-            .await?;
+        let id = SubscriptionId::new(id);
+        self.client.unsubscribe(&id).await?;
+        let output = self.client.subscribe(filter).with_id(id).await?;
         if output.success.is_empty() {
-            return Err(RelaySubscribeError::NoRelayAccepted);
+            let mut failures = output
+                .failed
+                .into_iter()
+                .map(|(relay, reason)| (relay.to_string(), reason))
+                .collect::<Vec<_>>();
+            failures.sort_unstable();
+            return Err(RelaySubscribeError::NoRelayAccepted(failures));
         }
         Ok(())
     }
@@ -807,7 +817,7 @@ mod tests {
     use std::collections::HashSet;
 
     use botserver_domain::BotId;
-    use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Keys, Tag};
+    use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Keys, LocalRelay, Tag};
 
     use super::*;
     use crate::{NewTurn, SessionRecord, TurnRecord, TurnState};
@@ -1528,6 +1538,81 @@ mod tests {
             serde_json::json!(["ab12cd34-5678-90ab-cdef-0123456789ab"])
         );
         assert_eq!(metadata_json["limit"], 10);
+    }
+
+    #[tokio::test]
+    async fn subscription_refresh_replaces_populated_channel_and_mutation_filters() {
+        let relay = LocalRelay::new();
+        relay.run().await.expect("run relay");
+        let client = Client::new();
+        client
+            .add_relay(relay.url().await)
+            .await
+            .expect("add relay");
+        client.connect().and_wait(Duration::from_secs(3)).await;
+        let subscriber = RelaySubscriber::new(client.clone());
+        let operator = Keys::generate().public_key().to_hex();
+        let first = EventId::parse_hex(&"a".repeat(64)).expect("first event");
+        let second = EventId::parse_hex(&"b".repeat(64)).expect("second event");
+
+        subscriber
+            .subscribe(
+                &operator,
+                &["channel-a".to_owned()],
+                std::slice::from_ref(&first),
+                Timestamp::zero(),
+            )
+            .await
+            .expect("initial subscriptions");
+        subscriber
+            .subscribe(
+                &operator,
+                &["channel-b".to_owned()],
+                std::slice::from_ref(&second),
+                Timestamp::zero(),
+            )
+            .await
+            .expect("refreshed subscriptions");
+
+        let subscriptions = client.subscriptions().await;
+        let filter_json = |id: &str| {
+            subscriptions
+                .get(&SubscriptionId::new(id))
+                .and_then(|relays| relays.values().next())
+                .and_then(|filters| filters.first())
+                .and_then(|filter| serde_json::to_value(filter).ok())
+                .expect("registered filter")
+        };
+        assert_eq!(
+            filter_json("botserver-channels")["#h"],
+            serde_json::json!(["channel-b"])
+        );
+        assert_eq!(
+            filter_json("botserver-mutations")["#e"],
+            serde_json::json!([second.as_str()])
+        );
+
+        client.disconnect().await;
+        relay.shutdown();
+    }
+
+    #[test]
+    fn subscription_failure_includes_each_relay_reason() {
+        let error = RelaySubscribeError::NoRelayAccepted(vec![
+            (
+                "wss://relay-a.example/".to_owned(),
+                "subscription ID already exists".to_owned(),
+            ),
+            (
+                "wss://relay-b.example/".to_owned(),
+                "connection failed".to_owned(),
+            ),
+        ]);
+
+        assert_eq!(
+            error.to_string(),
+            "no relay accepted the subscription; wss://relay-a.example/: subscription ID already exists; wss://relay-b.example/: connection failed"
+        );
     }
 
     #[test]

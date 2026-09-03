@@ -11,6 +11,10 @@ cargo test --all-targets
 `crates/botserver/src/spec_flows.rs` is in-process acceptance of SPEC
 flows 1–12. It is not a live relay proof.
 
+`subscription_refresh_replaces_populated_channel_and_mutation_filters` uses
+nostr-sdk's in-process relay to keep fixed-ID refresh behavior in the normal CI
+gate. It replaces populated channel and active-turn scopes with changed values.
+
 `crates/botserver/src/outbox.rs` and `inbox.rs` prove host publish on
 kelpie final, ACK-after-decide, crash-safe retry of the same outbound
 event, best-effort `⏳` add/remove on the trigger, and occupant-tell
@@ -1226,3 +1230,20 @@ wait "$HOST_PID" 2>/dev/null || true
 
 Any issue whose done-when includes the relay MUST run the harness and
 say so in the issue body.
+
+### Subscription refresh (issue 57)
+
+`live_refresh_replaces_channel_and_active_turn_filters` starts with empty
+channel and active-turn scopes, refreshes the same fixed subscription IDs with
+populated scopes, and checks the resulting `#h` and `#e` filters. It also proves
+the refreshed channel subscription receives matching traffic and the changed
+active-turn scope fetches its mutation.
+
+Use the issue-54 channel setup above, then run:
+
+```bash
+BOTSERVER_LIVE_CHANNEL="$(tr -d '\n' < "$PROOF/channel.id")" \
+  env -u BUZZ_AUTH_TAG envchain botserver-proof \
+  cargo test --test live_publish \
+    live_refresh_replaces_channel_and_active_turn_filters -- --ignored --nocapture
+```
