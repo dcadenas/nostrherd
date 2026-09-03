@@ -48,13 +48,13 @@ Live columns are issues 18–20. Occupant start/ask from the running host
 proof. Issue 18 is the live proof of flows 1–2: silence until a trigger,
 then a `[bot]:` body. Issue 19 is the live proof of flows 3–5 and 7–8.
 Issue 34 is the live E2E that the occupant only `kelpie reply --final`
-and the host stamps `[bot]:` (D31). Issues 18–20 and 27 were live-proved
+and the host stamps `[{id}]:` (D31, D37). Issues 18–20 and 27 were live-proved
 with leftover `botcli`. Occupant steps below match the current path
 (`kelpie reply --final`); do not invoke a send crate.
 
 ## Live local relay
 
-Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, and 43 require it.
+Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, 43, and 48 require it.
 
 Issue 41 names new occupants from Buzz place display. Create a stream
 with `--name eng`, trigger it, then:
@@ -1006,7 +1006,150 @@ wait "$HOST_PID" 2>/dev/null || true
 ```
 
 Expect two session rows (`bot` and `pr`). Occupants still MUST NOT get
-the nsec. Outbound stamp stays `[bot]:`.
+the nsec. Outbound stamp is `[{id}]:` (issue 48).
+
+### Per-bot outbound stamp (issue 48)
+
+Same two-bot channel as issue 43. Occupant finals MUST publish
+`[bot]: …` for `bot:` and `[pr]: …` for `pr:`. Own stamped posts MUST
+NOT open a turn. Unit proof: `stamp_outbound_prefixes_once`,
+`pr_bot_final_publishes_pr_stamp_once`,
+`stamped_self_posts_do_not_emit_triggers`.
+
+```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is48
+KEYS=$HOME/tmp-botserver-proof
+mkdir -p "$PROOF/bot" "$PROOF/pr"
+cp -a "$ROOT/corpus/example-bot/." "$PROOF/bot/"
+cp -a "$ROOT/corpus/example-bot/." "$PROOF/pr/"
+./tools/local-relay up
+cargo build -p botserver
+
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$PROOF/bot"
+kind = "opencode"
+[[bots]]
+id = "pr"
+corpus = "$PROOF/pr"
+kind = "opencode"
+EOF
+
+OPERATOR_PUB=$(tr -d ' \n' < "$KEYS/operator.pub")
+PEER_PUB=$(tr -d ' \n' < "$KEYS/peer.pub")
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels create \
+  --name botserver-is48 --type stream --visibility open > "$PROOF/channel.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
+  "$PROOF/channel.json" "$PROOF/channel.id"
+CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz channels add-member \
+  --channel "$CHANNEL" --pubkey "$PEER_PUB" --role member >/dev/null
+
+rm -f "$PROOF/host.sqlite"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
+  >"$PROOF/host.log" 2>&1 &
+HOST_PID=$!
+
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'pr: hello'
+
+wait_sql() {
+  local sql=$1 want=$2 got=
+  for _ in $(seq 1 80); do
+    got=$(sqlite3 "$PROOF/host.sqlite" "$sql" 2>/dev/null || true)
+    [ "$got" = "$want" ] && return 0
+    sleep 0.5
+  done
+  echo "sqlite wanted $want got ${got:-empty}" >&2
+  return 1
+}
+wait_sql "SELECT count(*) FROM sessions WHERE channel_id='$CHANNEL';" 2
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';" 2
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT bot_id, session_name FROM sessions WHERE channel_id='$CHANNEL' ORDER BY bot_id;"
+
+occupant_pane() {
+  kelpie --json report --live | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+want=sys.argv[1]
+found=[]
+def walk(obj):
+    if isinstance(obj, dict):
+        incs=obj.get("incarnations")
+        if incs and obj.get("public_name")==want:
+            pane=(incs[0] or {}).get("observed_pane_id")
+            if pane:
+                found.append(pane)
+        for v in obj.values():
+            walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            walk(v)
+walk(d.get("result") or d)
+print(found[-1] if found else "")
+' "$1"
+}
+wait_pane() {
+  local name=$1 pane=
+  for _ in $(seq 1 80); do
+    pane=$(occupant_pane "$name")
+    if [ -n "$pane" ]; then
+      printf '%s' "$pane"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "no occupant pane" >&2
+  return 1
+}
+reply_final() {
+  local pane=$1 ask=$2 body=$3
+  HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+    kelpie reply "$ask" --final --stdin <<EOF
+$body
+EOF
+}
+
+while IFS='|' read -r bot_id sname ask_id; do
+  pane=$(wait_pane "$sname")
+  reply_final "$pane" "$ask_id" "hello from $bot_id"
+done < <(sqlite3 "$PROOF/host.sqlite" \
+  "SELECT s.bot_id, s.session_name, t.ask_id FROM turns t
+   JOIN sessions s ON s.id=t.session_id
+   WHERE s.channel_id='$CHANNEL' AND t.state='open' ORDER BY s.bot_id;")
+
+stamp_counts() {
+  env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+    --channel "$CHANNEL" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+bot=sum(1 for it in items if str(it.get("content","")).startswith("[bot]:"))
+pr=sum(1 for it in items if str(it.get("content","")).startswith("[pr]:"))
+print(bot, pr)
+if bot!=1 or pr!=1:
+    raise SystemExit(1)'
+}
+ok=0
+for _ in $(seq 1 40); do
+  if stamp_counts; then ok=1; break; fi
+  sleep 0.5
+done
+[ "$ok" = 1 ]
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL';" 2
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
+```
+
+Expect two session rows, two turns, then one `[bot]:` body and one
+`[pr]:` body. The published stamps MUST NOT open a third turn.
+Occupants still MUST NOT get the nsec. The host waiter name is
+`botserver`; a standing personal waiter blocks this recipe until that
+process is not holding the name.
 
 Wrap the host with envchain. Do not pass `--envchain` (D29):
 

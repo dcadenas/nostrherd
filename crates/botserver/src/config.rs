@@ -146,7 +146,9 @@ mod tests {
         .expect("registry");
         assert_eq!(registry.bots().len(), 2);
         assert_eq!(registry.bots()[0].inbound_trigger(), "bot:");
+        assert_eq!(registry.bots()[0].outbound_prefix(), "[bot]:");
         assert_eq!(registry.bots()[1].inbound_trigger(), "pr:");
+        assert_eq!(registry.bots()[1].outbound_prefix(), "[pr]:");
     }
 
     #[test]

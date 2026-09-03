@@ -1354,6 +1354,16 @@ mod tests {
         );
 
         assert_eq!(ingest.ingest(&message).unwrap(), None);
+
+        let mut ingest = RelayIngest::new(&operator, relay_pubkey(), FakeRepository::default())
+            .with_inbound_trigger("pr:");
+        let message = event_with_keys(
+            &Keys::generate(),
+            CHANNEL_MESSAGE_KIND,
+            "[pr]: pr: loop",
+            [tag(&["h", "channel"]), tag(&["p", &operator])],
+        );
+        assert_eq!(ingest.ingest(&message).unwrap(), None);
     }
 
     #[test]

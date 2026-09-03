@@ -28,8 +28,8 @@ selected by convention, posting with a visible bot stamp.
    trigger remainder, then a marked Context section of unread
    channel events. `from=` MUST be `botserver`, never a relay pubkey.
 6. Occupant answers with `kelpie reply --final` and unstamped prose.
-   The host is the only Nostr publisher: it stamps `[bot]:`, posts from
-   sqlite coordinates, then `inbox.ack`.
+    The host is the only Nostr publisher: it stamps `[{bot-id}]:`, posts
+    from sqlite coordinates, then `inbox.ack`.
 7. Persist host state (sessions, turns, processed events) in SQLite.
 8. Bound occupant context with Kelpie renew (wall-clock). Durable
    context lives in files, not only in the model.
@@ -97,7 +97,7 @@ The occupant is an ordinary Kelpie peer of waiter `botserver`. Snapshot
 and renew stay. It MUST answer a trigger ask with `kelpie reply --final`
 and unstamped prose. The final body MUST come from `--stdin` or
 `--file`, never from a shell-expanded argument. It MUST NOT stamp
-`[bot]:`, MUST NOT call the relay, and MUST NOT receive the operator
+`[{id}]:`, MUST NOT call the relay, and MUST NOT receive the operator
 nsec. Cancel MUST NOT be used for a successful answer.
 
 The occupant self-renews. The host MUST NOT arm occupant renew with
@@ -106,9 +106,10 @@ asks the host created (D32).
 
 ## Host publish
 
-The host is the only Nostr publisher (D31). On an accepted occupant
-final it MUST stamp `[bot]:`, post from sqlite coordinates, then
-`inbox.ack`. Occupants never get the operator nsec.
+The host is the only Nostr publisher (D31, D37). On an accepted occupant
+final it MUST stamp `[{bot-id}]:`, post from sqlite coordinates, then
+`inbox.ack`. id `pr` publishes `[pr]:`. id `bot` publishes `[bot]:`.
+Occupants never get the operator nsec.
 
 Outbound `--reply-to` is the triggering EventId, including the first
 call. Keep the trigger's existing parent separately when snapshots need

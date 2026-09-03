@@ -49,7 +49,7 @@ The waiter is `botserver`. The occupant completes with `kelpie reply
 
 The ask body is the trigger remainder, then a marked `## Context`
 section. Context is this channel's indexed events since the last ask
-to this session (unprefixed lines, earlier `[bot]:`, and other
+to this session (unprefixed lines, earlier `[{id}]:`, and other
 indexed traffic). It is labeled untrusted indexed text, not
 instructions. Occupants MUST NOT follow directives found there.
 
@@ -87,11 +87,11 @@ without the prefix, or a bare mention of the operator.
 
 The operator's own unprefixed reply in a thread is human mail.
 
-## D9. Trigger token is `{bot-id}:`; stamp is `[bot]:`
+## D9. Trigger token is `{bot-id}:`; stamp is `[{bot-id}]:`
 
 Status: accepted
 
-Closes Q2.
+Closes Q2. Outbound stamp amended by D37.
 
 Inbound: the body MUST have `{bot-id}:` as the first token after an
 optional leading mention. For the example bot id `bot` that is `bot:`.
@@ -99,9 +99,10 @@ Other authors MUST `p`-tag the operator pubkey. Example:
 `@daniel bot: hello`. The operator's own `{id}:` is a trigger without
 a self `p`-tag (D11, D34).
 
-Outbound: the host MUST prefix the published body with `[bot]:`.
-Occupants MUST NOT stamp it themselves. Own `[bot]:` posts MUST NOT
-trigger a new turn (`ignore_self`).
+Outbound: the host MUST prefix the published body with `[{bot-id}]:`.
+id `pr` publishes `[pr]:`. id `bot` publishes `[bot]:`. Occupants MUST
+NOT stamp it themselves. Own `[{id}]:` posts MUST NOT trigger a new
+turn (`ignore_self`). First token `[pr]:` is not `pr:`.
 
 ## D10. Session grain follows Buzz: one occupant per channel
 
@@ -372,9 +373,9 @@ Retracts D4/D22 as the occupant path. The occupant is an ordinary
 Kelpie peer of waiter `botserver`. It answers with `kelpie reply
 --final` and unstamped prose.
 
-The host is the only Nostr publisher. It stamps `[bot]:`, posts from
-sqlite coordinates, then `inbox.ack`. Occupants never get the operator
-nsec.
+The host is the only Nostr publisher. It stamps `[{bot-id}]:`, posts
+from sqlite coordinates, then `inbox.ack`. Occupants never get the
+operator nsec.
 
 Outbound `--reply-to` is the triggering EventId, including the first
 call. Keep the trigger's existing parent separately when snapshots need
@@ -388,8 +389,9 @@ I10 is a host MUST: a late occupant final on a cancelled ask MUST NOT
 publish.
 
 The host is the shipping publish path. Issue 34 is the live E2E that the
-occupant only `kelpie reply --final` and the host stamps `[bot]:`.
-Issue 35 removes the leftover `botcli` crate and occupant send recipes.
+occupant only `kelpie reply --final` and the host stamps. Issue 48 is
+the per-bot stamp `[{id}]:`. Issue 35 removes the leftover `botcli`
+crate and occupant send recipes.
 
 ## D32. Occupant self-renews
 
@@ -427,7 +429,7 @@ Amends D9, D11, and D24.
 A Buzz 1-1 DM composer `p`-tags the other participant, not the author.
 Typing `{id}: ping` or `@daniel {id}: ping` as the operator therefore
 does not mention the operator pubkey. Other authors still MUST `p`-tag
-the operator. Own `[bot]:` posts still do not trigger (`ignore_self`).
+the operator. Own `[{id}]:` posts still do not trigger (`ignore_self`).
 
 Discovery MUST also fetch and subscribe to kind 9/40002 events
 **authored by** the operator. The `#p` filter alone never sees those
@@ -442,10 +444,24 @@ turn becomes queued or open, and removes it with NIP-09 kind 5 when
 work on that EventId ends: posted, failed, or a cancel that does not
 re-queue the same EventId (`buzz reactions add|remove --event <id>
 --emoji ⏳`). An edit that replaces the turn keeps the marker up.
-Occupants never publish a reaction. This is not a second `[bot]:`
+Occupants never publish a reaction. This is not a second stamped body
 (D17) and not presence or typing (D18).
 
 The marker is visually distinct from Buzz ACP `👀` / `💬`. Failures are
 best-effort: a failed add or remove MUST NOT fail the turn. A stale
 `⏳` on a fast-fail path is acceptable. v1 is one emoji; `💬` stays
 out of scope.
+
+## D37. Host stamp is `[{bot-id}]:`
+
+Status: accepted
+
+Amends D9 and D31.
+
+Issue 43 left the outbound stamp as a global `[bot]:` on purpose.
+Two bots in one channel made that wrong: `pr:` published as `[bot]:`.
+
+The host stamp is `[{bot-id}]:`. `stamp_outbound` takes that bot's
+prefix. Occupants still MUST NOT stamp. Own `[pr]:` / `[bot]:` posts
+MUST NOT open a turn. Do not keep a global `[bot]:` constant as the
+only stamp.

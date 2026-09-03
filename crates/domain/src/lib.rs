@@ -49,19 +49,25 @@ pub fn inbound_trigger_for(id: &BotId) -> String {
     format!("{}:", id.as_str())
 }
 
-/// Outbound stamp applied by the host.
+/// Outbound stamp for the example bot id `bot` (`[{id}]:`).
 pub const OUTBOUND_PREFIX: &str = "[bot]:";
 
-/// Prefix occupant prose with `[bot]:` once.
+/// Outbound stamp for a bot id, e.g. `bot` → `[bot]:`.
 #[must_use]
-pub fn stamp_outbound(body: &str) -> String {
+pub fn outbound_prefix_for(id: &BotId) -> String {
+    format!("[{}]:", id.as_str())
+}
+
+/// Prefix occupant prose with the given stamp once.
+#[must_use]
+pub fn stamp_outbound(body: &str, prefix: &str) -> String {
     let trimmed = body.trim();
-    if trimmed.starts_with(OUTBOUND_PREFIX) {
+    if trimmed.starts_with(prefix) {
         trimmed.to_owned()
     } else if trimmed.is_empty() {
-        OUTBOUND_PREFIX.to_owned()
+        prefix.to_owned()
     } else {
-        format!("{OUTBOUND_PREFIX} {trimmed}")
+        format!("{prefix} {trimmed}")
     }
 }
 
@@ -76,7 +82,7 @@ pub struct Bot {
 }
 
 impl Bot {
-    /// Construct a bot with inbound token `{id}:` and stamp `[bot]:`.
+    /// Construct a bot with inbound token `{id}:` and stamp `[{id}]:`.
     #[must_use]
     pub fn new(id: BotId, corpus_path: PathBuf, occupant_kind: impl Into<String>) -> Option<Self> {
         let occupant_kind = occupant_kind.into();
@@ -84,11 +90,12 @@ impl Bot {
             return None;
         }
         let inbound_trigger = inbound_trigger_for(&id);
+        let outbound_prefix = outbound_prefix_for(&id);
         Some(Self {
             id,
             corpus_path,
             inbound_trigger,
-            outbound_prefix: OUTBOUND_PREFIX.to_owned(),
+            outbound_prefix,
             occupant_kind,
         })
     }
@@ -473,7 +480,9 @@ mod tests {
         )
         .expect("bot");
         assert_eq!(review.inbound_trigger(), "review:");
+        assert_eq!(review.outbound_prefix(), "[review]:");
         assert_ne!(review.inbound_trigger(), INBOUND_TRIGGER);
+        assert_ne!(review.outbound_prefix(), OUTBOUND_PREFIX);
     }
 
     #[test]
@@ -652,6 +661,22 @@ mod tests {
             "[bot]: pong"
         )
         .is_none());
+        assert!(TriggerMatch::parse(
+            "operator",
+            "operator",
+            ["someone-else"],
+            "pr:",
+            "[pr]: pong"
+        )
+        .is_none());
+        assert!(TriggerMatch::parse(
+            "operator",
+            "operator",
+            ["someone-else"],
+            "pr:",
+            "[pr]: hello"
+        )
+        .is_none());
         assert_eq!(
             TriggerMatch::parse(
                 "operator",
@@ -726,9 +751,31 @@ mod tests {
 
     #[test]
     fn stamp_outbound_prefixes_once() {
-        assert_eq!(stamp_outbound("hello"), "[bot]: hello");
-        assert_eq!(stamp_outbound("  [bot]: already  "), "[bot]: already");
-        assert_eq!(stamp_outbound("[bot]:already"), "[bot]:already");
+        assert_eq!(stamp_outbound("hello", OUTBOUND_PREFIX), "[bot]: hello");
+        assert_eq!(
+            stamp_outbound("  [bot]: already  ", OUTBOUND_PREFIX),
+            "[bot]: already"
+        );
+        assert_eq!(
+            stamp_outbound("[bot]:already", OUTBOUND_PREFIX),
+            "[bot]:already"
+        );
+        assert_eq!(stamp_outbound("hello", "[pr]:"), "[pr]: hello");
+        assert_eq!(
+            stamp_outbound("  [pr]: already  ", "[pr]:"),
+            "[pr]: already"
+        );
+        assert_eq!(stamp_outbound("[pr]:already", "[pr]:"), "[pr]:already");
+        assert_eq!(
+            stamp_outbound("[bot]: leftover", "[pr]:"),
+            "[pr]: [bot]: leftover"
+        );
+        let pr = BotId::new("pr").expect("id");
+        assert_eq!(outbound_prefix_for(&pr), "[pr]:");
+        assert_eq!(
+            outbound_prefix_for(&BotId::new("bot").expect("id")),
+            OUTBOUND_PREFIX
+        );
     }
 
     #[test]

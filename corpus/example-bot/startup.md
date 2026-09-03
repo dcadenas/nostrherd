@@ -9,7 +9,7 @@ your reply
 EOF
 ```
 
-Do not stamp `[bot]:`. Do not call the relay. Do not wrap envchain.
+Do not stamp `[{id}]:`. Do not call the relay. Do not wrap envchain.
 
 <!-- botserver-place-snapshots -->
 Read `.botserver/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.

@@ -54,7 +54,7 @@ them if missing. `envchain --list` shows **names only**.
 ```
 
 `smoke` posts a throwaway operator message with `buzz messages send`
-and checks the channel body is present. It does not stamp `[bot]:`
+and checks the channel body is present. It does not stamp `[{id}]:`
 and does not invoke a send crate.
 
 ## Trigger as the peer
@@ -65,7 +65,7 @@ and does not invoke a send crate.
 
 That posts `@<operator> bot: hello from peer` with a `p` tag. Use this
 to exercise ingest once `botserver` is running. Occupant answers use
-`kelpie reply --final`; the host stamps `[bot]:`. Issue 34 live proof
+`kelpie reply --final`; the host stamps `[{id}]:`. Issue 34 live proof
 is recorded in `docs/testing.md`.
 
 ## Secrets in commands
