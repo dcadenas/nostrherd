@@ -486,3 +486,22 @@ post. Tells do not `--reply-to` a trigger, do not add `⏳`, and MUST
 NOT close a `{id}:` turn. Stamp stays `[{bot-id}]:` (D37). Occupants
 still have no nsec (D31). `--due-in` is Kelpie holding the delivery;
 the host publishes when the tell is delivered.
+
+## D39. Occupant is its own Herdr workspace
+
+Status: accepted
+
+New occupants are allocated with
+`herdr workspace create --cwd <corpus> --label <session_name> --no-focus`.
+The occupant pane is `.result.root_pane`. Session name / public alias
+is unchanged (D10, issue 41). Kelpie start still uses that pane id and
+terminal id.
+
+Do not `herdr tab create`. That adds a tab to whatever workspace the
+host process is in.
+
+Reuse by label is not reliable in this issue: Herdr `workspace create`
+always mints a new workspace, labels are display names (not unique
+ids), and cwd-derived labels can drift. Recovery of a gone pane
+therefore creates another session-named workspace. It MUST NOT attach
+to the host's workspace.
