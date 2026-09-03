@@ -359,7 +359,13 @@ mod tests {
             &["e", root.as_str()],
             &["e", parent.as_str(), "wss://relay.example"],
         ]);
-        assert_eq!(reply_thread_root(&trigger, &id_only), Some(root));
+        assert_eq!(reply_thread_root(&trigger, &id_only), Some(root.clone()));
+
+        let malformed_first = trigger_tags(&[["e", "bad"].as_slice(), &["e", root.as_str()]]);
+        assert_eq!(reply_thread_root(&trigger, &malformed_first), Some(root));
+
+        let self_reference = trigger_tags(&[&["e", trigger.as_str()]]);
+        assert_eq!(reply_thread_root(&trigger, &self_reference), None);
     }
 
     #[test]
@@ -400,6 +406,13 @@ mod tests {
             &["e", root.as_str(), "", "root"],
             &["e", trigger.as_str(), "", "reply"],
         ]);
-        assert_eq!(reply_thread_root(&trigger, &tags), Some(root));
+        assert_eq!(reply_thread_root(&trigger, &tags), Some(root.clone()));
+
+        let root_only = trigger_tags(&[&["e", legacy.as_str()], &["e", root.as_str(), "", "root"]]);
+        assert_eq!(reply_thread_root(&trigger, &root_only), None);
+
+        let reply_only =
+            trigger_tags(&[&["e", legacy.as_str()], &["e", root.as_str(), "", "reply"]]);
+        assert_eq!(reply_thread_root(&trigger, &reply_only), Some(root));
     }
 }
