@@ -1140,13 +1140,13 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [ "$ok" = 1 ]
-sqlite3 "$PROOF/host.sqlite" \
-  "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL';"
+wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL';" 2
 kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
 
-Expect two session rows, then one `[bot]:` body and one `[pr]:` body.
+Expect two session rows, two turns, then one `[bot]:` body and one
+`[pr]:` body. The published stamps MUST NOT open a third turn.
 Occupants still MUST NOT get the nsec. The host waiter name is
 `botserver`; a standing personal waiter blocks this recipe until that
 process is not holding the name.
