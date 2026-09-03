@@ -124,20 +124,21 @@ pub fn reaction_removal(reaction_event_id: &EventId) -> BuzzEvent {
 
 /// Resolve the thread root a reply to `trigger_event_id` must carry.
 ///
-/// Mirrors buzz: the trigger's own `e` tags name the root when they
-/// carry a valid marker (`root` + `reply` names the root; `reply` only
-/// makes the reply target the root). Id-only or malformed `e` tags are
-/// ignored, and a trigger without a valid `reply` marker is top-level,
-/// so the reply falls back to a reply marker pointing at the trigger
-/// alone. `None` means the reply carries a reply marker only.
+/// Marked `e` tags follow Buzz semantics (`root` + `reply` names the
+/// root; `reply` only makes the reply target the root). If no valid
+/// markers exist, the first valid unmarked `e` tag is the legacy
+/// positional root. A trigger without either form is top-level, so the
+/// reply falls back to a reply marker pointing at the trigger alone.
+/// `None` means the reply carries a reply marker only.
 #[must_use]
 pub fn reply_thread_root(
     trigger_event_id: &EventId,
     trigger_tags: &[Vec<String>],
 ) -> Option<EventId> {
     let mut markers = (None, None);
+    let mut legacy_root = None;
     for tag in trigger_tags {
-        let [name, value, _, marker, ..] = tag.as_slice() else {
+        let [name, value, rest @ ..] = tag.as_slice() else {
             continue;
         };
         if name != "e" {
@@ -146,15 +147,18 @@ pub fn reply_thread_root(
         let Some(id) = EventId::parse_hex(value) else {
             continue;
         };
-        match marker.as_str() {
-            "root" => markers.0 = Some(id),
-            "reply" => markers.1 = Some(id),
+        let marker = rest.get(1).map(String::as_str);
+        match marker {
+            Some("root") => markers.0 = Some(id),
+            Some("reply") => markers.1 = Some(id),
+            None if rest.len() <= 1 && legacy_root.is_none() => legacy_root = Some(id),
             _ => {}
         }
     }
     match markers {
         (Some(root), Some(_)) if root != *trigger_event_id => Some(root),
         (None, Some(reply)) if reply != *trigger_event_id => Some(reply),
+        (None, None) => legacy_root.filter(|root| *root != *trigger_event_id),
         _ => None,
     }
 }
@@ -347,13 +351,20 @@ mod tests {
     }
 
     #[test]
-    fn id_only_and_markerless_triggers_fall_back_to_reply_marker_only() {
+    fn legacy_id_only_tags_recover_the_first_thread_root() {
         let trigger = event_id('a');
-        let other = event_id('b');
-        // NIP-10 deprecated positional markers: id-only e tags are ignored
-        // rather than guessed.
-        let id_only = trigger_tags(&[&["e", other.as_str()], &["e", other.as_str(), ""]]);
-        assert_eq!(reply_thread_root(&trigger, &id_only), None);
+        let root = event_id('b');
+        let parent = event_id('c');
+        let id_only = trigger_tags(&[
+            &["e", root.as_str()],
+            &["e", parent.as_str(), "wss://relay.example"],
+        ]);
+        assert_eq!(reply_thread_root(&trigger, &id_only), Some(root));
+    }
+
+    #[test]
+    fn markerless_trigger_falls_back_to_reply_marker_only() {
+        let trigger = event_id('a');
         let markerless = trigger_tags(&[&["h", "ch-1"], &["p", &"c".repeat(64)]]);
         assert_eq!(reply_thread_root(&trigger, &markerless), None);
         assert_eq!(
@@ -377,5 +388,18 @@ mod tests {
             &["e", &"b".repeat(64), "", "root"],
         ]);
         assert_eq!(reply_thread_root(&trigger, &malformed), None);
+    }
+
+    #[test]
+    fn marked_tags_take_precedence_over_legacy_positions() {
+        let trigger = event_id('a');
+        let legacy = event_id('b');
+        let root = event_id('c');
+        let tags = trigger_tags(&[
+            &["e", legacy.as_str()],
+            &["e", root.as_str(), "", "root"],
+            &["e", trigger.as_str(), "", "reply"],
+        ]);
+        assert_eq!(reply_thread_root(&trigger, &tags), Some(root));
     }
 }
