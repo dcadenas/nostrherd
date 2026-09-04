@@ -97,6 +97,7 @@ pub trait ProgressRelay: Send + Sync {
     /// Returns an error when the relay did not accept the edit.
     fn edit(
         &self,
+        ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
@@ -107,7 +108,12 @@ pub trait ProgressRelay: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the relay did not accept the delete.
-    fn delete(&self, channel_id: &str, post_event_id: &EventId) -> Result<(), PublishError>;
+    fn delete(
+        &self,
+        ask_id: &str,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), PublishError>;
 }
 
 /// Ignore progress edits and deletes.
@@ -117,6 +123,7 @@ pub struct NoopProgressRelay;
 impl ProgressRelay for NoopProgressRelay {
     fn edit(
         &self,
+        _ask_id: &str,
         _channel_id: &str,
         _post_event_id: &EventId,
         _content: &str,
@@ -124,7 +131,12 @@ impl ProgressRelay for NoopProgressRelay {
         Ok(())
     }
 
-    fn delete(&self, _channel_id: &str, _post_event_id: &EventId) -> Result<(), PublishError> {
+    fn delete(
+        &self,
+        _ask_id: &str,
+        _channel_id: &str,
+        _post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
         Ok(())
     }
 }
@@ -138,11 +150,13 @@ pub struct BackgroundProgressRelay {
 #[derive(Debug)]
 enum ProgressCommand {
     Edit {
+        ask_id: String,
         channel_id: String,
         post_event_id: EventId,
         content: String,
     },
     Delete {
+        ask_id: String,
         channel_id: String,
         post_event_id: EventId,
     },
@@ -161,19 +175,29 @@ impl BackgroundProgressRelay {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         tokio::runtime::Handle::current().spawn(async move {
             while let Some(command) = receiver.recv().await {
-                let result = match command {
+                let (ask_id, result) = match command {
                     ProgressCommand::Edit {
+                        ask_id,
                         channel_id,
                         post_event_id,
                         content,
-                    } => inner.edit(&channel_id, &post_event_id, &content),
+                    } => {
+                        let result = inner.edit(&ask_id, &channel_id, &post_event_id, &content);
+                        (ask_id, result)
+                    }
                     ProgressCommand::Delete {
+                        ask_id,
                         channel_id,
                         post_event_id,
-                    } => inner.delete(&channel_id, &post_event_id),
+                    } => {
+                        let result = inner.delete(&ask_id, &channel_id, &post_event_id);
+                        (ask_id, result)
+                    }
                 };
                 if let Err(error) = result {
-                    eprintln!("operator notice: background progress relay failed: {error}");
+                    eprintln!(
+                        "operator notice: background progress relay for ask {ask_id} failed: {error}"
+                    );
                 }
             }
         });
@@ -184,12 +208,14 @@ impl BackgroundProgressRelay {
 impl ProgressRelay for BackgroundProgressRelay {
     fn edit(
         &self,
+        ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
     ) -> Result<(), PublishError> {
         self.sender
             .send(ProgressCommand::Edit {
+                ask_id: ask_id.to_owned(),
                 channel_id: channel_id.to_owned(),
                 post_event_id: post_event_id.clone(),
                 content: content.to_owned(),
@@ -199,9 +225,15 @@ impl ProgressRelay for BackgroundProgressRelay {
             })
     }
 
-    fn delete(&self, channel_id: &str, post_event_id: &EventId) -> Result<(), PublishError> {
+    fn delete(
+        &self,
+        ask_id: &str,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
         self.sender
             .send(ProgressCommand::Delete {
+                ask_id: ask_id.to_owned(),
                 channel_id: channel_id.to_owned(),
                 post_event_id: post_event_id.clone(),
             })
@@ -214,15 +246,21 @@ impl ProgressRelay for BackgroundProgressRelay {
 impl ProgressRelay for Arc<dyn ProgressRelay> {
     fn edit(
         &self,
+        ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
     ) -> Result<(), PublishError> {
-        (**self).edit(channel_id, post_event_id, content)
+        (**self).edit(ask_id, channel_id, post_event_id, content)
     }
 
-    fn delete(&self, channel_id: &str, post_event_id: &EventId) -> Result<(), PublishError> {
-        (**self).delete(channel_id, post_event_id)
+    fn delete(
+        &self,
+        ask_id: &str,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
+        (**self).delete(ask_id, channel_id, post_event_id)
     }
 }
 
@@ -320,8 +358,9 @@ fn new_progress_post<R: HostRepository>(
     })
 }
 
-/// Drop the pending body once a final has landed (D42: a final that
-/// arrives first discards it). The post itself stays up.
+/// End progress once a final has landed (D42).
+///
+/// A pending body is discarded and the progress post itself stays up.
 ///
 /// # Errors
 ///
@@ -365,7 +404,7 @@ pub fn delete_progress_post<R: HostRepository>(
     post.pending_body = None;
     repository.save_progress_post(&post)?;
     if let Some(target) = post.delete_target() {
-        if let Err(error) = relay.delete(&post.channel_id, &target) {
+        if let Err(error) = relay.delete(ask_id, &post.channel_id, &target) {
             notice(&format!(
                 "progress post delete for ask {ask_id} failed: {error}"
             ));
@@ -594,7 +633,7 @@ where
     post.last_send_at = Some(now);
     // Record before edit (D28). A lost edit is superseded by the next body.
     repository.save_progress_post(&post)?;
-    if let Err(error) = relay.edit(&post.channel_id, &target, &stamped) {
+    if let Err(error) = relay.edit(&post.ask_id, &post.channel_id, &target, &stamped) {
         notice(&format!(
             "progress edit for ask {} failed; the next body supersedes it: {error}",
             post.ask_id
@@ -615,6 +654,7 @@ pub(crate) struct RecordingProgressRelay {
 impl ProgressRelay for RecordingProgressRelay {
     fn edit(
         &self,
+        _ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
@@ -632,7 +672,12 @@ impl ProgressRelay for RecordingProgressRelay {
         Ok(())
     }
 
-    fn delete(&self, channel_id: &str, post_event_id: &EventId) -> Result<(), PublishError> {
+    fn delete(
+        &self,
+        _ask_id: &str,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
         self.deletes
             .lock()
             .expect("deletes")
@@ -643,7 +688,7 @@ impl ProgressRelay for RecordingProgressRelay {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Barrier, Mutex};
+    use std::sync::Mutex;
 
     use botserver_domain::progress::{
         PROGRESS_BODY_MAX_BYTES, PROGRESS_EDIT_INTERVAL_SECS, PROGRESS_INITIAL_HOLD_SECS,
@@ -1346,12 +1391,13 @@ mod tests {
         #[derive(Debug)]
         struct BlockingRelay {
             started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-            release: Arc<Barrier>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
         }
 
         impl ProgressRelay for BlockingRelay {
             fn edit(
                 &self,
+                _ask_id: &str,
                 _channel_id: &str,
                 _post_event_id: &EventId,
                 _content: &str,
@@ -1359,19 +1405,28 @@ mod tests {
                 if let Some(started) = self.started.lock().unwrap().take() {
                     let _ = started.send(());
                 }
-                self.release.wait();
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(1));
                 Ok(())
             }
 
             fn delete(
                 &self,
+                _ask_id: &str,
                 _channel_id: &str,
                 _post_event_id: &EventId,
             ) -> Result<(), PublishError> {
                 if let Some(started) = self.started.lock().unwrap().take() {
                     let _ = started.send(());
                 }
-                self.release.wait();
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(1));
                 Ok(())
             }
         }
@@ -1394,13 +1449,14 @@ mod tests {
         record_progress(&mut repository, &mut quiet(), &turn, "two", created + 1).unwrap();
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let release = Arc::new(Barrier::new(2));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let blocking = Arc::new(BlockingRelay {
             started: Mutex::new(Some(started_tx)),
-            release: Arc::clone(&release),
+            release: Mutex::new(release_rx),
         });
         let background =
             BackgroundProgressRelay::new(Arc::clone(&blocking) as Arc<dyn ProgressRelay>);
+        let flush_started = std::time::Instant::now();
         flush_all(
             &mut repository,
             &publisher,
@@ -1408,6 +1464,10 @@ mod tests {
             &mut notices,
             &turn,
             created + PROGRESS_EDIT_INTERVAL_SECS,
+        );
+        assert!(
+            flush_started.elapsed() < std::time::Duration::from_millis(500),
+            "progress tick waited for the relay"
         );
 
         tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
@@ -1417,18 +1477,22 @@ mod tests {
         let post = repository.progress_post("ask-1").unwrap().unwrap();
         assert_eq!(post.edit_count, 1, "tick persisted before scheduling");
         assert!(post.pending_body.is_none());
-        release.wait();
+        release_tx.send(()).unwrap();
 
         let (delete_started_tx, delete_started_rx) = tokio::sync::oneshot::channel();
         *blocking.started.lock().unwrap() = Some(delete_started_tx);
-        background
-            .delete(CHANNEL, &event_id('e'))
-            .expect("delete scheduled");
+        let delete_started = std::time::Instant::now();
+        delete_progress_post(&mut repository, &background, &mut quiet(), "ask-1").unwrap();
+        assert!(
+            delete_started.elapsed() < std::time::Duration::from_millis(500),
+            "progress delete waited for the relay"
+        );
         tokio::time::timeout(std::time::Duration::from_secs(1), delete_started_rx)
             .await
             .expect("delete started")
             .expect("delete start signal");
-        release.wait();
+        assert!(repository.progress_post("ask-1").unwrap().unwrap().ended);
+        release_tx.send(()).unwrap();
     }
 
     /// The stored attempt after a retryable final publish failure: the

@@ -1012,22 +1012,26 @@ const PROGRESS_SELECT: &str = "SELECT ask_id, channel_id, reply_to_event_id, thr
         dispatched, post_event_id, edit_count, last_send_at, ended, cap_noticed
  FROM progress_posts";
 
-const PROGRESS_PENDING_SELECT: &str =
-    "SELECT p.ask_id, p.channel_id, p.reply_to_event_id, p.thread_root_event_id,
+const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
+         SELECT *
+         FROM progress_posts
+         WHERE ended = 0
+           AND (
+               pending_body IS NOT NULL
+               OR (dispatched = 1 AND post_event_id IS NULL)
+           )
+         ORDER BY opened_at, ask_id
+     )
+     SELECT p.ask_id, p.channel_id, p.reply_to_event_id, p.thread_root_event_id,
             p.opened_at, p.pending_body, p.post_body, p.prepared_event_id,
             p.prepared_created_at, p.dispatched, p.post_event_id, p.edit_count,
             p.last_send_at, p.ended, p.cap_noticed,
             t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
             t.reply_to_event_id, t.state, t.opened_at
-     FROM progress_posts AS p INDEXED BY progress_posts_pending_flush
+     FROM pending AS p
      JOIN turns AS t ON t.ask_id = p.ask_id
      JOIN sessions AS s ON s.id = t.session_id
      WHERE s.bot_id = ?1
-       AND p.ended = 0
-       AND (
-           p.pending_body IS NOT NULL
-           OR (p.dispatched = 1 AND p.post_event_id IS NULL)
-       )
      ORDER BY p.opened_at, p.ask_id";
 
 fn read_progress_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProgressPost> {

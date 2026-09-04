@@ -197,19 +197,21 @@ impl fmt::Debug for ProgressHost {
 impl ProgressRelay for ProgressHost {
     fn edit(
         &self,
+        ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
     ) -> Result<(), crate::outbox::PublishError> {
-        self.inner.edit(channel_id, post_event_id, content)
+        self.inner.edit(ask_id, channel_id, post_event_id, content)
     }
 
     fn delete(
         &self,
+        ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
     ) -> Result<(), crate::outbox::PublishError> {
-        self.inner.delete(channel_id, post_event_id)
+        self.inner.delete(ask_id, channel_id, post_event_id)
     }
 }
 
