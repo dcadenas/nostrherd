@@ -13,8 +13,8 @@ flows 1–12. It is not a live relay proof.
 
 `queued_turn_recovers_an_unavailable_recorded_occupant_and_drains` proves a
 queued ask that finds its recorded occupant unavailable continues the same
-logical id, retires the stale Ready incarnation, retries with the stable turn
-idempotency key, and opens the turn.
+logical id, cancels the failed ask obligation, retires the stale Ready
+incarnation, retries with the stable turn idempotency key, and opens the turn.
 
 `subscription_refresh_replaces_populated_channel_and_mutation_filters` uses
 nostr-sdk's in-process relay to keep fixed-ID refresh behavior in the normal CI

@@ -213,9 +213,10 @@ Status: accepted
 If the pane is gone while an ask is open or work is queued, recover that
 logical agent. Do not `kelpie start` a new logical agent because the public
 name is free. When a queued ask reports the recorded occupant unavailable,
-retire the exact unavailable incarnation, continue that logical agent, and
-retry the ask once. Retiring the stale binding prevents two Ready incarnations
-from making later alias resolution ambiguous.
+cancel that failed ask's obligation, retire the exact unavailable incarnation,
+continue that logical agent, and retry the ask once. Cancelling prevents stale
+obligations from accumulating; retiring the stale binding prevents two Ready
+incarnations from making later alias resolution ambiguous.
 
 A replacement pane has no occupant runtime, so `kelpie adopt` cannot
 bind it. The host continues the recorded id with `kelpie start

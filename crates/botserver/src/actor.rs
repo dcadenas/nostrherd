@@ -1011,18 +1011,22 @@ where
             body,
             idempotency_key,
         );
-        let unavailable_incarnation = match &first_attempt {
+        let unavailable_incarnation = match first_attempt {
             Err(KelpieError::TargetUnavailable) => None,
             Ok(receipt) if receipt.delivery() == AskDelivery::TargetUnavailable => {
-                Some(receipt.recipient_incarnation().ok_or_else(|| {
+                let incarnation_id = receipt.recipient_incarnation().ok_or_else(|| {
                     ActorError::Kelpie(KelpieError::InvalidReceipt(
                         "unavailable ask omitted its recipient incarnation".to_owned(),
                     ))
-                })?)
+                })?;
+                waiter
+                    .cancel(receipt.message_id(), "queued ask target unavailable")
+                    .map_err(ActorError::Kelpie)?;
+                Some(incarnation_id.to_owned())
             }
-            _ => return first_attempt.map_err(ActorError::Kelpie),
+            other => return other.map_err(ActorError::Kelpie),
         };
-        if let Some(incarnation_id) = unavailable_incarnation {
+        if let Some(incarnation_id) = unavailable_incarnation.as_deref() {
             waiter
                 .retire_occupant(
                     incarnation_id,
@@ -2220,6 +2224,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn queued_turn_recovers_an_unavailable_recorded_occupant_and_drains() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
@@ -2230,6 +2235,7 @@ mod tests {
             whoami(),
             failure("target_unavailable", "occupant pane is gone"),
             pending_ask("ask-unavailable"),
+            cancelled(),
             retired(),
             start(),
             renewed(),
@@ -2299,6 +2305,11 @@ mod tests {
             .0
             .windows(2)
             .any(|pair| pair == ["--incarnation", "occupant-incarnation"]));
+        let cancel = calls
+            .iter()
+            .find(|call| call.0[1] == "cancel")
+            .expect("cancel unavailable ask");
+        assert_eq!(cancel.0[2], "ask-unavailable");
         let ask_keys = calls
             .iter()
             .filter(|call| call.0[1] == "ask")
@@ -2322,13 +2333,14 @@ mod tests {
     }
 
     #[test]
-    fn resume_queued_asks_a_later_channel_when_the_first_whoami_fails() {
+    fn resume_queued_asks_a_later_channel_when_the_first_recovery_fails() {
         let first_channel = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
         let second_channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
             failure("conflict", "no ready agent for alias bot-aaa"),
-            success(&serde_json::json!({ "incarnation_id": "broken" })),
+            failure("conflict", "no ready agent for alias bot-aaa"),
+            failure("rejected", "recovery start failed"),
             whoami(),
             renewed(),
             whoami(),
@@ -2387,6 +2399,7 @@ mod tests {
         );
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls.iter().filter(|call| call.0[1] == "ask").count(), 1);
+        assert_eq!(calls.iter().filter(|call| call.0[1] == "start").count(), 1);
         assert_eq!(ask_request(&calls.last().expect("ask").1), "second");
     }
 
