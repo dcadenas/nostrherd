@@ -1,6 +1,7 @@
 //! Read-only relay subscription and event classification.
 
 use std::fmt;
+use std::future::IntoFuture;
 use std::time::Duration;
 
 use botserver_domain::{
@@ -442,8 +443,8 @@ impl RelaySubscriber {
     /// # Errors
     ///
     /// Returns an SDK error when no connected relay accepts a requested
-    /// subscription. Earlier filters can already be live when a later filter
-    /// fails; callers should treat an error as fatal and replace the client.
+    /// subscription. Earlier filters can already be refreshed when a later
+    /// filter fails.
     pub async fn subscribe(
         &self,
         operator_pubkey: &str,
@@ -481,8 +482,11 @@ impl RelaySubscriber {
 
     async fn subscribe_filter(&self, id: &str, filter: Filter) -> Result<(), RelaySubscribeError> {
         let id = SubscriptionId::new(id);
-        self.client.unsubscribe(&id).await?;
-        let output = self.client.subscribe(filter).with_id(id).await?;
+        let output = replace_subscription(
+            || self.client.unsubscribe(&id),
+            || self.client.subscribe(filter).with_id(id.clone()),
+        )
+        .await?;
         if output.success.is_empty() {
             let mut failures = output
                 .failed
@@ -603,6 +607,17 @@ impl RelaySubscriber {
             .await?;
         Ok(events.into_iter().collect())
     }
+}
+
+async fn replace_subscription<U, UF, S, SF, R, T, E>(unsubscribe: U, subscribe: S) -> Result<T, E>
+where
+    U: FnOnce() -> UF,
+    UF: IntoFuture<Output = Result<R, E>>,
+    S: FnOnce() -> SF,
+    SF: IntoFuture<Output = Result<T, E>>,
+{
+    let _ = unsubscribe().await;
+    subscribe().await
 }
 
 fn tag_value<'a>(tags: &'a [Vec<String>], name: &str) -> Option<&'a str> {
@@ -1620,6 +1635,26 @@ mod tests {
 
         client.disconnect().await;
         relay.shutdown();
+    }
+
+    #[tokio::test]
+    async fn subscription_refresh_registers_replacement_after_unsubscribe_failure() {
+        let subscription = std::cell::Cell::new(Some("old filter"));
+
+        let result = replace_subscription(
+            || async {
+                subscription.set(None);
+                Err::<(), _>("close failed")
+            },
+            || async {
+                subscription.set(Some("new filter"));
+                Ok::<_, &str>(())
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(subscription.get(), Some("new filter"));
     }
 
     #[test]
