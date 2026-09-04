@@ -737,11 +737,14 @@ where
             return Ok(TriggerOutcome::Declined);
         };
         if let Some(ask_id) = replaced.cancelled.ask_id.as_deref() {
-            waiter
+            let cancel = waiter
                 .cancel(ask_id, "trigger edited")
-                .map_err(ActorError::Kelpie)?;
-            // The replacement ask starts with no progress post (D42).
+                .map_err(ActorError::Kelpie);
+            // The replacement ask starts with no progress post (D42), and the
+            // turn is already replaced here, so this pass is the only one that
+            // can end the old post even when the Kelpie cancel fails.
             self.delete_progress_post(ask_id)?;
+            cancel?;
         }
         self.repository
             .mark_event_processed(event_id)
@@ -775,8 +778,14 @@ where
             return Ok(TriggerOutcome::Declined);
         };
         if let Some(ask_id) = cancelled.ask_id.as_deref() {
-            waiter.cancel(ask_id, reason).map_err(ActorError::Kelpie)?;
+            let cancel = waiter.cancel(ask_id, reason).map_err(ActorError::Kelpie);
+            // The turn is already cancelled in the host database, so a later
+            // ingest of the same event finds nothing to cancel and never comes
+            // back here. Returning on the Kelpie error before the delete would
+            // leave the stamped progress post up for good, and D42 makes that
+            // delete best-effort rather than conditional on the cancel.
             self.delete_progress_post(ask_id)?;
+            cancel?;
         }
         self.reactions.remove(&cancelled.event_id);
         self.repository
@@ -1036,13 +1045,21 @@ where
         ) {
             Ok(started) => Ok(started),
             Err(error) => {
-                // The next attempt allocates a fresh pane, so an unreleased one
-                // stays behind as an empty tab for every rejected start.
-                if let Err(release_error) = self.panes.release(&pane) {
-                    eprintln!(
-                        "occupant pane {} release failed: {release_error}",
-                        pane.pane_id
-                    );
+                // Release only on a rejection, which proves Herdr refused the
+                // request and no agent runs in this pane; the next attempt
+                // allocates a fresh one, so an unreleased pane stays behind as
+                // an empty tab. Every other error is ambiguous or reports a
+                // receipt problem raised after `runtime_start` already
+                // succeeded, and closing the pane there kills a live occupant
+                // Kelpie still tracks. Leaking an empty pane is the safer half
+                // of that trade.
+                if matches!(error, KelpieError::Rejected { .. }) {
+                    if let Err(release_error) = self.panes.release(&pane) {
+                        eprintln!(
+                            "occupant pane {} release failed: {release_error}",
+                            pane.pane_id
+                        );
+                    }
                 }
                 Err(ActorError::Kelpie(error))
             }
@@ -1311,6 +1328,22 @@ mod tests {
         }))
     }
 
+    /// A start whose runtime succeeded but whose receipt cannot be read: the
+    /// occupant is live in the pane even though Kelpie returns an error.
+    fn start_with_unreadable_receipt() -> CommandOutput {
+        success(&serde_json::json!({
+            "runtime_start": {
+                "operation_id": "start-operation",
+                "outcome": "succeeded"
+            },
+            "initial_message": {
+                "message_id": "tell-id",
+                "operation_id": "tell-operation",
+                "outcome": "accepted"
+            }
+        }))
+    }
+
     fn whoami() -> CommandOutput {
         success(&serde_json::json!({
             "logical_agent_id": "occupant-agent",
@@ -1454,6 +1487,73 @@ mod tests {
             .expect("session")
             .expect("session row");
         assert!(session.occupant_logical_id.is_none());
+    }
+
+    #[test]
+    fn an_unproven_start_failure_keeps_the_pane_for_a_possibly_live_occupant() {
+        let (mut actor, kelpie, _runner, panes) = actor([adopt(), start_with_unreadable_receipt()]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+
+        let error = actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect_err("unreadable receipt");
+
+        assert!(
+            error.to_string().contains("invalid Kelpie receipt"),
+            "{error}"
+        );
+        assert!(
+            panes.released.lock().expect("released").is_empty(),
+            "a pane whose occupant may be running must not be closed"
+        );
+    }
+
+    #[test]
+    fn a_failed_kelpie_cancel_still_deletes_the_progress_post() {
+        let relay = Arc::new(crate::progress::RecordingProgressRelay::default());
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            failure("rejected", "kelpie cancel refused"),
+        ]);
+        let mut actor = actor
+            .with_progress_relay(Arc::clone(&relay) as Arc<dyn crate::progress::ProgressRelay>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        let post_id = "e".repeat(64);
+        open_turn_with_progress_post(&mut actor, &kelpie, &waiter, &trigger, &post_id);
+
+        let error = actor
+            .handle_ingest(
+                &kelpie,
+                &waiter,
+                &crate::relay::IngestAction::Delete {
+                    event_id: event_id('d'),
+                    target_event_id: trigger.event_id.clone(),
+                },
+                &trigger.channel_display,
+            )
+            .expect_err("cancel refused");
+
+        assert!(
+            error.to_string().contains("kelpie cancel refused"),
+            "{error}"
+        );
+        assert_eq!(
+            relay.deletes.lock().expect("deletes").as_slice(),
+            [(trigger.channel_id.clone(), post_id)],
+            "the progress post is deleted even when the Kelpie cancel fails"
+        );
+        let post = actor
+            .repository
+            .progress_post("ask-1")
+            .expect("row")
+            .expect("progress row");
+        assert!(post.ended);
     }
 
     #[test]
