@@ -125,8 +125,7 @@ fn create_progress_posts_table(connection: &Connection) -> rusqlite::Result<()> 
                   prepared_event_id IS NULL OR length(prepared_event_id) = 64
               ),
               prepared_created_at INTEGER,
-              dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1)),
-              post_event_id TEXT CHECK(
+               post_event_id TEXT CHECK(
                   post_event_id IS NULL OR length(post_event_id) = 64
               ),
               edit_count INTEGER NOT NULL DEFAULT 0 CHECK(edit_count >= 0),
@@ -143,8 +142,80 @@ fn create_progress_posts_table(connection: &Connection) -> rusqlite::Result<()> 
               WHERE ended = 0
                 AND (
                     pending_body IS NOT NULL
-                    OR (dispatched = 1 AND post_event_id IS NULL)
-                );",
+                     OR (prepared_event_id IS NOT NULL AND post_event_id IS NULL)
+                 );",
+    )
+}
+
+/// Derive progress dispatch from the prepared id while preserving old rows.
+fn migrate_progress_posts_without_dispatched(connection: &Connection) -> rusqlite::Result<()> {
+    let has_dispatched: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('progress_posts') WHERE name = 'dispatched'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if has_dispatched.is_none() {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         DROP INDEX IF EXISTS progress_posts_channel;
+         DROP INDEX IF EXISTS progress_posts_pending_flush;
+         CREATE TABLE progress_posts_new (
+             ask_id TEXT PRIMARY KEY NOT NULL,
+             channel_id TEXT NOT NULL,
+             reply_to_event_id TEXT NOT NULL CHECK(length(reply_to_event_id) = 64),
+             thread_root_event_id TEXT CHECK(
+                 thread_root_event_id IS NULL OR length(thread_root_event_id) = 64
+             ),
+             opened_at INTEGER NOT NULL,
+             pending_body TEXT,
+             post_body TEXT,
+             prepared_event_id TEXT CHECK(
+                 prepared_event_id IS NULL OR length(prepared_event_id) = 64
+             ),
+             prepared_created_at INTEGER,
+             post_event_id TEXT CHECK(
+                 post_event_id IS NULL OR length(post_event_id) = 64
+             ),
+             edit_count INTEGER NOT NULL DEFAULT 0 CHECK(edit_count >= 0),
+             last_send_at INTEGER,
+             ended INTEGER NOT NULL DEFAULT 0 CHECK(ended IN (0, 1)),
+             cap_noticed INTEGER NOT NULL DEFAULT 0 CHECK(cap_noticed IN (0, 1))
+         ) STRICT;
+         INSERT INTO progress_posts_new(
+             ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
+             pending_body, post_body, prepared_event_id, prepared_created_at,
+             post_event_id, edit_count, last_send_at, ended, cap_noticed
+         )
+         SELECT ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
+                CASE
+                    WHEN dispatched = 1 AND prepared_event_id IS NULL
+                         AND post_event_id IS NULL THEN NULL
+                    ELSE pending_body
+                END,
+                post_body, prepared_event_id, prepared_created_at, post_event_id,
+                edit_count, last_send_at,
+                CASE
+                    WHEN dispatched = 1 AND prepared_event_id IS NULL
+                         AND post_event_id IS NULL THEN 1
+                    ELSE ended
+                END,
+                cap_noticed
+         FROM progress_posts;
+         DROP TABLE progress_posts;
+         ALTER TABLE progress_posts_new RENAME TO progress_posts;
+         CREATE INDEX progress_posts_channel ON progress_posts(channel_id);
+         CREATE INDEX progress_posts_pending_flush
+             ON progress_posts(opened_at, ask_id)
+             WHERE ended = 0
+               AND (
+                   pending_body IS NOT NULL
+                   OR (prepared_event_id IS NOT NULL AND post_event_id IS NULL)
+               );
+         COMMIT;",
     )
 }
 
@@ -271,6 +342,7 @@ impl SqliteRepository {
                ) STRICT;",
         )?;
         create_progress_posts_table(&connection)?;
+        migrate_progress_posts_without_dispatched(&connection)?;
         run_column_migrations(&connection)?;
         Ok(Self { connection })
     }
@@ -938,8 +1010,8 @@ impl HostRepository for SqliteRepository {
             "INSERT INTO progress_posts(
                  ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
                  pending_body, post_body, prepared_event_id, prepared_created_at,
-                 dispatched, post_event_id, edit_count, last_send_at, ended, cap_noticed
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 post_event_id, edit_count, last_send_at, ended, cap_noticed
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(ask_id) DO UPDATE SET
                  pending_body = excluded.pending_body,
                  post_body = COALESCE(progress_posts.post_body, excluded.post_body),
@@ -949,8 +1021,7 @@ impl HostRepository for SqliteRepository {
                  prepared_created_at = COALESCE(
                      progress_posts.prepared_created_at, excluded.prepared_created_at
                  ),
-                 dispatched = excluded.dispatched,
-                 post_event_id = COALESCE(progress_posts.post_event_id, excluded.post_event_id),
+                  post_event_id = COALESCE(progress_posts.post_event_id, excluded.post_event_id),
                  edit_count = excluded.edit_count,
                  last_send_at = excluded.last_send_at,
                  ended = excluded.ended,
@@ -965,7 +1036,6 @@ impl HostRepository for SqliteRepository {
                 post.post_body,
                 post.prepared_event_id,
                 post.prepared_created_at,
-                i64::from(post.dispatched),
                 post.post_event_id,
                 i64::from(post.edit_count),
                 post.last_send_at,
@@ -983,7 +1053,7 @@ impl HostRepository for SqliteRepository {
         let mut statement = self.connection.prepare(PROGRESS_PENDING_SELECT)?;
         let posts = statement
             .query_map([bot_id.as_str()], |row| {
-                Ok((read_progress_post(row)?, read_turn_at(row, 15)?))
+                Ok((read_progress_post(row)?, read_turn_at(row, 14)?))
             })?
             .collect();
         posts
@@ -994,7 +1064,7 @@ impl HostRepository for SqliteRepository {
             "SELECT COALESCE(post_event_id, prepared_event_id)
              FROM progress_posts
              WHERE channel_id = ?1
-               AND (post_event_id IS NOT NULL OR (dispatched = 1 AND prepared_event_id IS NOT NULL))
+               AND (post_event_id IS NOT NULL OR prepared_event_id IS NOT NULL)
              ORDER BY ask_id",
         )?;
         let ids = statement
@@ -1009,7 +1079,7 @@ impl HostRepository for SqliteRepository {
 
 const PROGRESS_SELECT: &str = "SELECT ask_id, channel_id, reply_to_event_id, thread_root_event_id,
         opened_at, pending_body, post_body, prepared_event_id, prepared_created_at,
-        dispatched, post_event_id, edit_count, last_send_at, ended, cap_noticed
+        post_event_id, edit_count, last_send_at, ended, cap_noticed
  FROM progress_posts";
 
 const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
@@ -1018,13 +1088,13 @@ const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
          WHERE ended = 0
            AND (
                pending_body IS NOT NULL
-               OR (dispatched = 1 AND post_event_id IS NULL)
+               OR (prepared_event_id IS NOT NULL AND post_event_id IS NULL)
            )
          ORDER BY opened_at, ask_id
      )
      SELECT p.ask_id, p.channel_id, p.reply_to_event_id, p.thread_root_event_id,
             p.opened_at, p.pending_body, p.post_body, p.prepared_event_id,
-            p.prepared_created_at, p.dispatched, p.post_event_id, p.edit_count,
+             p.prepared_created_at, p.post_event_id, p.edit_count,
             p.last_send_at, p.ended, p.cap_noticed,
             t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
             t.reply_to_event_id, t.state, t.opened_at
@@ -1037,10 +1107,9 @@ const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
 fn read_progress_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProgressPost> {
     let reply_to: String = row.get(2)?;
     let thread_root: Option<String> = row.get(3)?;
-    let dispatched: i64 = row.get(9)?;
-    let edit_count: i64 = row.get(11)?;
-    let ended: i64 = row.get(13)?;
-    let cap_noticed: i64 = row.get(14)?;
+    let edit_count: i64 = row.get(10)?;
+    let ended: i64 = row.get(12)?;
+    let cap_noticed: i64 = row.get(13)?;
     Ok(ProgressPost {
         ask_id: row.get(0)?,
         channel_id: row.get(1)?,
@@ -1054,11 +1123,10 @@ fn read_progress_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProgressPost>
         post_body: row.get(6)?,
         prepared_event_id: row.get(7)?,
         prepared_created_at: row.get(8)?,
-        dispatched: dispatched != 0,
-        post_event_id: row.get(10)?,
+        post_event_id: row.get(9)?,
         edit_count: u32::try_from(edit_count)
-            .map_err(|_| invalid_value(11, "invalid progress edit count"))?,
-        last_send_at: row.get(12)?,
+            .map_err(|_| invalid_value(10, "invalid progress edit count"))?,
+        last_send_at: row.get(11)?,
         ended: ended != 0,
         cap_noticed: cap_noticed != 0,
     })
@@ -1166,7 +1234,6 @@ mod tests {
             post_body: None,
             prepared_event_id: None,
             prepared_created_at: None,
-            dispatched: false,
             post_event_id: None,
             edit_count: 0,
             last_send_at: None,
@@ -1237,6 +1304,55 @@ mod tests {
                 .all(|detail| !detail.contains("turns_session_order")),
             "query plan scanned the bot's turn history: {details:?}"
         );
+    }
+
+    #[test]
+    fn progress_dispatched_column_is_removed_without_retrying_an_unknown_legacy_send() {
+        let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+            .expect("repository");
+        repository
+            .connection
+            .execute_batch(
+                "DROP TABLE progress_posts;
+                 CREATE TABLE progress_posts (
+                     ask_id TEXT PRIMARY KEY NOT NULL,
+                     channel_id TEXT NOT NULL,
+                     reply_to_event_id TEXT NOT NULL,
+                     thread_root_event_id TEXT,
+                     opened_at INTEGER NOT NULL,
+                     pending_body TEXT,
+                     post_body TEXT,
+                     prepared_event_id TEXT,
+                     prepared_created_at INTEGER,
+                     dispatched INTEGER NOT NULL,
+                     post_event_id TEXT,
+                     edit_count INTEGER NOT NULL,
+                     last_send_at INTEGER,
+                     ended INTEGER NOT NULL,
+                     cap_noticed INTEGER NOT NULL
+                 ) STRICT;
+                 INSERT INTO progress_posts VALUES (
+                     'ask-legacy', 'channel',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     NULL, 1000, 'next', '[bot]: previous', NULL, NULL, 1,
+                     NULL, 0, NULL, 0, 0
+                 );",
+            )
+            .unwrap();
+
+        let repository = SqliteRepository::from_connection(repository.connection).unwrap();
+        let columns = repository
+            .connection
+            .prepare("SELECT name FROM pragma_table_info('progress_posts') ORDER BY cid")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "dispatched"));
+        let legacy = repository.progress_post("ask-legacy").unwrap().unwrap();
+        assert!(legacy.ended);
+        assert!(legacy.pending_body.is_none());
     }
 
     #[test]

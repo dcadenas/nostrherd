@@ -4,7 +4,6 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use botserver_domain::{Bot, BotId, EventId, SessionName};
 
@@ -545,7 +544,7 @@ where
     ///
     /// Creates each ask's progress post once the hold elapsed, edits it
     /// in place under the interval and cap, and finishes a create that
-    /// was dispatched without an accepted id. Relay failures are
+    /// was prepared without an accepted id. Relay failures are
     /// operator notices and never fail the turn.
     ///
     /// # Errors
@@ -958,7 +957,7 @@ where
             .map_err(ActorError::Repository)?
         {
             Some(event) => event.created_at,
-            None => unix_now().map_err(ActorError::Snapshot)?,
+            None => crate::unix_now().map_err(ActorError::Snapshot)?,
         };
         let cursor = match (
             session.ask_context_event_id.clone(),
@@ -1088,7 +1087,7 @@ where
         let markdown = render_place_snapshot(
             &session.session_name,
             &session.channel_id,
-            unix_now().map_err(ActorError::Snapshot)?,
+            crate::unix_now().map_err(ActorError::Snapshot)?,
             &events,
         );
         refresh_place_snapshot(self.bot.corpus_path(), &session.session_name, &markdown)
@@ -1208,13 +1207,6 @@ fn ensure_bot_session<R: HostRepository>(
         .save_session(&session)
         .map_err(ActorError::Repository)?;
     Ok(session)
-}
-
-fn unix_now() -> io::Result<i64> {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?;
-    i64::try_from(elapsed.as_secs()).map_err(|_| io::Error::other("unix time does not fit i64"))
 }
 
 #[cfg(test)]
@@ -2478,7 +2470,7 @@ mod tests {
             actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
-        let now = unix_now().expect("now");
+        let now = crate::unix_now().expect("now");
         let dm_channel = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         actor
             .repository
@@ -3176,7 +3168,8 @@ mod tests {
                 &occupant_progress("ask-1", "working on it"),
             )
             .expect("progress recorded");
-        let now = unix_now().expect("now") + botserver_domain::progress::PROGRESS_INITIAL_HOLD_SECS;
+        let now = crate::unix_now().expect("now")
+            + botserver_domain::progress::PROGRESS_INITIAL_HOLD_SECS;
         actor.flush_progress(&publisher, now).expect("flush");
         let post = actor
             .repository

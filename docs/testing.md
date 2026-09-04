@@ -28,7 +28,7 @@ the row is recorded before the ACK and never relayed from the delivery
 handler, one create after the hold with no `--mention`, later bodies
 coalesce into one edit, a final first discards the pending body and
 leaves the post up, a cancel ends progress and Buzz-deletes the post,
-and a create dispatched without an accepted id is redelivered with the
+and a prepared create without an accepted id is redelivered with the
 same prepared event id (D28, D43). `snapshot_progress_post_excluded` and
 `ask_context_excludes_progress_post` in `actor.rs` prove the indexing
 exclusion.
@@ -1266,7 +1266,7 @@ OCCUPANT_PANE=$(wait_pane "$SNAME")
 reply_progress "$OCCUPANT_PANE" "$ASK_ID" 'reading the repo'
 sleep 3
 sqlite3 "$PROOF/host.sqlite" \
-  "SELECT pending_body IS NOT NULL, post_event_id IS NULL, dispatched FROM progress_posts WHERE ask_id='$ASK_ID';"
+  "SELECT pending_body IS NOT NULL, post_event_id IS NULL, prepared_event_id IS NULL FROM progress_posts WHERE ask_id='$ASK_ID';"
 stamped_posts "$PROGRESS"
 
 # 2. After the hold (20 s from turn open): exactly one stamped post,

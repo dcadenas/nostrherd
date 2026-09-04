@@ -7,6 +7,9 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+#[cfg(test)]
+mod test_support;
+
 /// Public Kelpie name of the host socket waiter (D2).
 pub const WAITER_NAME: &str = "botserver";
 
@@ -54,6 +57,19 @@ pub const OCCUPANT_RENEW_EVERY: &str = "45m";
 
 /// Prepare prompt stored on the occupant renew policy (D27).
 pub const OCCUPANT_RENEW_PREPARE: &str = "Write progress.md so a later instance of you can resume this channel work with no memory of this conversation: what is done, what is next, decisions and why, absolute paths.";
+
+/// Return the current Unix timestamp in seconds.
+///
+/// # Errors
+///
+/// Returns an error when the system clock predates the Unix epoch or the
+/// timestamp does not fit in an `i64`.
+pub fn unix_now() -> io::Result<i64> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+    i64::try_from(elapsed.as_secs()).map_err(|_| io::Error::other("unix time does not fit i64"))
+}
 
 /// Bootstrap tell body that points at the channel snapshot.
 #[must_use]
@@ -1347,6 +1363,16 @@ pub struct IndexedRelayEvent {
     pub target_event_id: Option<EventId>,
 }
 
+pub(crate) fn thread_root_for<R: HostRepository>(
+    repository: &R,
+    event_id: &botserver_domain::EventId,
+) -> Result<Option<botserver_domain::EventId>, R::Error> {
+    Ok(repository.indexed_event(event_id)?.and_then(|event| {
+        let tags = serde_json::from_str::<Vec<Vec<String>>>(&event.tags_json).unwrap_or_default();
+        botserver_domain::buzz::reply_thread_root(event_id, &tags)
+    }))
+}
+
 /// Persisted binding between one bot and one Buzz channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
@@ -1679,7 +1705,7 @@ pub trait HostRepository {
 
     /// This bot's progress rows and turns with relay work left.
     ///
-    /// A pending body or a create dispatched without an accepted id is
+    /// A pending body or a prepared create without an accepted id is
     /// returned. Ended rows are skipped.
     ///
     /// # Errors
@@ -1690,8 +1716,8 @@ pub trait HostRepository {
         bot_id: &BotId,
     ) -> Result<Vec<(crate::progress::ProgressPost, TurnRecord)>, Self::Error>;
 
-    /// Event ids of this channel's host progress posts, accepted or
-    /// dispatched, for snapshot and ask Context exclusion (D42).
+    /// Event ids of this channel's accepted or prepared host progress
+    /// posts, for snapshot and ask Context exclusion (D42).
     ///
     /// # Errors
     ///
