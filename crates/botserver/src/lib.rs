@@ -1319,6 +1319,7 @@ pub mod config;
 pub mod herdr;
 pub mod inbox;
 pub mod outbox;
+pub mod progress;
 pub mod relay;
 pub mod snapshot;
 pub mod sqlite;
@@ -1377,6 +1378,9 @@ pub struct TurnRecord {
     pub ask_id: Option<String>,
     pub reply_to_event_id: Option<EventId>,
     pub state: TurnState,
+    /// Unix seconds when the turn opened (D42 hold start). `None` for a
+    /// queued turn, and for open turns recorded before this column existed.
+    pub opened_at: Option<i64>,
 }
 
 /// Result of cancelling unclaimed work and enqueueing a replacement turn.
@@ -1650,4 +1654,44 @@ pub trait HostRepository {
     /// Returns an adapter error when the id cannot be persisted.
     fn mark_outbound_accepted(&mut self, ask_id: &str, event_id: &str)
         -> Result<bool, Self::Error>;
+
+    /// Load the progress post row for one ask (D42).
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the row cannot be read.
+    fn progress_post(
+        &self,
+        ask_id: &str,
+    ) -> Result<Option<crate::progress::ProgressPost>, Self::Error>;
+
+    /// Persist the progress post row for one ask (D42).
+    ///
+    /// Recorded before the ACK, before `send`, and before each `edit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the row cannot be persisted.
+    fn save_progress_post(
+        &mut self,
+        post: &crate::progress::ProgressPost,
+    ) -> Result<(), Self::Error>;
+
+    /// Progress rows with relay work left: a pending body, or a create
+    /// that was dispatched without an accepted id. Ended rows are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the rows cannot be read.
+    fn progress_posts_pending_flush(
+        &self,
+    ) -> Result<Vec<crate::progress::ProgressPost>, Self::Error>;
+
+    /// Event ids of this channel's host progress posts, accepted or
+    /// dispatched, for snapshot and ask Context exclusion (D42).
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the rows cannot be read.
+    fn progress_post_event_ids(&self, channel_id: &str) -> Result<Vec<EventId>, Self::Error>;
 }

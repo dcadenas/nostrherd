@@ -1018,6 +1018,7 @@ mod tests {
                     ask_id: Some("ask-id".to_owned()),
                     reply_to_event_id: None,
                     state: TurnState::Open,
+                    opened_at: None,
                 }),
             )
         }
@@ -1061,6 +1062,30 @@ mod tests {
             _ask_id: &str,
             _event_id: &str,
         ) -> Result<bool, Self::Error> {
+            unreachable!()
+        }
+
+        fn progress_post(
+            &self,
+            _ask_id: &str,
+        ) -> Result<Option<crate::progress::ProgressPost>, Self::Error> {
+            unreachable!()
+        }
+
+        fn save_progress_post(
+            &mut self,
+            _post: &crate::progress::ProgressPost,
+        ) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        fn progress_posts_pending_flush(
+            &self,
+        ) -> Result<Vec<crate::progress::ProgressPost>, Self::Error> {
+            unreachable!()
+        }
+
+        fn progress_post_event_ids(&self, _channel_id: &str) -> Result<Vec<EventId>, Self::Error> {
             unreachable!()
         }
     }

@@ -20,6 +20,19 @@ kelpie final, ACK-after-decide, crash-safe retry of the same outbound
 event, best-effort `⏳` add/remove on the trigger, and occupant-tell
 routing (D38). That is not a live relay proof.
 
+`crates/domain/src/progress.rs` proves the D42 policy on its own: the
+1024-byte cap on a char boundary with a trailing `…`, the 20 s hold from
+the turn's open time, the 30 s edit interval, and the 20-edit cap.
+`crates/botserver/src/progress.rs` proves the host side against SQLite:
+the row is recorded before the ACK and never relayed from the delivery
+handler, one create after the hold with no `--mention`, later bodies
+coalesce into one edit, a final first discards the pending body and
+leaves the post up, a cancel ends progress and Buzz-deletes the post,
+and a create dispatched without an accepted id is redelivered with the
+same prepared event id (D28, D43). `snapshot_progress_post_excluded` and
+`ask_context_excludes_progress_post` in `actor.rs` prove the indexing
+exclusion.
+
 `TriggerMatch`, `TurnTransition`, and `parse_occupant_tell` are parsed
 types in `crates/domain`. Illegal trigger text, illegal turn changes,
 and malformed tell tags are `None`, not stringly-typed later.
@@ -47,7 +60,7 @@ Invariants and their tests: `docs/invariants.md`.
 | 8 Busy | `flow_08_busy_queues_the_second_turn` | landed (`dcadenas/botserver#19`) |
 | 9 Gone pane | `flow_09_gone_pane_continues_the_logical_agent` | landed (`dcadenas/botserver#20`) |
 | 10 Edit / delete | `flow_10_edit_answers_latest_text_and_delete_abandons`, `flow_10_claimed_turn_keeps_the_landing_reply`, `flow_10_posted_turn_is_left_up_after_delete`, `spec_flow_10_cancelled_turn_never_reaches_buzz` | landed (`dcadenas/botserver#20`) |
-| 11 Long work | `flow_11_one_ask_while_the_occupant_works` (D42 extends it: progress post after the hold, then edit-in-place) | landed (`dcadenas/botserver#20`) |
+| 11 Long work | `flow_11_one_ask_while_the_occupant_works`, `flow_11_progress_is_one_edited_post_then_a_final` (D42: progress post after the hold, edit in place, final leaves it up) | landed (`dcadenas/botserver#20`); progress relay: issue 60 recipe below |
 | 12 Desktop | `flow_12_host_does_not_publish_presence_or_typing` | landed (`dcadenas/botserver#20`) |
 | 13 Bot-initiated tell | `known_occupant_tell_posts_without_trigger_reply_to`, `occupant_tell_tag_routes_and_drops_scratch` | optional |
 
@@ -62,7 +75,7 @@ with leftover `botcli`. Occupant steps below match the current path
 
 ## Live local relay
 
-Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, 43, and 48 require it.
+Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, 43, 48, and 60 require it.
 
 Issue 41 names new occupants from Buzz place display. Create a stream
 with `--name eng`, trigger it, then:
@@ -1168,6 +1181,170 @@ envchain botserver-proof botserver --config "$PROOF/bots.toml" --database "$PROO
 
 Throwaway namespaces only: `botserver-proof` and
 `botserver-proof-peer`. Never `nostr-personal` or `buzz-acp`.
+
+### Progress relay (issue 60)
+
+The host relays occupant `kelpie reply <ask-id> --progress` bodies as one
+stamped kind 9 per ask, created after the 20 s hold and edited in place
+(kind 40003) under the D42 interval and cap; a cancel Buzz-deletes it
+(kind 9005). Unit proof: `crates/domain/src/progress.rs`,
+`crates/botserver/src/progress.rs`, `progress_acks_without_publish`,
+`final_after_progress_discards_the_pending_body`,
+`cancelled_progress_post_deleted`,
+`edit_replacement_deletes_the_old_progress_post`,
+`snapshot_progress_post_excluded`, `ask_context_excludes_progress_post`,
+`flow_11_progress_is_one_edited_post_then_a_final`.
+
+Same throwaway namespaces and `env -u BUZZ_AUTH_TAG` as the issue-34
+recipe, and its `create_channel`, `occupant_pane`, `wait_sql`,
+`wait_open_ask`, and `wait_pane` helpers. Add the peer as a channel member before the trigger.
+Do not print nsecs, pubkeys, or event ids. The host waiter name is
+`botserver`; a standing personal host blocks this recipe until that
+process is not holding the name. Progress bodies go through `--stdin`,
+never a shell argument. The flush runs on the 1 s refresh tick, so read
+the channel a few seconds after each boundary.
+
+```bash
+ROOT=$(pwd)
+PROOF=$HOME/tmp-botserver-proof-is60
+KEYS=$HOME/tmp-botserver-proof
+mkdir -p "$PROOF"
+./tools/local-relay up
+cargo build -p botserver
+
+cat > "$PROOF/bots.toml" <<EOF
+[[bots]]
+id = "bot"
+corpus = "$ROOT/corpus/example-bot"
+kind = "opencode"
+EOF
+
+OPERATOR_PUB=$(tr -d ' \n' < "$KEYS/operator.pub")
+PEER_PUB=$(tr -d ' \n' < "$KEYS/peer.pub")
+create_channel botserver-is60-progress progress
+create_channel botserver-is60-delete delete
+PROGRESS=$(tr -d '\n' < "$PROOF/progress.id")
+DELETE=$(tr -d '\n' < "$PROOF/delete.id")
+
+rm -f "$PROOF/host.sqlite"
+env -u HERDR_PANE_ID envchain botserver-proof "$ROOT/target/debug/botserver" \
+  --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
+  >"$PROOF/host.log" 2>&1 &
+HOST_PID=$!
+
+# Stamped kind-9 bodies on a channel: prints "<event id prefix length> <content>"
+# per post so the reader can compare ids without printing them whole.
+stamped_posts() {
+  env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+    --channel "$1" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+for it in bots:
+    print(len(str(it.get("event_id") or it.get("id") or "")), it.get("content"))
+print("count", len(bots))'
+}
+
+reply_progress() {
+  local pane=$1 ask=$2 body=$3
+  HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+    kelpie reply "$ask" --progress --stdin <<EOF
+$body
+EOF
+}
+
+# 1. Trigger, then a progress body inside the hold. Expect: a
+#    progress_posts row with pending_body and no post yet.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$PROGRESS" --mention "$OPERATOR_PUB" --content 'bot: long job' \
+  > "$PROOF/progress-trigger.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
+  "$PROOF/progress-trigger.json" "$PROOF/progress-trigger.id"
+ASK_ID=$(wait_open_ask "$PROGRESS")
+SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$PROGRESS';")
+OCCUPANT_PANE=$(wait_pane "$SNAME")
+reply_progress "$OCCUPANT_PANE" "$ASK_ID" 'reading the repo'
+sleep 3
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT pending_body IS NOT NULL, post_event_id IS NULL, dispatched FROM progress_posts WHERE ask_id='$ASK_ID';"
+stamped_posts "$PROGRESS"
+
+# 2. After the hold (20 s from turn open): exactly one stamped post,
+#    replying to the trigger, with no p tag.
+sleep 22
+stamped_posts "$PROGRESS"
+sqlite3 "$PROOF/host.sqlite" \
+  "SELECT post_event_id IS NOT NULL, post_event_id = prepared_event_id, edit_count, pending_body IS NULL
+   FROM progress_posts WHERE ask_id='$ASK_ID';"
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+  --channel "$PROGRESS" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+trigger=open(sys.argv[1]).read().strip()
+bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+assert len(bots)==1, len(bots)
+tags=bots[0].get("tags") or []
+print("e_tag_is_trigger", int(any(t and t[0]=="e" and len(t)>1 and t[1]==trigger for t in tags)))
+print("no_p_tag", int(not any(t and t[0]=="p" for t in tags)))
+open(sys.argv[2],"w").write(str(bots[0].get("event_id") or bots[0].get("id") or ""))
+' "$PROOF/progress-trigger.id" "$PROOF/progress-post.id"
+
+# 3. Two more bodies inside one interval coalesce into one edit of the
+#    same event id (same id, newest content) once 30 s have passed.
+reply_progress "$OCCUPANT_PANE" "$ASK_ID" 'drafting'
+reply_progress "$OCCUPANT_PANE" "$ASK_ID" 'polishing the answer'
+sleep 32
+stamped_posts "$PROGRESS"
+env -u BUZZ_AUTH_TAG envchain botserver-proof buzz messages get \
+  --channel "$PROGRESS" --limit 50 | python3 -c 'import json,sys
+items=json.load(sys.stdin)
+post=open(sys.argv[1]).read().strip()
+bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+assert len(bots)==1, len(bots)
+print("same_event_id", int(str(bots[0].get("event_id") or bots[0].get("id"))==post))
+print("edited_content", int("polishing the answer" in str(bots[0].get("content"))))
+' "$PROOF/progress-post.id"
+sqlite3 "$PROOF/host.sqlite" "SELECT edit_count FROM progress_posts WHERE ask_id='$ASK_ID';"
+
+# 4. Final: a second stamped post; the progress post stays up.
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  kelpie reply "$ASK_ID" --final --stdin <<'EOF'
+long job done
+EOF
+wait_sql "SELECT t.state FROM turns t WHERE t.ask_id='$ASK_ID';" posted
+sleep 2
+stamped_posts "$PROGRESS"
+
+# 5. Delete a trigger whose progress post exists: the post is removed
+#    (kind 9005) and the turn is cancelled.
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages send \
+  --channel "$DELETE" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
+  > "$PROOF/delete-trigger.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
+open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
+  "$PROOF/delete-trigger.json" "$PROOF/delete-trigger.id"
+ASK_ID=$(wait_open_ask "$DELETE")
+SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$DELETE';")
+OCCUPANT_PANE=$(wait_pane "$SNAME")
+reply_progress "$OCCUPANT_PANE" "$ASK_ID" 'about to be deleted'
+sleep 24
+stamped_posts "$DELETE"
+env -u BUZZ_AUTH_TAG envchain botserver-proof-peer buzz messages delete \
+  --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" >/dev/null
+wait_sql "SELECT t.state FROM turns t WHERE t.ask_id='$ASK_ID';" cancelled
+sleep 2
+stamped_posts "$DELETE"
+sqlite3 "$PROOF/host.sqlite" "SELECT ended FROM progress_posts WHERE ask_id='$ASK_ID';"
+kill "$HOST_PID"
+wait "$HOST_PID" 2>/dev/null || true
+```
+
+Expect after step 2 one `[bot]: reading the repo` whose `e` tag is the
+trigger and which has no `p` tag; after step 3 still one post, same
+event id, content `[bot]: polishing the answer`, `edit_count` 1; after
+step 4 two stamped posts (progress plus `[bot]: long job done`); after
+step 5 the delete channel's count goes from 1 to 0 and the row is
+`ended`. The host log (`$PROOF/host.log`) carries an `operator notice`
+line only when a relay step failed.
 
 ### Host publish over its own connection (issue 54)
 
