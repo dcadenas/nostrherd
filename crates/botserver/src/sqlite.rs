@@ -7,6 +7,7 @@ use botserver_domain::{BotId, EventId, TurnTransition};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::outbox::OutboundAttempt;
+use crate::progress::ProgressPost;
 use crate::{
     HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord, TurnReplacement,
     TurnState,
@@ -103,7 +104,40 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
         connection,
         "ALTER TABLE outbound_attempts ADD COLUMN prepared_created_at INTEGER",
     )?;
+    add_column_if_missing(connection, "ALTER TABLE turns ADD COLUMN opened_at INTEGER")?;
     Ok(())
+}
+
+/// Progress post rows (D42), one per ask.
+fn create_progress_posts_table(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "              CREATE TABLE IF NOT EXISTS progress_posts (
+              ask_id TEXT PRIMARY KEY NOT NULL,
+              channel_id TEXT NOT NULL,
+              reply_to_event_id TEXT NOT NULL CHECK(length(reply_to_event_id) = 64),
+              thread_root_event_id TEXT CHECK(
+                  thread_root_event_id IS NULL OR length(thread_root_event_id) = 64
+              ),
+              opened_at INTEGER NOT NULL,
+              pending_body TEXT,
+              post_body TEXT,
+              prepared_event_id TEXT CHECK(
+                  prepared_event_id IS NULL OR length(prepared_event_id) = 64
+              ),
+              prepared_created_at INTEGER,
+              dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1)),
+              post_event_id TEXT CHECK(
+                  post_event_id IS NULL OR length(post_event_id) = 64
+              ),
+              edit_count INTEGER NOT NULL DEFAULT 0 CHECK(edit_count >= 0),
+              last_send_at INTEGER,
+              ended INTEGER NOT NULL DEFAULT 0 CHECK(ended IN (0, 1)),
+              cap_noticed INTEGER NOT NULL DEFAULT 0 CHECK(cap_noticed IN (0, 1))
+          ) STRICT;
+
+         CREATE INDEX IF NOT EXISTS progress_posts_channel
+              ON progress_posts(channel_id);",
+    )
 }
 
 /// SQLite-backed host repository.
@@ -189,6 +223,7 @@ impl SqliteRepository {
                   publish_claimed INTEGER NOT NULL DEFAULT 0 CHECK(
                       publish_claimed IN (0, 1)
                   ),
+                  opened_at INTEGER,
                   CHECK(
                       (state = 'queued' AND ask_id IS NULL)
                       OR (state = 'open' AND ask_id IS NOT NULL)
@@ -227,6 +262,7 @@ impl SqliteRepository {
                    dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1))
                ) STRICT;",
         )?;
+        create_progress_posts_table(&connection)?;
         run_column_migrations(&connection)?;
         Ok(Self { connection })
     }
@@ -249,6 +285,7 @@ impl SqliteRepository {
                 .transpose()?,
             state: TurnState::parse(&state)
                 .ok_or_else(|| invalid_value(6, "invalid turn state"))?,
+            opened_at: row.get(7)?,
         })
     }
 
@@ -544,7 +581,8 @@ impl HostRepository for SqliteRepository {
             return Ok(None);
         };
         transaction.execute(
-            "UPDATE turns SET ask_id = ?1, state = ?2
+            "UPDATE turns SET ask_id = ?1, state = ?2,
+                 opened_at = CAST(strftime('%s', 'now') AS INTEGER)
              WHERE sequence = ?3 AND state = ?4",
             params![
                 ask_id,
@@ -555,7 +593,7 @@ impl HostRepository for SqliteRepository {
         )?;
         let record = transaction.query_row(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                    t.reply_to_event_id, t.state
+                    t.reply_to_event_id, t.state, t.opened_at
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
              WHERE t.sequence = ?1",
@@ -658,7 +696,7 @@ impl HostRepository for SqliteRepository {
         }
         let record = transaction.query_row(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                    t.reply_to_event_id, t.state
+                    t.reply_to_event_id, t.state, t.opened_at
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
              WHERE t.event_id = ?1 AND t.state = ?2
@@ -703,7 +741,7 @@ impl HostRepository for SqliteRepository {
         }
         let cancelled = transaction.query_row(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                    t.reply_to_event_id, t.state
+                    t.reply_to_event_id, t.state, t.opened_at
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
              WHERE t.event_id = ?1 AND t.state = ?2
@@ -721,7 +759,7 @@ impl HostRepository for SqliteRepository {
         self.connection
             .query_row(
                 "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                        t.reply_to_event_id, t.state
+                        t.reply_to_event_id, t.state, t.opened_at
                  FROM turns AS t
                  JOIN sessions AS s ON s.id = t.session_id
                  WHERE t.ask_id = ?1",
@@ -735,7 +773,7 @@ impl HostRepository for SqliteRepository {
         self.connection
             .query_row(
                 "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                        t.reply_to_event_id, t.state
+                        t.reply_to_event_id, t.state, t.opened_at
                  FROM turns AS t
                  JOIN sessions AS s ON s.id = t.session_id
                  WHERE t.event_id = ?1 AND t.state IN ('queued', 'open')",
@@ -752,7 +790,7 @@ impl HostRepository for SqliteRepository {
     ) -> Result<Vec<TurnRecord>, Self::Error> {
         let mut statement = self.connection.prepare(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                    t.reply_to_event_id, t.state
+                    t.reply_to_event_id, t.state, t.opened_at
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
              WHERE s.bot_id = ?1 AND s.channel_id = ?2
@@ -894,6 +932,125 @@ impl HostRepository for SqliteRepository {
         )?;
         Ok(changed == 1)
     }
+
+    fn progress_post(&self, ask_id: &str) -> Result<Option<ProgressPost>, Self::Error> {
+        self.connection
+            .query_row(
+                &format!("{PROGRESS_SELECT} WHERE ask_id = ?1"),
+                [ask_id],
+                read_progress_post,
+            )
+            .optional()
+    }
+
+    fn save_progress_post(&mut self, post: &ProgressPost) -> Result<(), Self::Error> {
+        self.connection.execute(
+            "INSERT INTO progress_posts(
+                 ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
+                 pending_body, post_body, prepared_event_id, prepared_created_at,
+                 dispatched, post_event_id, edit_count, last_send_at, ended, cap_noticed
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(ask_id) DO UPDATE SET
+                 pending_body = excluded.pending_body,
+                 post_body = COALESCE(progress_posts.post_body, excluded.post_body),
+                 prepared_event_id = COALESCE(
+                     progress_posts.prepared_event_id, excluded.prepared_event_id
+                 ),
+                 prepared_created_at = COALESCE(
+                     progress_posts.prepared_created_at, excluded.prepared_created_at
+                 ),
+                 dispatched = excluded.dispatched,
+                 post_event_id = COALESCE(progress_posts.post_event_id, excluded.post_event_id),
+                 edit_count = excluded.edit_count,
+                 last_send_at = excluded.last_send_at,
+                 ended = excluded.ended,
+                 cap_noticed = excluded.cap_noticed",
+            params![
+                post.ask_id,
+                post.channel_id,
+                post.reply_to_event_id.as_str(),
+                post.thread_root_event_id.as_ref().map(EventId::as_str),
+                post.opened_at,
+                post.pending_body,
+                post.post_body,
+                post.prepared_event_id,
+                post.prepared_created_at,
+                i64::from(post.dispatched),
+                post.post_event_id,
+                i64::from(post.edit_count),
+                post.last_send_at,
+                i64::from(post.ended),
+                i64::from(post.cap_noticed),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn progress_posts_pending_flush(&self) -> Result<Vec<ProgressPost>, Self::Error> {
+        let mut statement = self.connection.prepare(&format!(
+            "{PROGRESS_SELECT}
+             WHERE ended = 0
+               AND (
+                   pending_body IS NOT NULL
+                   OR (dispatched = 1 AND post_event_id IS NULL)
+               )
+             ORDER BY opened_at, ask_id"
+        ))?;
+        let posts = statement.query_map([], read_progress_post)?.collect();
+        posts
+    }
+
+    fn progress_post_event_ids(&self, channel_id: &str) -> Result<Vec<EventId>, Self::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT COALESCE(post_event_id, prepared_event_id)
+             FROM progress_posts
+             WHERE channel_id = ?1
+               AND (post_event_id IS NOT NULL OR (dispatched = 1 AND prepared_event_id IS NOT NULL))
+             ORDER BY ask_id",
+        )?;
+        let ids = statement
+            .query_map([channel_id], |row| {
+                let event_id: String = row.get(0)?;
+                parse_event_id(&event_id, 0)
+            })?
+            .collect();
+        ids
+    }
+}
+
+const PROGRESS_SELECT: &str = "SELECT ask_id, channel_id, reply_to_event_id, thread_root_event_id,
+        opened_at, pending_body, post_body, prepared_event_id, prepared_created_at,
+        dispatched, post_event_id, edit_count, last_send_at, ended, cap_noticed
+ FROM progress_posts";
+
+fn read_progress_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProgressPost> {
+    let reply_to: String = row.get(2)?;
+    let thread_root: Option<String> = row.get(3)?;
+    let dispatched: i64 = row.get(9)?;
+    let edit_count: i64 = row.get(11)?;
+    let ended: i64 = row.get(13)?;
+    let cap_noticed: i64 = row.get(14)?;
+    Ok(ProgressPost {
+        ask_id: row.get(0)?,
+        channel_id: row.get(1)?,
+        reply_to_event_id: parse_event_id(&reply_to, 2)?,
+        thread_root_event_id: thread_root
+            .as_deref()
+            .map(|value| parse_event_id(value, 3))
+            .transpose()?,
+        opened_at: row.get(4)?,
+        pending_body: row.get(5)?,
+        post_body: row.get(6)?,
+        prepared_event_id: row.get(7)?,
+        prepared_created_at: row.get(8)?,
+        dispatched: dispatched != 0,
+        post_event_id: row.get(10)?,
+        edit_count: u32::try_from(edit_count)
+            .map_err(|_| invalid_value(11, "invalid progress edit count"))?,
+        last_send_at: row.get(12)?,
+        ended: ended != 0,
+        cap_noticed: cap_noticed != 0,
+    })
 }
 
 fn insert_queued_turn(connection: &Connection, turn: &NewTurn) -> rusqlite::Result<TurnRecord> {
@@ -921,6 +1078,7 @@ fn insert_queued_turn(connection: &Connection, turn: &NewTurn) -> rusqlite::Resu
         ask_id: None,
         reply_to_event_id: turn.reply_to_event_id.clone(),
         state: TurnState::Queued,
+        opened_at: None,
     })
 }
 

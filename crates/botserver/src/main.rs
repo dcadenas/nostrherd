@@ -17,6 +17,7 @@ use botserver::config::{BotRegistry, ConfigError};
 use botserver::herdr::{HerdrError, HerdrPaneAllocator};
 use botserver::inbox::{default_socket, spawn_inbox, HostInbox, InboxDelivery};
 use botserver::outbox::{BuzzPublisher, InFlightReaction, InboxAction};
+use botserver::progress::ProgressRelay;
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
@@ -236,6 +237,16 @@ fn register_host_waiter<'a>(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn unix_now() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or_default()
 }
 
 fn replay_since(repository: &SqliteRepository) -> Result<Timestamp, HostError> {
@@ -535,12 +546,14 @@ fn start_actors(
     publisher: &BuzzPublisher,
 ) -> Result<Vec<BotActor<SqliteRepository, HerdrPaneAllocator>>, HostError> {
     let reactions: Arc<dyn InFlightReaction> = Arc::new(publisher.clone());
+    let progress_relay: Arc<dyn ProgressRelay> = Arc::new(publisher.clone());
     let mut actors = bots
         .into_iter()
         .map(|bot| {
             SqliteRepository::open(database).map(|repository| {
                 BotActor::new(bot, repository, HerdrPaneAllocator::default())
                     .with_reactions(Arc::clone(&reactions))
+                    .with_progress_relay(Arc::clone(&progress_relay))
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -673,6 +686,10 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
                 for actor in &mut actors {
                     if let Err(error) = actor.retry_outbound(&kelpie, &waiter, &publisher) {
                         eprintln!("outbound retry failed: {error}");
+                    }
+                    // Progress relays on the tick, never in the delivery handler (D42).
+                    if let Err(error) = actor.flush_progress(&publisher, unix_now()) {
+                        eprintln!("progress flush failed: {error}");
                     }
                 }
             }

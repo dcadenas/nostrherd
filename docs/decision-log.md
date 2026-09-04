@@ -615,6 +615,17 @@ with a stale first body. Place snapshots (D19, D27) and ask Context
 (D5) MUST exclude host progress post event ids. Own stamped posts
 still do not trigger (D9).
 
+Implementation notes (issue 60): the hold counts from the turn's open
+time, stored as `turns.opened_at` when the ask opens; an open turn
+recorded before that column existed counts from its first progress
+delivery. The 1024-byte cap includes the trailing `…`, applied to the
+unstamped body before the `[{bot-id}]:` stamp. The create is recorded
+with its prepared event id before send (D43), so a create dispatched
+without an accepted id is redelivered under the same id on the next
+tick and relay-deduped; the "ends progress with one operator notice"
+branch remains for a row dispatched with no stored id. A non-retryable
+create rejection also ends progress for that ask with one notice.
+
 ## D43. Host publishes over its own nostr connection
 
 Status: accepted

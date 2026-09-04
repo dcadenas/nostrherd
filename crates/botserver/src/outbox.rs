@@ -19,6 +19,7 @@ use nostr_sdk::prelude::{
 };
 
 use crate::inbox::InboxDelivery;
+use crate::progress::{self, ProgressRelay};
 use crate::{HostRepository, IndexedRelayEvent, SessionRecord, TurnRecord};
 
 /// Whether the claimed inbox delivery may be acknowledged.
@@ -406,6 +407,36 @@ impl InFlightReaction for BuzzPublisher {
     }
 }
 
+impl ProgressRelay for BuzzPublisher {
+    fn edit(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+        content: &str,
+    ) -> Result<(), PublishError> {
+        let event = buzz::message_edit(channel_id, post_event_id, content);
+        self.send_buzz_blocking(&event)
+    }
+
+    fn delete(&self, channel_id: &str, post_event_id: &EventId) -> Result<(), PublishError> {
+        let event = buzz::message_delete(channel_id, post_event_id);
+        self.send_buzz_blocking(&event)
+    }
+}
+
+impl BuzzPublisher {
+    /// Bridge one Buzz event send onto the runtime from the sync actor layer.
+    fn send_buzz_blocking(&self, event: &BuzzEvent) -> Result<(), PublishError> {
+        let publisher = self.clone();
+        let event = event.clone();
+        let handle = publisher.handle.clone();
+        tokio::task::block_in_place(move || {
+            handle.block_on(async move { publisher.send_buzz(&event).await })
+        })
+        .map(|_| ())
+    }
+}
+
 /// Stamped kind-9 channel message for one attempt (D43).
 fn attempt_buzz_event(attempt: &OutboundAttempt) -> BuzzEvent {
     let thread_tags = match (&attempt.reply_to_event_id, &attempt.thread_root_event_id) {
@@ -438,7 +469,9 @@ pub fn classify_delivery(delivery: &InboxDelivery, turn: Option<&TurnRecord>) ->
     }
     match decide(delivery, turn) {
         Decision::Hold => InboxAction::Hold,
-        Decision::AckWithoutPublish | Decision::Publish { .. } => InboxAction::Ack,
+        Decision::AckWithoutPublish | Decision::Publish { .. } | Decision::Progress { .. } => {
+            InboxAction::Ack
+        }
     }
 }
 
@@ -446,7 +479,13 @@ pub fn classify_delivery(delivery: &InboxDelivery, turn: Option<&TurnRecord>) ->
 enum Decision {
     AckWithoutPublish,
     Hold,
-    Publish { body: String },
+    Publish {
+        body: String,
+    },
+    /// Record the progress body for the refresh tick (D42), then ACK.
+    Progress {
+        body: String,
+    },
 }
 
 fn decide(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> Decision {
@@ -454,7 +493,9 @@ fn decide(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> Decision {
         return Decision::Hold;
     };
     if delivery.kind() == "reply" && delivery.disposition() == Some("progress") {
-        return Decision::AckWithoutPublish;
+        return Decision::Progress {
+            body: delivery.body().to_owned(),
+        };
     }
     if delivery.kind() != "reply" {
         return Decision::AckWithoutPublish;
@@ -777,6 +818,13 @@ where
             Ok(InboxAction::Hold)
         }
         Decision::AckWithoutPublish => Ok(InboxAction::Ack),
+        Decision::Progress { body } => {
+            if let Some(turn) = turn {
+                progress::record_progress(repository, notice, &turn, &body, current_timestamp())
+                    .map_err(OutboxError::Repository)?;
+            }
+            Ok(InboxAction::Ack)
+        }
         Decision::Publish { body } => match turn {
             Some(turn) => {
                 complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
@@ -872,11 +920,7 @@ where
         .save_outbound_attempt(&attempt)
         .map_err(OutboxError::Repository)?;
     if attempt.outbound_event_id.is_some() {
-        let _ = repository
-            .set_turn_state(ask_id, TurnState::Posted)
-            .map_err(OutboxError::Repository)?;
-        reactions.remove(&turn.event_id);
-        return Ok(InboxAction::Ack);
+        return mark_posted(repository, reactions, turn, ask_id);
     }
     if attempt.dispatched && attempt.prepared_event_id.is_none() {
         // Attempt recorded before prepared ids existed: a send may have
@@ -927,9 +971,25 @@ where
             return Err(OutboxError::Publish(error));
         }
     }
+    mark_posted(repository, reactions, turn, ask_id)
+}
+
+/// Record `posted`, drop any pending progress body (D42: a final that
+/// lands first discards it), and clear the in-flight marker (D35).
+fn mark_posted<R, P, I>(
+    repository: &mut R,
+    reactions: &I,
+    turn: &TurnRecord,
+    ask_id: &str,
+) -> Result<InboxAction, OutboxError<R::Error, P>>
+where
+    R: HostRepository,
+    I: InFlightReaction,
+{
     let _ = repository
         .set_turn_state(ask_id, TurnState::Posted)
         .map_err(OutboxError::Repository)?;
+    progress::discard_pending(repository, ask_id).map_err(OutboxError::Repository)?;
     reactions.remove(&turn.event_id);
     Ok(InboxAction::Ack)
 }
@@ -1159,11 +1219,52 @@ mod tests {
         )
         .expect("handle");
         assert_eq!(action, InboxAction::Ack);
-        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert!(
+            publisher.calls.lock().expect("calls").is_empty(),
+            "the delivery handler never relays progress; the refresh tick does (D42)"
+        );
         assert_eq!(
             repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
             TurnState::Open
         );
+        // The row is durable before the ACK, with the trigger as reply target.
+        let post = repository
+            .progress_post("ask-1")
+            .unwrap()
+            .expect("progress row");
+        assert_eq!(post.pending_body.as_deref(), Some("working"));
+        assert_eq!(post.reply_to_event_id, event_id('a'));
+        assert!(post.post_event_id.is_none());
+        assert!(!post.dispatched);
+    }
+
+    #[test]
+    fn final_after_progress_discards_the_pending_body() {
+        let (mut repository, publisher) = open_repo();
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("progress", "ask-1", "almost there"),
+        )
+        .expect("progress");
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("final", "ask-1", "done"),
+        )
+        .expect("final");
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[bot]: done".to_owned()]
+        );
+        let post = repository
+            .progress_post("ask-1")
+            .unwrap()
+            .expect("progress row");
+        assert!(post.pending_body.is_none(), "final first discards it");
+        assert!(post.post_event_id.is_none(), "no progress post was created");
     }
 
     #[test]

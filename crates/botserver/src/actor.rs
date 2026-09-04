@@ -13,10 +13,11 @@ use crate::inbox::InboxDelivery;
 use crate::outbox::{
     self, InFlightReaction, InboxAction, NoopInFlightReaction, OutboundPublisher, OutboxError,
 };
+use crate::progress::{self, NoopProgressRelay, ProgressRelay};
 use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
 use crate::{
-    occupant_bootstrap, AskDelivery, HostRepository, HostWaiter, KelpieClient, KelpieError,
-    NewTurn, OccupantLaunch, SessionRecord, TurnState,
+    occupant_bootstrap, AskDelivery, HostRepository, HostWaiter, IndexedRelayEvent, KelpieClient,
+    KelpieError, NewTurn, OccupantLaunch, SessionRecord, TurnState,
 };
 
 /// Kelpie readiness wait for a newly started occupant.
@@ -178,6 +179,38 @@ pub struct BotActor<R, P> {
     pub(crate) repository: R,
     panes: P,
     reactions: ReactionHost,
+    progress_relay: ProgressHost,
+}
+
+/// Progress relay sink with a `Debug` that does not describe the adapter.
+#[derive(Clone)]
+struct ProgressHost {
+    inner: Arc<dyn ProgressRelay>,
+}
+
+impl fmt::Debug for ProgressHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProgressHost")
+    }
+}
+
+impl ProgressRelay for ProgressHost {
+    fn edit(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+        content: &str,
+    ) -> Result<(), crate::outbox::PublishError> {
+        self.inner.edit(channel_id, post_event_id, content)
+    }
+
+    fn delete(
+        &self,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), crate::outbox::PublishError> {
+        self.inner.delete(channel_id, post_event_id)
+    }
 }
 
 impl<R, P> BotActor<R, P>
@@ -195,6 +228,9 @@ where
             reactions: ReactionHost {
                 inner: Arc::new(NoopInFlightReaction),
             },
+            progress_relay: ProgressHost {
+                inner: Arc::new(NoopProgressRelay),
+            },
         }
     }
 
@@ -202,6 +238,13 @@ where
     #[must_use]
     pub fn with_reactions(mut self, reactions: Arc<dyn InFlightReaction>) -> Self {
         self.reactions = ReactionHost { inner: reactions };
+        self
+    }
+
+    /// Use a host relay for progress post edits and deletes (D42).
+    #[must_use]
+    pub fn with_progress_relay(mut self, relay: Arc<dyn ProgressRelay>) -> Self {
+        self.progress_relay = ProgressHost { inner: relay };
         self
     }
 
@@ -496,6 +539,54 @@ where
         Ok(())
     }
 
+    /// Relay pending occupant progress on the host refresh tick (D42).
+    ///
+    /// Creates each ask's progress post once the hold elapsed, edits it
+    /// in place under the interval and cap, and finishes a create that
+    /// was dispatched without an accepted id. Relay failures are
+    /// operator notices and never fail the turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence fails.
+    pub fn flush_progress<Pub: OutboundPublisher>(
+        &mut self,
+        publisher: &Pub,
+        now: i64,
+    ) -> Result<(), ActorError<R::Error>>
+    where
+        Pub::Error: fmt::Display,
+    {
+        let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        let posts = self
+            .repository
+            .progress_posts_pending_flush()
+            .map_err(ActorError::Repository)?;
+        for post in posts {
+            let Some(turn) = self
+                .repository
+                .turn_by_ask_id(&post.ask_id)
+                .map_err(ActorError::Repository)?
+            else {
+                continue;
+            };
+            if turn.bot_id != *self.bot.id() {
+                continue;
+            }
+            progress::flush_progress(
+                &mut self.repository,
+                publisher,
+                &self.progress_relay,
+                &mut notice,
+                &turn,
+                post,
+                now,
+            )
+            .map_err(ActorError::Repository)?;
+        }
+        Ok(())
+    }
+
     /// Drain the next queued turn after an in-flight turn is posted.
     ///
     /// # Errors
@@ -649,6 +740,8 @@ where
             waiter
                 .cancel(ask_id, "trigger edited")
                 .map_err(ActorError::Kelpie)?;
+            // The replacement ask starts with no progress post (D42).
+            self.delete_progress_post(ask_id)?;
         }
         self.repository
             .mark_event_processed(event_id)
@@ -683,6 +776,7 @@ where
         };
         if let Some(ask_id) = cancelled.ask_id.as_deref() {
             waiter.cancel(ask_id, reason).map_err(ActorError::Kelpie)?;
+            self.delete_progress_post(ask_id)?;
         }
         self.reactions.remove(&cancelled.event_id);
         self.repository
@@ -690,6 +784,41 @@ where
             .map_err(ActorError::Repository)?;
         self.resume_queued(kelpie, waiter)?;
         Ok(TriggerOutcome::Cancelled)
+    }
+
+    /// End progress for a cancelled ask and Buzz-delete its post (D42).
+    fn delete_progress_post(&mut self, ask_id: &str) -> Result<(), ActorError<R::Error>> {
+        let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        progress::delete_progress_post(
+            &mut self.repository,
+            &self.progress_relay,
+            &mut notice,
+            ask_id,
+        )
+        .map_err(ActorError::Repository)
+    }
+
+    /// Indexed channel events minus the host's own progress posts (D42).
+    ///
+    /// The host indexes its stamped kind 9 but never fetches its own edits,
+    /// so a progress post would otherwise show a stale first body in
+    /// snapshots and ask Context.
+    fn channel_events_for_occupant(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<IndexedRelayEvent>, ActorError<R::Error>> {
+        let excluded = self
+            .repository
+            .progress_post_event_ids(channel_id)
+            .map_err(ActorError::Repository)?;
+        let events = self
+            .repository
+            .indexed_events_for_channel(channel_id)
+            .map_err(ActorError::Repository)?;
+        Ok(events
+            .into_iter()
+            .filter(|event| !excluded.contains(&event.event_id))
+            .collect())
     }
 
     fn queued_ask_body(&self, event_id: &EventId) -> Result<Option<String>, ActorError<R::Error>> {
@@ -821,10 +950,7 @@ where
             .filter(|turn| turn.state == TurnState::Queued)
             .min_by_key(|turn| turn.sequence)
             .ok_or(ActorError::UnnameableSession)?;
-        let events = self
-            .repository
-            .indexed_events_for_channel(channel_id)
-            .map_err(ActorError::Repository)?;
+        let events = self.channel_events_for_occupant(channel_id)?;
         let trigger_created_at = match self
             .repository
             .indexed_event(&queued.event_id)
@@ -949,10 +1075,7 @@ where
                 "session name is not a safe snapshot filename",
             ))
         })?;
-        let events = self
-            .repository
-            .indexed_events_for_channel(&session.channel_id)
-            .map_err(ActorError::Repository)?;
+        let events = self.channel_events_for_occupant(&session.channel_id)?;
         let markdown = render_place_snapshot(
             &session.session_name,
             &session.channel_id,
@@ -2922,5 +3045,285 @@ mod tests {
                 .state,
             TurnState::Open
         );
+    }
+
+    fn occupant_progress(ask_id: &str, body: &str) -> InboxDelivery {
+        crate::inbox::parse_delivery(&serde_json::json!({
+            "method": "inbox.delivery",
+            "params": {
+                "message_id": "msg-progress",
+                "kind": "reply",
+                "disposition": "progress",
+                "reply_to": ask_id,
+                "body": body
+            }
+        }))
+        .expect("delivery")
+    }
+
+    /// Trigger, deliver one progress body, and flush past the hold so the
+    /// host's progress post exists with the fake publisher's id.
+    fn open_turn_with_progress_post(
+        actor: &mut BotActor<SqliteRepository, Arc<FakePanes>>,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        trigger: &TriggerWork,
+        post_id: &str,
+    ) -> i64 {
+        actor
+            .handle_trigger(kelpie, waiter, trigger)
+            .expect("asked");
+        let publisher = FakeOutbound {
+            event_id: post_id.to_owned(),
+        };
+        actor
+            .handle_occupant_delivery(
+                kelpie,
+                waiter,
+                &publisher,
+                &occupant_progress("ask-1", "working on it"),
+            )
+            .expect("progress recorded");
+        let now = unix_now().expect("now") + botserver_domain::progress::PROGRESS_INITIAL_HOLD_SECS;
+        actor.flush_progress(&publisher, now).expect("flush");
+        let post = actor
+            .repository
+            .progress_post("ask-1")
+            .expect("row")
+            .expect("progress row");
+        assert_eq!(post.post_event_id.as_deref(), Some(post_id));
+        now
+    }
+
+    #[test]
+    fn cancelled_progress_post_deleted() {
+        let relay = Arc::new(crate::progress::RecordingProgressRelay::default());
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            cancelled(),
+        ]);
+        let mut actor = actor
+            .with_progress_relay(Arc::clone(&relay) as Arc<dyn crate::progress::ProgressRelay>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        let post_id = "e".repeat(64);
+        open_turn_with_progress_post(&mut actor, &kelpie, &waiter, &trigger, &post_id);
+        actor
+            .handle_ingest(
+                &kelpie,
+                &waiter,
+                &crate::relay::IngestAction::Delete {
+                    event_id: event_id('d'),
+                    target_event_id: trigger.event_id.clone(),
+                },
+                &trigger.channel_display,
+            )
+            .expect("deleted");
+        assert_eq!(
+            relay.deletes.lock().expect("deletes").as_slice(),
+            [(trigger.channel_id.clone(), post_id)]
+        );
+        let post = actor
+            .repository
+            .progress_post("ask-1")
+            .expect("row")
+            .expect("progress row");
+        assert!(post.ended);
+        assert_eq!(
+            actor
+                .repository
+                .turn_by_ask_id("ask-1")
+                .expect("turn")
+                .expect("turn")
+                .state,
+            TurnState::Cancelled
+        );
+    }
+
+    #[test]
+    fn edit_replacement_deletes_the_old_progress_post() {
+        let relay = Arc::new(crate::progress::RecordingProgressRelay::default());
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            cancelled(),
+            whoami(),
+            asked("ask-2"),
+        ]);
+        let mut actor = actor
+            .with_progress_relay(Arc::clone(&relay) as Arc<dyn crate::progress::ProgressRelay>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        index_trigger(&mut actor, &trigger);
+        let post_id = "e".repeat(64);
+        open_turn_with_progress_post(&mut actor, &kelpie, &waiter, &trigger, &post_id);
+        let replacement =
+            botserver_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("trigger");
+        actor
+            .handle_ingest(
+                &kelpie,
+                &waiter,
+                &crate::relay::IngestAction::Edit {
+                    event_id: event_id('f'),
+                    target_event_id: trigger.event_id.clone(),
+                    replacement: Some(replacement),
+                },
+                &trigger.channel_display,
+            )
+            .expect("edited");
+        assert_eq!(
+            relay.deletes.lock().expect("deletes").as_slice(),
+            [(trigger.channel_id.clone(), post_id)]
+        );
+        // The replacement ask starts with no progress row of its own.
+        assert!(actor
+            .repository
+            .progress_post("ask-2")
+            .expect("row")
+            .is_none());
+        assert_eq!(
+            actor
+                .repository
+                .turn_by_ask_id("ask-2")
+                .expect("turn")
+                .expect("turn")
+                .state,
+            TurnState::Open
+        );
+    }
+
+    #[test]
+    fn snapshot_progress_post_excluded() {
+        let (mut actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        let post_id = "e".repeat(64);
+        let now = open_turn_with_progress_post(&mut actor, &kelpie, &waiter, &trigger, &post_id);
+        // The host indexes its own stamped kind 9 (first body, never the edits).
+        for (id, content) in [
+            (post_id.clone(), "[bot]: working on it".to_owned()),
+            ("b".repeat(64), "human line stays".to_owned()),
+        ] {
+            actor
+                .repository
+                .index_event(
+                    &IndexedRelayEvent {
+                        event_id: EventId::parse_hex(&id).expect("id"),
+                        author_pubkey: "a".repeat(64),
+                        created_at: now,
+                        kind: 9,
+                        content,
+                        tags_json: "[]".to_owned(),
+                        channel_id: Some(trigger.channel_id.clone()),
+                        target_event_id: None,
+                    },
+                    false,
+                )
+                .expect("index");
+        }
+        let session = actor
+            .repository
+            .session(actor.bot.id(), &trigger.channel_id)
+            .expect("session")
+            .expect("session");
+        actor.refresh_snapshot(&session).expect("snapshot");
+        let snapshot = std::fs::read_to_string(
+            actor
+                .bot()
+                .corpus_path()
+                .join(".botserver/places/bot-foobar.md"),
+        )
+        .expect("snapshot");
+        assert!(snapshot.contains("human line stays"));
+        assert!(!snapshot.contains("working on it"));
+        assert!(!snapshot.contains(&post_id));
+    }
+
+    #[test]
+    fn ask_context_excludes_progress_post() {
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            whoami(),
+            asked("ask-2"),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        index_trigger(&mut actor, &trigger);
+        let post_id = "e".repeat(64);
+        let now = open_turn_with_progress_post(&mut actor, &kelpie, &waiter, &trigger, &post_id);
+        for (id, content) in [
+            (post_id.clone(), "[bot]: working on it".to_owned()),
+            ("b".repeat(64), "and the PR?".to_owned()),
+        ] {
+            actor
+                .repository
+                .index_event(
+                    &IndexedRelayEvent {
+                        event_id: EventId::parse_hex(&id).expect("id"),
+                        author_pubkey: "a".repeat(64),
+                        created_at: now,
+                        kind: 9,
+                        content,
+                        tags_json: "[]".to_owned(),
+                        channel_id: Some(trigger.channel_id.clone()),
+                        target_event_id: None,
+                    },
+                    false,
+                )
+                .expect("index");
+        }
+        let publisher = FakeOutbound {
+            event_id: "d".repeat(64),
+        };
+        actor
+            .handle_occupant_delivery(
+                &kelpie,
+                &waiter,
+                &publisher,
+                &occupant_final("ask-1", "done"),
+            )
+            .expect("final");
+        let second = TriggerWork {
+            event_id: event_id('c'),
+            nostr_body: "later".to_owned(),
+            ..work('c', "later", None)
+        };
+        actor
+            .repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: second.event_id.clone(),
+                    author_pubkey: "b".repeat(64),
+                    created_at: now + 5,
+                    kind: 9,
+                    content: "bot: later".to_owned(),
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(second.channel_id.clone()),
+                    target_event_id: None,
+                },
+                false,
+            )
+            .expect("index second");
+        actor
+            .handle_trigger(&kelpie, &waiter, &second)
+            .expect("second ask");
+        let calls = runner.calls.lock().expect("calls");
+        let body = std::str::from_utf8(&calls.last().expect("ask").1).expect("utf8");
+        assert!(body.contains("## Context"));
+        assert!(body.contains("and the PR?"));
+        assert!(!body.contains("working on it"));
+        assert!(!body.contains(&post_id));
     }
 }

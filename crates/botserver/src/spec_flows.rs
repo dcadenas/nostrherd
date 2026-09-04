@@ -857,6 +857,54 @@ fn flow_10_posted_turn_is_left_up_after_delete() {
     assert!(harness.verbs().iter().all(|verb| verb != "cancel"));
 }
 
+struct FlowPublisher {
+    prepared: Mutex<Vec<crate::outbox::OutboundAttempt>>,
+}
+
+impl crate::outbox::OutboundPublisher for FlowPublisher {
+    type Error = crate::outbox::PublishError;
+
+    fn prepare(
+        &self,
+        attempt: &crate::outbox::OutboundAttempt,
+    ) -> Result<crate::outbox::PreparedOutbound, Self::Error> {
+        self.prepared
+            .lock()
+            .expect("prepared")
+            .push(attempt.clone());
+        let created_at = attempt.prepared_created_at.unwrap_or(1_700_000_000);
+        let index = self.prepared.lock().expect("prepared").len();
+        let event_id = attempt
+            .prepared_event_id
+            .clone()
+            .unwrap_or_else(|| format!("{index:064x}"));
+        let signed = EventBuilder::new(Kind::Custom(CHANNEL_KIND), "")
+            .finalize(&Keys::generate())
+            .expect("dummy event");
+        Ok(crate::outbox::PreparedOutbound::from_parts(
+            signed, event_id, created_at,
+        ))
+    }
+
+    fn publish(&self, prepared: &crate::outbox::PreparedOutbound) -> Result<String, Self::Error> {
+        Ok(prepared.event_id().to_owned())
+    }
+}
+
+fn occupant_reply(ask_id: &str, disposition: &str, body: &str) -> crate::inbox::InboxDelivery {
+    crate::inbox::parse_delivery(&serde_json::json!({
+        "method": "inbox.delivery",
+        "params": {
+            "message_id": format!("msg-{disposition}-{}", body.len()),
+            "kind": "reply",
+            "disposition": disposition,
+            "reply_to": ask_id,
+            "body": body
+        }
+    }))
+    .expect("delivery")
+}
+
 #[test]
 fn flow_11_one_ask_while_the_occupant_works() {
     let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
@@ -874,6 +922,111 @@ fn flow_11_one_ask_while_the_occupant_works() {
     assert_eq!(
         harness.verbs().iter().filter(|verb| *verb == "ask").count(),
         1
+    );
+    assert!(harness.verbs().iter().all(|verb| verb != "tell"));
+}
+
+/// Flow 11 under D42: the occupant reports progress; the host relays one
+/// stamped post after the hold, edits it in place, and the final is a
+/// second post that leaves it up. The host never invents progress.
+#[test]
+fn flow_11_progress_is_one_edited_post_then_a_final() {
+    use botserver_domain::progress::{PROGRESS_EDIT_INTERVAL_SECS, PROGRESS_INITIAL_HOLD_SECS};
+
+    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let relay = Arc::new(crate::progress::RecordingProgressRelay::default());
+    let message = trigger_event(FOOBAR, "@daniel bot: long job", None);
+    let action = harness.ingest(&message).expect("trigger");
+    let mut actor = harness
+        .actor()
+        .with_progress_relay(Arc::clone(&relay) as Arc<dyn crate::progress::ProgressRelay>);
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
+    actor
+        .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
+        .expect("asked");
+    let publisher = FlowPublisher {
+        prepared: Mutex::new(Vec::new()),
+    };
+    let opened_at = turns(&actor, FOOBAR)[0].opened_at.expect("opened_at");
+    let trigger_id = turns(&actor, FOOBAR)[0].event_id.clone();
+    actor
+        .handle_occupant_delivery(
+            &harness.kelpie,
+            &waiter,
+            &publisher,
+            &occupant_reply("ask-1", "progress", "reading the repo"),
+        )
+        .expect("progress");
+    actor
+        .flush_progress(&publisher, opened_at + PROGRESS_INITIAL_HOLD_SECS - 1)
+        .expect("flush before hold");
+    assert!(publisher.prepared.lock().expect("prepared").is_empty());
+
+    let created = opened_at + PROGRESS_INITIAL_HOLD_SECS;
+    actor
+        .flush_progress(&publisher, created)
+        .expect("flush after hold");
+    let prepared = publisher.prepared.lock().expect("prepared").clone();
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0].body, "[bot]: reading the repo");
+    assert_eq!(prepared[0].reply_to_event_id.as_ref(), Some(&trigger_id));
+    assert!(prepared[0].mention.is_empty());
+    let post_id = actor
+        .repository
+        .progress_post("ask-1")
+        .expect("row")
+        .expect("row")
+        .post_event_id
+        .expect("posted");
+
+    actor
+        .handle_occupant_delivery(
+            &harness.kelpie,
+            &waiter,
+            &publisher,
+            &occupant_reply("ask-1", "progress", "drafting the answer"),
+        )
+        .expect("second progress");
+    actor
+        .flush_progress(&publisher, created + PROGRESS_EDIT_INTERVAL_SECS)
+        .expect("flush edit");
+    assert_eq!(
+        relay.edits.lock().expect("edits").as_slice(),
+        [(
+            FOOBAR.to_owned(),
+            post_id.clone(),
+            "[bot]: drafting the answer".to_owned()
+        )]
+    );
+    assert_eq!(
+        publisher.prepared.lock().expect("prepared").len(),
+        1,
+        "edits never create a second post"
+    );
+
+    // The final is a second stamped post; the progress post stays up.
+    actor
+        .handle_occupant_delivery(
+            &harness.kelpie,
+            &waiter,
+            &publisher,
+            &occupant_reply("ask-1", "final", "long job done"),
+        )
+        .expect("final");
+    let prepared = publisher.prepared.lock().expect("prepared").clone();
+    assert_eq!(prepared.len(), 2);
+    assert_eq!(prepared[1].body, "[bot]: long job done");
+    assert_eq!(turns(&actor, FOOBAR)[0].state, TurnState::Posted);
+    assert!(relay.deletes.lock().expect("deletes").is_empty());
+    assert_eq!(
+        actor
+            .repository
+            .progress_post("ask-1")
+            .expect("row")
+            .expect("row")
+            .post_event_id
+            .as_deref(),
+        Some(post_id.as_str())
     );
     assert!(harness.verbs().iter().all(|verb| verb != "tell"));
 }
