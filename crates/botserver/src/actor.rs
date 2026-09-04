@@ -40,6 +40,13 @@ pub trait OccupantPaneAllocator {
     ///
     /// Returns an error when Herdr cannot create the workspace.
     fn allocate(&self, session_name: &str, cwd: &Path) -> Result<OccupantPane, Self::Error>;
+
+    /// Close a pane whose occupant never started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Herdr cannot close the pane.
+    fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error>;
 }
 
 /// One triggering event ready for the bot actor.
@@ -887,21 +894,33 @@ where
             .allocate(&session.session_name, self.bot.corpus_path())
             .map_err(|error| ActorError::Pane(error.to_string()))?;
         let bootstrap = occupant_bootstrap(snapshot_relpath);
-        kelpie
-            .start_occupant(
-                &OccupantLaunch {
-                    name: session.session_name.clone(),
-                    pane_id: pane.pane_id,
-                    terminal_id: pane.terminal_id,
-                    backend: self.bot.occupant_kind().to_owned(),
-                    cwd: self.bot.corpus_path().to_path_buf(),
-                    timeout_ms: OCCUPANT_START_TIMEOUT_MS,
-                    logical_agent_id: continue_as.map(str::to_owned),
-                },
-                &bootstrap,
-                Some(waiter.identity().logical_agent_id()),
-            )
-            .map_err(ActorError::Kelpie)
+        let launch = OccupantLaunch {
+            name: session.session_name.clone(),
+            pane_id: pane.pane_id.clone(),
+            terminal_id: pane.terminal_id.clone(),
+            backend: self.bot.occupant_kind().to_owned(),
+            cwd: self.bot.corpus_path().to_path_buf(),
+            timeout_ms: OCCUPANT_START_TIMEOUT_MS,
+            logical_agent_id: continue_as.map(str::to_owned),
+        };
+        match kelpie.start_occupant(
+            &launch,
+            &bootstrap,
+            Some(waiter.identity().logical_agent_id()),
+        ) {
+            Ok(started) => Ok(started),
+            Err(error) => {
+                // The next attempt allocates a fresh pane, so an unreleased one
+                // stays behind as an empty tab for every rejected start.
+                if let Err(release_error) = self.panes.release(&pane) {
+                    eprintln!(
+                        "occupant pane {} release failed: {release_error}",
+                        pane.pane_id
+                    );
+                }
+                Err(ActorError::Kelpie(error))
+            }
+        }
     }
 
     fn try_arm_renew(
@@ -1086,6 +1105,7 @@ mod tests {
     #[derive(Debug)]
     struct FakePanes {
         calls: Mutex<Vec<(String, PathBuf)>>,
+        released: Mutex<Vec<String>>,
     }
 
     impl OccupantPaneAllocator for Arc<FakePanes> {
@@ -1100,6 +1120,14 @@ mod tests {
                 pane_id: "w2:p1".to_owned(),
                 terminal_id: "term-9".to_owned(),
             })
+        }
+
+        fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error> {
+            self.released
+                .lock()
+                .expect("released")
+                .push(pane.pane_id.clone());
+            Ok(())
         }
     }
 
@@ -1262,6 +1290,7 @@ mod tests {
         });
         let panes = Arc::new(FakePanes {
             calls: Mutex::new(Vec::new()),
+            released: Mutex::new(Vec::new()),
         });
         let kelpie = KelpieClient::with_runner(Arc::clone(&runner));
         let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
@@ -1272,6 +1301,36 @@ mod tests {
             runner,
             panes,
         )
+    }
+
+    #[test]
+    fn a_rejected_start_releases_its_pane_before_surfacing_the_error() {
+        let (mut actor, kelpie, _runner, panes) = actor([
+            adopt(),
+            failure(
+                "rejected",
+                "Herdr rejected the request with agent_pane_busy: \
+                 agent target pane w2:p1 is not an available shell",
+            ),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+
+        let error = actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect_err("start rejected");
+
+        assert!(error.to_string().contains("agent_pane_busy"), "{error}");
+        assert_eq!(
+            panes.released.lock().expect("released").as_slice(),
+            &["w2:p1".to_owned()]
+        );
+        let session = actor
+            .repository
+            .session(actor.bot.id(), &trigger.channel_id)
+            .expect("session")
+            .expect("session row");
+        assert!(session.occupant_logical_id.is_none());
     }
 
     #[test]

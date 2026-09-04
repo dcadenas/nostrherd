@@ -104,6 +104,24 @@ impl OccupantPaneAllocator for HerdrPaneAllocator {
         })?;
         occupant_pane(&receipt)
     }
+
+    fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error> {
+        // Closing the root pane closes the workspace it was created with.
+        let output = self
+            .runner
+            .run(
+                &["pane".to_owned(), "close".to_owned(), pane.pane_id.clone()],
+                &[],
+            )
+            .map_err(HerdrError::Io)?;
+        if !output.success {
+            return Err(HerdrError::Rejected {
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Read the current Herdr pane and terminal from `HERDR_PANE_ID`.
@@ -305,6 +323,50 @@ mod tests {
             )]
         );
         assert!(!calls[0].0.iter().any(|argument| argument == "tab"));
+    }
+
+    #[test]
+    fn release_closes_the_allocated_pane() {
+        let runner = Arc::new(FakeRunner::new([CommandOutput {
+            success: true,
+            status: "exit status: 0".to_owned(),
+            stdout: b"{}".to_vec(),
+            stderr: Vec::new(),
+        }]));
+        let allocator = HerdrPaneAllocator::with_runner(Arc::clone(&runner));
+
+        allocator
+            .release(&OccupantPane {
+                pane_id: "w9:p1".to_owned(),
+                terminal_id: "term-1".to_owned(),
+            })
+            .expect("release");
+
+        let calls = runner.calls.lock().expect("calls lock");
+        assert_eq!(
+            calls.as_slice(),
+            &[(
+                vec!["pane".to_owned(), "close".to_owned(), "w9:p1".to_owned()],
+                Vec::new(),
+            )]
+        );
+    }
+
+    #[test]
+    fn release_reports_a_refused_close() {
+        let runner = FakeRunner::new([CommandOutput {
+            success: false,
+            status: "exit status: 1".to_owned(),
+            stdout: Vec::new(),
+            stderr: b"pane w9:p1 not found".to_vec(),
+        }]);
+        let error = HerdrPaneAllocator::with_runner(runner)
+            .release(&OccupantPane {
+                pane_id: "w9:p1".to_owned(),
+                terminal_id: "term-1".to_owned(),
+            })
+            .expect_err("refused");
+        assert!(error.to_string().contains("not found"), "{error}");
     }
 
     #[test]

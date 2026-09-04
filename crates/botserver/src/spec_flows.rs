@@ -27,6 +27,7 @@ const CHANNEL_KIND: u16 = 9;
 #[derive(Debug)]
 struct FakePanes {
     calls: Mutex<Vec<(String, PathBuf)>>,
+    released: Mutex<Vec<String>>,
 }
 
 impl OccupantPaneAllocator for Arc<FakePanes> {
@@ -41,6 +42,14 @@ impl OccupantPaneAllocator for Arc<FakePanes> {
             pane_id: "w2:p1".to_owned(),
             terminal_id: "term-9".to_owned(),
         })
+    }
+
+    fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error> {
+        self.released
+            .lock()
+            .expect("released")
+            .push(pane.pane_id.clone());
+        Ok(())
     }
 }
 
@@ -222,6 +231,7 @@ impl Harness {
             runner,
             panes: Arc::new(FakePanes {
                 calls: Mutex::new(Vec::new()),
+                released: Mutex::new(Vec::new()),
             }),
             bot: Bot::new(BotId::new("bot").expect("id"), corpus, "opencode").expect("bot"),
         }
