@@ -136,7 +136,15 @@ fn create_progress_posts_table(connection: &Connection) -> rusqlite::Result<()> 
           ) STRICT;
 
          CREATE INDEX IF NOT EXISTS progress_posts_channel
-              ON progress_posts(channel_id);",
+              ON progress_posts(channel_id);
+
+         CREATE INDEX IF NOT EXISTS progress_posts_pending_flush
+              ON progress_posts(opened_at, ask_id)
+              WHERE ended = 0
+                AND (
+                    pending_body IS NOT NULL
+                    OR (dispatched = 1 AND post_event_id IS NULL)
+                );",
     )
 }
 
@@ -268,25 +276,7 @@ impl SqliteRepository {
     }
 
     fn read_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRecord> {
-        let bot_id: String = row.get(1)?;
-        let event_id: String = row.get(3)?;
-        let reply_to_event_id: Option<String> = row.get(5)?;
-        let state: String = row.get(6)?;
-
-        Ok(TurnRecord {
-            sequence: row.get(0)?,
-            bot_id: parse_bot_id(&bot_id, 1)?,
-            channel_id: row.get(2)?,
-            event_id: parse_event_id(&event_id, 3)?,
-            ask_id: row.get(4)?,
-            reply_to_event_id: reply_to_event_id
-                .as_deref()
-                .map(|value| parse_event_id(value, 5))
-                .transpose()?,
-            state: TurnState::parse(&state)
-                .ok_or_else(|| invalid_value(6, "invalid turn state"))?,
-            opened_at: row.get(7)?,
-        })
+        read_turn_at(row, 0)
     }
 
     fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
@@ -986,17 +976,16 @@ impl HostRepository for SqliteRepository {
         Ok(())
     }
 
-    fn progress_posts_pending_flush(&self) -> Result<Vec<ProgressPost>, Self::Error> {
-        let mut statement = self.connection.prepare(&format!(
-            "{PROGRESS_SELECT}
-             WHERE ended = 0
-               AND (
-                   pending_body IS NOT NULL
-                   OR (dispatched = 1 AND post_event_id IS NULL)
-               )
-             ORDER BY opened_at, ask_id"
-        ))?;
-        let posts = statement.query_map([], read_progress_post)?.collect();
+    fn progress_posts_pending_flush(
+        &self,
+        bot_id: &BotId,
+    ) -> Result<Vec<(ProgressPost, TurnRecord)>, Self::Error> {
+        let mut statement = self.connection.prepare(PROGRESS_PENDING_SELECT)?;
+        let posts = statement
+            .query_map([bot_id.as_str()], |row| {
+                Ok((read_progress_post(row)?, read_turn_at(row, 15)?))
+            })?
+            .collect();
         posts
     }
 
@@ -1022,6 +1011,24 @@ const PROGRESS_SELECT: &str = "SELECT ask_id, channel_id, reply_to_event_id, thr
         opened_at, pending_body, post_body, prepared_event_id, prepared_created_at,
         dispatched, post_event_id, edit_count, last_send_at, ended, cap_noticed
  FROM progress_posts";
+
+const PROGRESS_PENDING_SELECT: &str =
+    "SELECT p.ask_id, p.channel_id, p.reply_to_event_id, p.thread_root_event_id,
+            p.opened_at, p.pending_body, p.post_body, p.prepared_event_id,
+            p.prepared_created_at, p.dispatched, p.post_event_id, p.edit_count,
+            p.last_send_at, p.ended, p.cap_noticed,
+            t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
+            t.reply_to_event_id, t.state, t.opened_at
+     FROM progress_posts AS p INDEXED BY progress_posts_pending_flush
+     JOIN turns AS t ON t.ask_id = p.ask_id
+     JOIN sessions AS s ON s.id = t.session_id
+     WHERE s.bot_id = ?1
+       AND p.ended = 0
+       AND (
+           p.pending_body IS NOT NULL
+           OR (p.dispatched = 1 AND p.post_event_id IS NULL)
+       )
+     ORDER BY p.opened_at, p.ask_id";
 
 fn read_progress_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProgressPost> {
     let reply_to: String = row.get(2)?;
@@ -1050,6 +1057,27 @@ fn read_progress_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProgressPost>
         last_send_at: row.get(12)?,
         ended: ended != 0,
         cap_noticed: cap_noticed != 0,
+    })
+}
+
+fn read_turn_at(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<TurnRecord> {
+    let bot_id: String = row.get(offset + 1)?;
+    let event_id: String = row.get(offset + 3)?;
+    let reply_to_event_id: Option<String> = row.get(offset + 5)?;
+    let state: String = row.get(offset + 6)?;
+    Ok(TurnRecord {
+        sequence: row.get(offset)?,
+        bot_id: parse_bot_id(&bot_id, offset + 1)?,
+        channel_id: row.get(offset + 2)?,
+        event_id: parse_event_id(&event_id, offset + 3)?,
+        ask_id: row.get(offset + 4)?,
+        reply_to_event_id: reply_to_event_id
+            .as_deref()
+            .map(|value| parse_event_id(value, offset + 5))
+            .transpose()?,
+        state: TurnState::parse(&state)
+            .ok_or_else(|| invalid_value(offset + 6, "invalid turn state"))?,
+        opened_at: row.get(offset + 7)?,
     })
 }
 
@@ -1121,6 +1149,84 @@ mod tests {
             event_id: event_id(value),
             reply_to_event_id: Some(event_id('f')),
         }
+    }
+
+    fn pending_progress(turn: &TurnRecord) -> ProgressPost {
+        ProgressPost {
+            ask_id: turn.ask_id.clone().expect("open ask"),
+            channel_id: turn.channel_id.clone(),
+            reply_to_event_id: turn.event_id.clone(),
+            thread_root_event_id: None,
+            opened_at: turn.opened_at.unwrap_or(1_000),
+            pending_body: Some("working".to_owned()),
+            post_body: None,
+            prepared_event_id: None,
+            prepared_created_at: None,
+            dispatched: false,
+            post_event_id: None,
+            edit_count: 0,
+            last_send_at: None,
+            ended: false,
+            cap_noticed: false,
+        }
+    }
+
+    #[test]
+    fn pending_progress_query_returns_only_the_requested_bot_and_its_turn() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot = BotId::new("bot").unwrap();
+        let other = BotId::new("other").unwrap();
+        for (bot_id, channel_id, value, ask_id) in [
+            (&bot, "channel-bot", 'a', "ask-bot"),
+            (&other, "channel-other", 'b', "ask-other"),
+        ] {
+            repository
+                .save_session(&session(bot_id, channel_id))
+                .unwrap();
+            repository
+                .enqueue_turn(&turn(bot_id, channel_id, value))
+                .unwrap();
+            let turn = repository
+                .open_next_turn(bot_id, channel_id, ask_id)
+                .unwrap()
+                .unwrap();
+            repository
+                .save_progress_post(&pending_progress(&turn))
+                .unwrap();
+        }
+
+        let rows = repository.progress_posts_pending_flush(&bot).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.ask_id, "ask-bot");
+        assert_eq!(rows[0].1.bot_id, bot);
+    }
+
+    #[test]
+    fn pending_progress_index_is_migrated_and_used() {
+        let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+            .expect("repository");
+        repository
+            .connection
+            .execute("DROP INDEX progress_posts_pending_flush", [])
+            .unwrap();
+        let repository = SqliteRepository::from_connection(repository.connection).unwrap();
+        let plan_sql = format!("EXPLAIN QUERY PLAN {PROGRESS_PENDING_SELECT}");
+        let details = repository
+            .connection
+            .prepare(&plan_sql)
+            .unwrap()
+            .query_map(["bot"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("progress_posts_pending_flush")),
+            "query plan did not use pending index: {details:?}"
+        );
     }
 
     #[test]

@@ -560,19 +560,9 @@ where
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
         let posts = self
             .repository
-            .progress_posts_pending_flush()
+            .progress_posts_pending_flush(self.bot.id())
             .map_err(ActorError::Repository)?;
-        for post in posts {
-            let Some(turn) = self
-                .repository
-                .turn_by_ask_id(&post.ask_id)
-                .map_err(ActorError::Repository)?
-            else {
-                continue;
-            };
-            if turn.bot_id != *self.bot.id() {
-                continue;
-            }
+        for (post, turn) in posts {
             progress::flush_progress(
                 &mut self.repository,
                 publisher,

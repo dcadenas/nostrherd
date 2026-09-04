@@ -1677,15 +1677,18 @@ pub trait HostRepository {
         post: &crate::progress::ProgressPost,
     ) -> Result<(), Self::Error>;
 
-    /// Progress rows with relay work left: a pending body, or a create
-    /// that was dispatched without an accepted id. Ended rows are skipped.
+    /// This bot's progress rows and turns with relay work left.
+    ///
+    /// A pending body or a create dispatched without an accepted id is
+    /// returned. Ended rows are skipped.
     ///
     /// # Errors
     ///
     /// Returns an adapter error when the rows cannot be read.
     fn progress_posts_pending_flush(
         &self,
-    ) -> Result<Vec<crate::progress::ProgressPost>, Self::Error>;
+        bot_id: &BotId,
+    ) -> Result<Vec<(crate::progress::ProgressPost, TurnRecord)>, Self::Error>;
 
     /// Event ids of this channel's host progress posts, accepted or
     /// dispatched, for snapshot and ask Context exclusion (D42).
