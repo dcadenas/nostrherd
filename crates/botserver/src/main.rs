@@ -880,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_failure_keeps_refresh_active_after_scope_reverts() {
+    fn subscription_refresh_gate_covers_scope_errors_and_idle() {
         let channel_ids = vec!["channel-a".to_owned()];
         let active_event_ids = vec![EventId::parse_hex(&"a".repeat(64)).expect("event")];
         let mut poll = RelayPoll {
@@ -898,6 +898,12 @@ mod tests {
         assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
         poll.subscription_error = None;
         assert!(!poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        poll.announced = false;
+        assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        poll.announced = true;
+        assert!(poll.subscription_refresh_needed(&["channel-b".to_owned()], &active_event_ids));
+        let other_event = EventId::parse_hex(&"b".repeat(64)).expect("event");
+        assert!(poll.subscription_refresh_needed(&channel_ids, &[other_event]));
     }
 
     struct EnvRestore {
