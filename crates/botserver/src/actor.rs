@@ -200,7 +200,7 @@ impl ProgressRelay for ProgressHost {
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
-    ) -> Result<(), crate::outbox::PublishError> {
+    ) -> Result<progress::ProgressRelayDispatch, crate::outbox::PublishError> {
         self.inner.edit(ask_id, channel_id, post_event_id, content)
     }
 
@@ -209,8 +209,12 @@ impl ProgressRelay for ProgressHost {
         ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
-    ) -> Result<(), crate::outbox::PublishError> {
+    ) -> Result<progress::ProgressRelayDispatch, crate::outbox::PublishError> {
         self.inner.delete(ask_id, channel_id, post_event_id)
+    }
+
+    fn drain_completions(&self) -> Vec<progress::ProgressRelayCompletion> {
+        self.inner.drain_completions()
     }
 }
 
@@ -559,6 +563,8 @@ where
         Pub::Error: fmt::Display,
     {
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        progress::apply_relay_completions(&mut self.repository, &self.progress_relay, &mut notice)
+            .map_err(ActorError::Repository)?;
         let posts = self
             .repository
             .progress_posts_pending_flush(self.bot.id())
