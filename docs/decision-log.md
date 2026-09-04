@@ -210,9 +210,12 @@ snapshot MUST NOT include other channels' DMs.
 
 Status: accepted
 
-If the pane is gone but the ask is open: Kelpie reminder, then
-recover that logical agent. Do not `kelpie start` a new logical
-agent because the public name is free.
+If the pane is gone while an ask is open or work is queued, recover that
+logical agent. Do not `kelpie start` a new logical agent because the public
+name is free. When a queued ask reports the recorded occupant unavailable,
+retire the exact unavailable incarnation, continue that logical agent, and
+retry the ask once. Retiring the stale binding prevents two Ready incarnations
+from making later alias resolution ambiguous.
 
 A replacement pane has no occupant runtime, so `kelpie adopt` cannot
 bind it. The host continues the recorded id with `kelpie start
@@ -220,8 +223,9 @@ bind it. The host continues the recorded id with `kelpie start
 agent, not a twin. `adopt --logical-id` remains the path when a live
 pane already exists.
 
-The original ask stays open. Recovery MUST NOT send a second ask.
-Kelpie's reminder delivers the original question.
+An original open ask stays open. Its recovery MUST NOT send a second ask;
+Kelpie's reminder delivers the original question. Queued work has no prior
+delivered ask, so it drains through the recovered occupant.
 
 User-visible: still at most one eventual final `[bot]:` for that Turn
 (recovery MUST NOT double-post).

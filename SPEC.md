@@ -212,9 +212,10 @@ subset.
 8. **Busy.** Two `@daniel bot:` in `#foobar` before the first reply:
    one occupant, two turns in order. The queued turn has no progress
    post until it opens.
-9. **Gone pane.** Occupant process died with an open ask: recover that
-   logical agent, do not start a namesake twin. The user still gets at
-   most one final `[bot]:` for that call.
+9. **Gone pane.** Occupant process died with an open ask or queued work:
+    recover that logical agent, do not start a namesake twin. A queued ask
+    that finds the recorded occupant unavailable retries after recovery. The
+    user still gets at most one final `[bot]:` for each call.
 10. **Edit / delete.** Edit of the triggering message before the bot
     posts: the one eventual `[bot]:` answers the **latest** text
     (cancel the old ask, ask again). Delete before it posts: no post.
