@@ -167,10 +167,7 @@ pub fn record_progress<R: HostRepository>(
     if turn.state != TurnState::Open {
         return Ok(());
     }
-    if repository
-        .outbound_attempt(ask_id)?
-        .is_some_and(|attempt| attempt.dispatched || attempt.outbound_event_id.is_some())
-    {
+    if final_in_flight(repository, ask_id)? {
         return Ok(());
     }
     let Some(capped) = cap_progress_body(body) else {
@@ -195,6 +192,17 @@ pub fn record_progress<R: HostRepository>(
     }
     post.pending_body = Some(capped);
     repository.save_progress_post(&post)
+}
+
+/// Whether a final for this ask has reached the host (D42: "whose outbound
+/// attempt is already dispatched").
+///
+/// The attempt row is saved first thing on a final and never deleted, so
+/// its presence is the durable signal. The row's `dispatched` flag is not:
+/// a retryable publish failure clears it while the turn stays open and the
+/// final is redelivered on the tick.
+fn final_in_flight<R: HostRepository>(repository: &R, ask_id: &str) -> Result<bool, R::Error> {
+    Ok(repository.outbound_attempt(ask_id)?.is_some())
 }
 
 fn new_progress_post<R: HostRepository>(
@@ -310,16 +318,16 @@ where
     if post.ended {
         return Ok(());
     }
-    let final_dispatched = repository
-        .outbound_attempt(&post.ask_id)?
-        .is_some_and(|attempt| attempt.dispatched || attempt.outbound_event_id.is_some());
-    if turn.state != TurnState::Open || final_dispatched {
-        // The final landed or is landing (D42: a dispatched attempt means no
-        // relay): keep the post, drop what was pending. A create that never
-        // stored an accepted id ends here so the tick stops scanning it; its
-        // prepared id still excludes it from snapshots.
+    let closed = turn.state != TurnState::Open;
+    if closed || final_in_flight(repository, &post.ask_id)? {
+        // The final landed or is landing (D42: no relay once the final's
+        // attempt exists): keep the post, drop what was pending. Once the
+        // turn has left Open, a create that never stored an accepted id ends
+        // here so the tick stops scanning it; its prepared id still excludes
+        // it from snapshots. While the turn is still Open the row stays live
+        // so a cancel during the final's retry window can still delete it.
         let mut changed = post.pending_body.take().is_some();
-        if post.dispatched && post.post_event_id.is_none() {
+        if closed && post.dispatched && post.post_event_id.is_none() {
             post.ended = true;
             changed = true;
         }
@@ -1241,29 +1249,34 @@ mod tests {
         assert_eq!(edits[1].2, "[bot]: three");
     }
 
+    /// The stored attempt after a retryable final publish failure: the
+    /// turn stays open, `record_and_send` cleared `dispatched`, and
+    /// `retry_outbound` redelivers the prepared event on the tick (D28).
+    fn final_attempt_in_retry_window() -> OutboundAttempt {
+        OutboundAttempt {
+            ask_id: "ask-1".to_owned(),
+            body: "[bot]: done".to_owned(),
+            channel_id: CHANNEL.to_owned(),
+            reply_to_event_id: Some(event_id('a')),
+            thread_root_event_id: None,
+            mention: "c".repeat(64),
+            outbound_event_id: None,
+            prepared_event_id: Some("e".repeat(64)),
+            prepared_created_at: Some(1_700_000_000),
+            dispatched: false,
+        }
+    }
+
     #[test]
-    fn flush_skips_relay_while_the_final_attempt_is_dispatched() {
+    fn flush_skips_relay_once_a_final_is_in_flight() {
         let mut repository = open_repo();
         let turn = open_turn_at(&mut repository, 1_000);
         let publisher = FakePublisher::default();
         let relay = RecordingProgressRelay::default();
         let mut notices = Vec::new();
         record_progress(&mut repository, &mut quiet(), &turn, "pending", 1_005).unwrap();
-        // The final's send was invoked and hit a transient failure: the turn
-        // stays open while retry_outbound redelivers it (D28).
         repository
-            .save_outbound_attempt(&OutboundAttempt {
-                ask_id: "ask-1".to_owned(),
-                body: "[bot]: done".to_owned(),
-                channel_id: CHANNEL.to_owned(),
-                reply_to_event_id: Some(event_id('a')),
-                thread_root_event_id: None,
-                mention: "c".repeat(64),
-                outbound_event_id: None,
-                prepared_event_id: Some("e".repeat(64)),
-                prepared_created_at: Some(1_700_000_000),
-                dispatched: true,
-            })
+            .save_outbound_attempt(&final_attempt_in_retry_window())
             .unwrap();
         flush_all(
             &mut repository,
@@ -1278,7 +1291,60 @@ mod tests {
         let post = repository.progress_post("ask-1").unwrap().unwrap();
         assert!(post.pending_body.is_none(), "the pending body is discarded");
         assert!(post.post_event_id.is_none());
+        assert!(!post.ended, "the turn is still open");
         assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn cancel_during_the_final_retry_window_still_deletes_an_unaccepted_create() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "working", 1_005).unwrap();
+        *publisher.fail.lock().unwrap() = Some(PublishError::NotAccepted {
+            detail: "dropped".to_owned(),
+        });
+        let created = 1_000 + PROGRESS_INITIAL_HOLD_SECS;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created,
+        );
+        let prepared = repository
+            .progress_post("ask-1")
+            .unwrap()
+            .unwrap()
+            .prepared_event_id
+            .unwrap();
+        // A final arrives and its publish also fails transiently; the turn
+        // is still open, so a trigger delete can still cancel it (D28).
+        repository
+            .save_outbound_attempt(&final_attempt_in_retry_window())
+            .unwrap();
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created + 1,
+        );
+        assert_eq!(
+            publisher.sends.lock().unwrap().len(),
+            1,
+            "no redelivery once a final is in flight"
+        );
+        assert!(!repository.progress_post("ask-1").unwrap().unwrap().ended);
+        delete_progress_post(&mut repository, &relay, &mut quiet(), "ask-1").unwrap();
+        assert_eq!(
+            relay.deletes.lock().unwrap().clone(),
+            vec![(CHANNEL.to_owned(), prepared)]
+        );
     }
 
     #[test]
@@ -1332,22 +1398,11 @@ mod tests {
     }
 
     #[test]
-    fn progress_on_a_dispatched_final_attempt_records_nothing() {
+    fn progress_once_a_final_is_in_flight_records_nothing() {
         let mut repository = open_repo();
         let turn = open_turn_at(&mut repository, 1_000);
         repository
-            .save_outbound_attempt(&OutboundAttempt {
-                ask_id: "ask-1".to_owned(),
-                body: "[bot]: done".to_owned(),
-                channel_id: CHANNEL.to_owned(),
-                reply_to_event_id: Some(event_id('a')),
-                thread_root_event_id: None,
-                mention: "c".repeat(64),
-                outbound_event_id: None,
-                prepared_event_id: Some("e".repeat(64)),
-                prepared_created_at: Some(1_700_000_000),
-                dispatched: true,
-            })
+            .save_outbound_attempt(&final_attempt_in_retry_window())
             .unwrap();
         record_progress(&mut repository, &mut quiet(), &turn, "late", 1_005).unwrap();
         assert!(repository
