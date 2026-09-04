@@ -17,7 +17,7 @@ use botserver::config::{BotRegistry, ConfigError};
 use botserver::herdr::{HerdrError, HerdrPaneAllocator};
 use botserver::inbox::{default_socket, spawn_inbox, HostInbox, InboxDelivery};
 use botserver::outbox::{BuzzPublisher, InFlightReaction, InboxAction};
-use botserver::progress::ProgressRelay;
+use botserver::progress::{BackgroundProgressRelay, ProgressRelay};
 use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
@@ -546,7 +546,8 @@ fn start_actors(
     publisher: &BuzzPublisher,
 ) -> Result<Vec<BotActor<SqliteRepository, HerdrPaneAllocator>>, HostError> {
     let reactions: Arc<dyn InFlightReaction> = Arc::new(publisher.clone());
-    let progress_relay: Arc<dyn ProgressRelay> = Arc::new(publisher.clone());
+    let progress_relay: Arc<dyn ProgressRelay> =
+        Arc::new(BackgroundProgressRelay::new(Arc::new(publisher.clone())));
     let mut actors = bots
         .into_iter()
         .map(|bot| {

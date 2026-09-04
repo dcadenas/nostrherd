@@ -1081,7 +1081,8 @@ mod tests {
 
         fn progress_posts_pending_flush(
             &self,
-        ) -> Result<Vec<crate::progress::ProgressPost>, Self::Error> {
+            _bot_id: &BotId,
+        ) -> Result<Vec<(crate::progress::ProgressPost, TurnRecord)>, Self::Error> {
             unreachable!()
         }
 

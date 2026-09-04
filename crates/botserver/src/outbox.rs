@@ -410,6 +410,7 @@ impl InFlightReaction for BuzzPublisher {
 impl ProgressRelay for BuzzPublisher {
     fn edit(
         &self,
+        _ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
@@ -418,7 +419,12 @@ impl ProgressRelay for BuzzPublisher {
         self.send_buzz_blocking(&event)
     }
 
-    fn delete(&self, channel_id: &str, post_event_id: &EventId) -> Result<(), PublishError> {
+    fn delete(
+        &self,
+        _ask_id: &str,
+        channel_id: &str,
+        post_event_id: &EventId,
+    ) -> Result<(), PublishError> {
         let event = buzz::message_delete(channel_id, post_event_id);
         self.send_buzz_blocking(&event)
     }
