@@ -607,13 +607,18 @@ for a turn that is not open, or whose outbound attempt is already
 dispatched, ACKs without relay.
 
 Durability (D28): the host records the progress row (post id, prepared
-event id, edit count, last send time, pending body) before it ACKs the
-delivery, before `send`, and before each `edit`; relay happens on the
-refresh tick, never in the delivery handler. A crash after preparation
-without a stored accepted id redelivers the same prepared event. A lost edit is
-superseded by the next body. Progress publish and edit failures MUST
-NOT fail the turn and MUST NOT hold the ACK. `retryable` is not
-consulted for progress.
+event id, edit count, last accepted send time, pending body) before it ACKs the
+delivery. Create is prepared and recorded before `send`; relay happens on the
+refresh tick, never in the delivery handler. A crash after preparation without
+a stored accepted id redelivers the same prepared event. Edit count and last
+send time advance only after relay acceptance, so a failed edit leaves the
+newest body pending without consuming the cap. Progress publish and edit
+failures MUST NOT fail the turn and MUST NOT hold the ACK.
+
+Implementation notes (issue 69): retryable progress create, edit, and delete
+failures emit at most one operator notice per D42 edit interval. A cancelled
+row keeps its delete pending until the relay accepts it; an explicit
+non-retryable rejection ends that best-effort delete.
 
 Indexing: the host indexes its own stamped kind 9 but does not fetch
 its own kind 40003 edits or kind 5/9005 deletes (D24 filters), so a

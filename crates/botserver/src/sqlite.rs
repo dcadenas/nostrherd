@@ -105,6 +105,23 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE outbound_attempts ADD COLUMN prepared_created_at INTEGER",
     )?;
     add_column_if_missing(connection, "ALTER TABLE turns ADD COLUMN opened_at INTEGER")?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE progress_posts ADD COLUMN retry_noticed_at INTEGER",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE progress_posts ADD COLUMN delete_pending INTEGER NOT NULL DEFAULT 0",
+    )?;
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS progress_posts_pending_flush;
+         CREATE INDEX progress_posts_pending_flush
+             ON progress_posts(opened_at, ask_id)
+             WHERE (ended = 0 AND (
+                 pending_body IS NOT NULL
+                 OR (prepared_event_id IS NOT NULL AND post_event_id IS NULL)
+             )) OR delete_pending = 1;",
+    )?;
     Ok(())
 }
 
@@ -131,19 +148,13 @@ fn create_progress_posts_table(connection: &Connection) -> rusqlite::Result<()> 
               edit_count INTEGER NOT NULL DEFAULT 0 CHECK(edit_count >= 0),
               last_send_at INTEGER,
               ended INTEGER NOT NULL DEFAULT 0 CHECK(ended IN (0, 1)),
-              cap_noticed INTEGER NOT NULL DEFAULT 0 CHECK(cap_noticed IN (0, 1))
+              cap_noticed INTEGER NOT NULL DEFAULT 0 CHECK(cap_noticed IN (0, 1)),
+              retry_noticed_at INTEGER,
+              delete_pending INTEGER NOT NULL DEFAULT 0 CHECK(delete_pending IN (0, 1))
           ) STRICT;
 
          CREATE INDEX IF NOT EXISTS progress_posts_channel
-              ON progress_posts(channel_id);
-
-         CREATE INDEX IF NOT EXISTS progress_posts_pending_flush
-              ON progress_posts(opened_at, ask_id)
-              WHERE ended = 0
-                AND (
-                    pending_body IS NOT NULL
-                     OR (prepared_event_id IS NOT NULL AND post_event_id IS NULL)
-                 );",
+              ON progress_posts(channel_id);",
     )
 }
 
@@ -182,13 +193,16 @@ fn migrate_progress_posts_without_dispatched(connection: &Connection) -> rusqlit
              ),
              edit_count INTEGER NOT NULL DEFAULT 0 CHECK(edit_count >= 0),
              last_send_at INTEGER,
-             ended INTEGER NOT NULL DEFAULT 0 CHECK(ended IN (0, 1)),
-             cap_noticed INTEGER NOT NULL DEFAULT 0 CHECK(cap_noticed IN (0, 1))
+              ended INTEGER NOT NULL DEFAULT 0 CHECK(ended IN (0, 1)),
+              cap_noticed INTEGER NOT NULL DEFAULT 0 CHECK(cap_noticed IN (0, 1)),
+              retry_noticed_at INTEGER,
+              delete_pending INTEGER NOT NULL DEFAULT 0 CHECK(delete_pending IN (0, 1))
          ) STRICT;
          INSERT INTO progress_posts_new(
              ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
              pending_body, post_body, prepared_event_id, prepared_created_at,
-             post_event_id, edit_count, last_send_at, ended, cap_noticed
+              post_event_id, edit_count, last_send_at, ended, cap_noticed,
+              retry_noticed_at, delete_pending
          )
          SELECT ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
                 CASE
@@ -203,18 +217,11 @@ fn migrate_progress_posts_without_dispatched(connection: &Connection) -> rusqlit
                          AND post_event_id IS NULL THEN 1
                     ELSE ended
                 END,
-                cap_noticed
+                cap_noticed, NULL, 0
          FROM progress_posts;
          DROP TABLE progress_posts;
          ALTER TABLE progress_posts_new RENAME TO progress_posts;
          CREATE INDEX progress_posts_channel ON progress_posts(channel_id);
-         CREATE INDEX progress_posts_pending_flush
-             ON progress_posts(opened_at, ask_id)
-             WHERE ended = 0
-               AND (
-                   pending_body IS NOT NULL
-                   OR (prepared_event_id IS NOT NULL AND post_event_id IS NULL)
-               );
          COMMIT;",
     )
 }
@@ -345,6 +352,11 @@ impl SqliteRepository {
         migrate_progress_posts_without_dispatched(&connection)?;
         run_column_migrations(&connection)?;
         Ok(Self { connection })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &str) {
+        self.connection.execute_batch(sql).expect("test SQL");
     }
 
     fn read_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRecord> {
@@ -1010,8 +1022,9 @@ impl HostRepository for SqliteRepository {
             "INSERT INTO progress_posts(
                  ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
                  pending_body, post_body, prepared_event_id, prepared_created_at,
-                 post_event_id, edit_count, last_send_at, ended, cap_noticed
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 post_event_id, edit_count, last_send_at, ended, cap_noticed,
+                 retry_noticed_at, delete_pending
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(ask_id) DO UPDATE SET
                  pending_body = excluded.pending_body,
                  post_body = COALESCE(progress_posts.post_body, excluded.post_body),
@@ -1024,8 +1037,10 @@ impl HostRepository for SqliteRepository {
                   post_event_id = COALESCE(progress_posts.post_event_id, excluded.post_event_id),
                  edit_count = excluded.edit_count,
                  last_send_at = excluded.last_send_at,
-                 ended = excluded.ended,
-                 cap_noticed = excluded.cap_noticed",
+                  ended = excluded.ended,
+                  cap_noticed = excluded.cap_noticed,
+                  retry_noticed_at = excluded.retry_noticed_at,
+                  delete_pending = excluded.delete_pending",
             params![
                 post.ask_id,
                 post.channel_id,
@@ -1041,6 +1056,8 @@ impl HostRepository for SqliteRepository {
                 post.last_send_at,
                 i64::from(post.ended),
                 i64::from(post.cap_noticed),
+                post.retry_noticed_at,
+                i64::from(post.delete_pending),
             ],
         )?;
         Ok(())
@@ -1053,7 +1070,7 @@ impl HostRepository for SqliteRepository {
         let mut statement = self.connection.prepare(PROGRESS_PENDING_SELECT)?;
         let posts = statement
             .query_map([bot_id.as_str()], |row| {
-                Ok((read_progress_post(row)?, read_turn_at(row, 14)?))
+                Ok((read_progress_post(row)?, read_turn_at(row, 16)?))
             })?
             .collect();
         posts
@@ -1079,24 +1096,26 @@ impl HostRepository for SqliteRepository {
 
 const PROGRESS_SELECT: &str = "SELECT ask_id, channel_id, reply_to_event_id, thread_root_event_id,
         opened_at, pending_body, post_body, prepared_event_id, prepared_created_at,
-        post_event_id, edit_count, last_send_at, ended, cap_noticed
+        post_event_id, edit_count, last_send_at, ended, cap_noticed,
+        retry_noticed_at, delete_pending
  FROM progress_posts";
 
 const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
          SELECT *
          FROM progress_posts
-         WHERE ended = 0
-           AND (
-               pending_body IS NOT NULL
-               OR (prepared_event_id IS NOT NULL AND post_event_id IS NULL)
-           )
+          WHERE (ended = 0
+            AND (
+                pending_body IS NOT NULL
+                OR (prepared_event_id IS NOT NULL AND post_event_id IS NULL)
+            )) OR delete_pending = 1
          ORDER BY opened_at, ask_id
      )
      SELECT p.ask_id, p.channel_id, p.reply_to_event_id, p.thread_root_event_id,
             p.opened_at, p.pending_body, p.post_body, p.prepared_event_id,
              p.prepared_created_at, p.post_event_id, p.edit_count,
-            p.last_send_at, p.ended, p.cap_noticed,
-            t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
+             p.last_send_at, p.ended, p.cap_noticed,
+             p.retry_noticed_at, p.delete_pending,
+             t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
             t.reply_to_event_id, t.state, t.opened_at
      FROM pending AS p
      CROSS JOIN turns AS t ON t.ask_id = p.ask_id
@@ -1129,6 +1148,8 @@ fn read_progress_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProgressPost>
         last_send_at: row.get(11)?,
         ended: ended != 0,
         cap_noticed: cap_noticed != 0,
+        retry_noticed_at: row.get(14)?,
+        delete_pending: row.get::<_, i64>(15)? != 0,
     })
 }
 
@@ -1239,6 +1260,8 @@ mod tests {
             last_send_at: None,
             ended: false,
             cap_noticed: false,
+            retry_noticed_at: None,
+            delete_pending: false,
         }
     }
 

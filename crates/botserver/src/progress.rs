@@ -6,11 +6,13 @@
 //! cap. A cancel deletes the post (kind 9005). Every relay step is
 //! best-effort and never fails the turn.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
 use botserver_domain::progress::{
     cap_progress_body, next_progress_step, ProgressClock, ProgressStep, PROGRESS_EDIT_CAP,
+    PROGRESS_EDIT_INTERVAL_SECS,
 };
 use botserver_domain::{outbound_prefix_for, stamp_outbound, BotId, EventId, TurnState};
 
@@ -48,6 +50,10 @@ pub struct ProgressPost {
     pub ended: bool,
     /// The one operator notice for the edit cap was already emitted.
     pub cap_noticed: bool,
+    /// Last operator notice for a retryable relay failure.
+    pub retry_noticed_at: Option<i64>,
+    /// A cancelled post still needs a kind-9005 accepted by the relay.
+    pub delete_pending: bool,
 }
 
 impl ProgressPost {
@@ -86,6 +92,29 @@ impl ProgressPost {
     }
 }
 
+/// Whether a progress relay operation completed or continues in the background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressRelayDispatch {
+    Accepted,
+    Pending,
+}
+
+/// Result of one background progress relay operation.
+#[derive(Debug)]
+pub enum ProgressRelayCompletion {
+    Edit {
+        ask_id: String,
+        body: String,
+        completed_at: i64,
+        result: Result<(), PublishError>,
+    },
+    Delete {
+        ask_id: String,
+        completed_at: i64,
+        result: Result<(), PublishError>,
+    },
+}
+
 /// Best-effort kind-40003 edit and kind-9005 delete of a progress post.
 pub trait ProgressRelay: Send + Sync {
     /// Replace the post content in place.
@@ -99,7 +128,7 @@ pub trait ProgressRelay: Send + Sync {
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
-    ) -> Result<(), PublishError>;
+    ) -> Result<ProgressRelayDispatch, PublishError>;
 
     /// Buzz-delete the post.
     ///
@@ -111,7 +140,12 @@ pub trait ProgressRelay: Send + Sync {
         ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
-    ) -> Result<(), PublishError>;
+    ) -> Result<ProgressRelayDispatch, PublishError>;
+
+    /// Drain completed background operations.
+    fn drain_completions(&self) -> Vec<ProgressRelayCompletion> {
+        Vec::new()
+    }
 }
 
 /// Ignore progress edits and deletes.
@@ -125,8 +159,8 @@ impl ProgressRelay for NoopProgressRelay {
         _channel_id: &str,
         _post_event_id: &EventId,
         _content: &str,
-    ) -> Result<(), PublishError> {
-        Ok(())
+    ) -> Result<ProgressRelayDispatch, PublishError> {
+        Ok(ProgressRelayDispatch::Accepted)
     }
 
     fn delete(
@@ -134,8 +168,8 @@ impl ProgressRelay for NoopProgressRelay {
         _ask_id: &str,
         _channel_id: &str,
         _post_event_id: &EventId,
-    ) -> Result<(), PublishError> {
-        Ok(())
+    ) -> Result<ProgressRelayDispatch, PublishError> {
+        Ok(ProgressRelayDispatch::Accepted)
     }
 }
 
@@ -143,6 +177,14 @@ impl ProgressRelay for NoopProgressRelay {
 #[derive(Clone)]
 pub struct BackgroundProgressRelay {
     sender: tokio::sync::mpsc::UnboundedSender<ProgressCommand>,
+    completions: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ProgressRelayCompletion>>>,
+    active: Arc<std::sync::Mutex<HashSet<ProgressOperation>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ProgressOperation {
+    Edit(String),
+    Delete(String),
 }
 
 #[derive(Debug)]
@@ -152,6 +194,7 @@ enum ProgressCommand {
         channel_id: String,
         post_event_id: EventId,
         content: String,
+        body: String,
     },
     Delete {
         ask_id: String,
@@ -171,35 +214,61 @@ impl BackgroundProgressRelay {
     #[must_use]
     pub fn new(inner: Arc<dyn ProgressRelay>) -> Self {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (completion_sender, completion_receiver) = std::sync::mpsc::channel();
+        let active = Arc::new(std::sync::Mutex::new(HashSet::new()));
         tokio::runtime::Handle::current().spawn(async move {
             while let Some(command) = receiver.recv().await {
-                let (ask_id, result) = match command {
+                let completion = match command {
                     ProgressCommand::Edit {
                         ask_id,
                         channel_id,
                         post_event_id,
                         content,
+                        body,
                     } => {
-                        let result = inner.edit(&ask_id, &channel_id, &post_event_id, &content);
-                        (ask_id, result)
+                        let result = inner
+                            .edit(&ask_id, &channel_id, &post_event_id, &content)
+                            .and_then(|dispatch| match dispatch {
+                                ProgressRelayDispatch::Accepted => Ok(()),
+                                ProgressRelayDispatch::Pending => Err(PublishError::NotAccepted {
+                                    detail: "nested background progress relay".to_owned(),
+                                }),
+                            });
+                        ProgressRelayCompletion::Edit {
+                            ask_id,
+                            body,
+                            completed_at: crate::unix_now().unwrap_or_default(),
+                            result,
+                        }
                     }
                     ProgressCommand::Delete {
                         ask_id,
                         channel_id,
                         post_event_id,
                     } => {
-                        let result = inner.delete(&ask_id, &channel_id, &post_event_id);
-                        (ask_id, result)
+                        let result = inner.delete(&ask_id, &channel_id, &post_event_id).and_then(
+                            |dispatch| match dispatch {
+                                ProgressRelayDispatch::Accepted => Ok(()),
+                                ProgressRelayDispatch::Pending => Err(PublishError::NotAccepted {
+                                    detail: "nested background progress relay".to_owned(),
+                                }),
+                            },
+                        );
+                        ProgressRelayCompletion::Delete {
+                            ask_id,
+                            completed_at: crate::unix_now().unwrap_or_default(),
+                            result,
+                        }
                     }
                 };
-                if let Err(error) = result {
-                    eprintln!(
-                        "operator notice: background progress relay for ask {ask_id} failed: {error}"
-                    );
-                }
+                let _ = completion_sender.send(completion);
             }
         });
-        Self { sender }
+        Self {
+            sender,
+            completions: Arc::new(std::sync::Mutex::new(completion_receiver)),
+            active,
+        }
     }
 }
 
@@ -210,17 +279,27 @@ impl ProgressRelay for BackgroundProgressRelay {
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
-    ) -> Result<(), PublishError> {
+    ) -> Result<ProgressRelayDispatch, PublishError> {
+        let operation = ProgressOperation::Edit(ask_id.to_owned());
+        let mut active = self.active.lock().expect("active progress operations");
+        if !active.insert(operation.clone()) {
+            return Ok(ProgressRelayDispatch::Pending);
+        }
         self.sender
             .send(ProgressCommand::Edit {
                 ask_id: ask_id.to_owned(),
                 channel_id: channel_id.to_owned(),
                 post_event_id: post_event_id.clone(),
                 content: content.to_owned(),
+                body: content.to_owned(),
             })
-            .map_err(|_| PublishError::NotAccepted {
-                detail: "background progress relay stopped".to_owned(),
-            })
+            .map_err(|_| {
+                active.remove(&operation);
+                PublishError::NotAccepted {
+                    detail: "background progress relay stopped".to_owned(),
+                }
+            })?;
+        Ok(ProgressRelayDispatch::Pending)
     }
 
     fn delete(
@@ -228,16 +307,47 @@ impl ProgressRelay for BackgroundProgressRelay {
         ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
-    ) -> Result<(), PublishError> {
+    ) -> Result<ProgressRelayDispatch, PublishError> {
+        let operation = ProgressOperation::Delete(ask_id.to_owned());
+        let mut active = self.active.lock().expect("active progress operations");
+        if !active.insert(operation.clone()) {
+            return Ok(ProgressRelayDispatch::Pending);
+        }
         self.sender
             .send(ProgressCommand::Delete {
                 ask_id: ask_id.to_owned(),
                 channel_id: channel_id.to_owned(),
                 post_event_id: post_event_id.clone(),
             })
-            .map_err(|_| PublishError::NotAccepted {
-                detail: "background progress relay stopped".to_owned(),
-            })
+            .map_err(|_| {
+                active.remove(&operation);
+                PublishError::NotAccepted {
+                    detail: "background progress relay stopped".to_owned(),
+                }
+            })?;
+        Ok(ProgressRelayDispatch::Pending)
+    }
+
+    fn drain_completions(&self) -> Vec<ProgressRelayCompletion> {
+        let completions = self
+            .completions
+            .lock()
+            .expect("progress completions")
+            .try_iter()
+            .collect::<Vec<_>>();
+        let mut active = self.active.lock().expect("active progress operations");
+        for completion in &completions {
+            let operation = match completion {
+                ProgressRelayCompletion::Edit { ask_id, .. } => {
+                    ProgressOperation::Edit(ask_id.clone())
+                }
+                ProgressRelayCompletion::Delete { ask_id, .. } => {
+                    ProgressOperation::Delete(ask_id.clone())
+                }
+            };
+            active.remove(&operation);
+        }
+        completions
     }
 }
 
@@ -248,7 +358,7 @@ impl ProgressRelay for Arc<dyn ProgressRelay> {
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
-    ) -> Result<(), PublishError> {
+    ) -> Result<ProgressRelayDispatch, PublishError> {
         (**self).edit(ask_id, channel_id, post_event_id, content)
     }
 
@@ -257,8 +367,12 @@ impl ProgressRelay for Arc<dyn ProgressRelay> {
         ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
-    ) -> Result<(), PublishError> {
+    ) -> Result<ProgressRelayDispatch, PublishError> {
         (**self).delete(ask_id, channel_id, post_event_id)
+    }
+
+    fn drain_completions(&self) -> Vec<ProgressRelayCompletion> {
+        (**self).drain_completions()
     }
 }
 
@@ -298,18 +412,27 @@ pub fn record_progress<R: HostRepository>(
     if post.ended {
         return Ok(());
     }
-    if post.post_event_id.is_some() && post.edit_count >= PROGRESS_EDIT_CAP {
-        if !post.cap_noticed {
-            notice(&format!(
-                "progress for ask {ask_id} reached the {PROGRESS_EDIT_CAP}-edit cap; later bodies are dropped"
-            ));
-            post.cap_noticed = true;
-            repository.save_progress_post(&post)?;
-        }
+    if drop_pending_at_cap(&mut post, notice) {
+        repository.save_progress_post(&post)?;
         return Ok(());
     }
     post.pending_body = Some(capped);
     repository.save_progress_post(&post)
+}
+
+fn drop_pending_at_cap(post: &mut ProgressPost, notice: &mut impl FnMut(&str)) -> bool {
+    if post.post_event_id.is_none() || post.edit_count < PROGRESS_EDIT_CAP {
+        return false;
+    }
+    post.pending_body = None;
+    if !post.cap_noticed {
+        notice(&format!(
+            "progress for ask {} reached the {PROGRESS_EDIT_CAP}-edit cap; later bodies are dropped",
+            post.ask_id
+        ));
+        post.cap_noticed = true;
+    }
+    true
 }
 
 /// Whether a final for this ask has reached the host (D42: "whose outbound
@@ -345,6 +468,8 @@ fn new_progress_post<R: HostRepository>(
         last_send_at: None,
         ended: false,
         cap_noticed: false,
+        retry_noticed_at: None,
+        delete_pending: false,
     })
 }
 
@@ -387,17 +512,164 @@ pub fn delete_progress_post<R: HostRepository>(
     let Some(mut post) = repository.progress_post(ask_id)? else {
         return Ok(());
     };
-    if post.ended {
+    if post.ended && !post.delete_pending {
         return Ok(());
     }
     post.ended = true;
     post.pending_body = None;
+    post.delete_pending = post.delete_target().is_some();
+    post.retry_noticed_at = None;
     repository.save_progress_post(&post)?;
-    if let Some(target) = post.delete_target() {
-        if let Err(error) = relay.delete(ask_id, &post.channel_id, &target) {
-            notice(&format!(
-                "progress post delete for ask {ask_id} failed: {error}"
-            ));
+    if post.delete_pending {
+        send_delete(
+            repository,
+            relay,
+            notice,
+            post,
+            crate::unix_now().unwrap_or_default(),
+        )?;
+    }
+    Ok(())
+}
+
+fn send_delete<R: HostRepository>(
+    repository: &mut R,
+    relay: &impl ProgressRelay,
+    notice: &mut impl FnMut(&str),
+    mut post: ProgressPost,
+    now: i64,
+) -> Result<(), R::Error> {
+    let Some(target) = post.delete_target() else {
+        post.delete_pending = false;
+        return repository.save_progress_post(&post);
+    };
+    match relay.delete(&post.ask_id, &post.channel_id, &target) {
+        Ok(ProgressRelayDispatch::Accepted) => {
+            post.delete_pending = false;
+            post.retry_noticed_at = None;
+            repository.save_progress_post(&post)
+        }
+        Ok(ProgressRelayDispatch::Pending) => Ok(()),
+        Err(error) => {
+            if error.is_retryable() {
+                let message = format!(
+                    "progress post delete for ask {} failed; retrying: {error}",
+                    post.ask_id
+                );
+                if notice_retry(&mut post, now, notice, &message) {
+                    repository.save_progress_post(&post)?;
+                }
+            } else {
+                notice(&format!(
+                    "progress post delete for ask {} was rejected; not retrying: {error}",
+                    post.ask_id
+                ));
+                post.delete_pending = false;
+                repository.save_progress_post(&post)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn notice_retry(
+    post: &mut ProgressPost,
+    now: i64,
+    notice: &mut impl FnMut(&str),
+    message: &str,
+) -> bool {
+    let should_notice = post
+        .retry_noticed_at
+        .is_none_or(|last| now.saturating_sub(last) >= PROGRESS_EDIT_INTERVAL_SECS);
+    if should_notice {
+        notice(message);
+        post.retry_noticed_at = Some(now);
+    }
+    should_notice
+}
+
+/// Apply accepted or failed background relay results to durable progress state.
+///
+/// # Errors
+///
+/// Returns an adapter error when completed state cannot be read or persisted.
+pub fn apply_relay_completions<R: HostRepository>(
+    repository: &mut R,
+    relay: &impl ProgressRelay,
+    notice: &mut impl FnMut(&str),
+) -> Result<(), R::Error> {
+    for completion in relay.drain_completions() {
+        match completion {
+            ProgressRelayCompletion::Edit {
+                ask_id,
+                body,
+                completed_at,
+                result,
+            } => {
+                let Some(mut post) = repository.progress_post(&ask_id)? else {
+                    continue;
+                };
+                match result {
+                    Ok(()) => {
+                        post.edit_count += 1;
+                        post.last_send_at = Some(completed_at);
+                        post.retry_noticed_at = None;
+                        let matches_pending = repository
+                            .turn_by_ask_id(&ask_id)?
+                            .and_then(|turn| {
+                                post.pending_body.as_ref().map(|pending| {
+                                    stamp_outbound(pending, &outbound_prefix_for(&turn.bot_id))
+                                        == body
+                                })
+                            })
+                            .unwrap_or(false);
+                        if matches_pending {
+                            post.pending_body = None;
+                        }
+                        drop_pending_at_cap(&mut post, notice);
+                        repository.save_progress_post(&post)?;
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "progress edit for ask {ask_id} failed; retrying the newest body: {error}"
+                        );
+                        if notice_retry(&mut post, completed_at, notice, &message) {
+                            repository.save_progress_post(&post)?;
+                        }
+                    }
+                }
+            }
+            ProgressRelayCompletion::Delete {
+                ask_id,
+                completed_at,
+                result,
+            } => {
+                let Some(mut post) = repository.progress_post(&ask_id)? else {
+                    continue;
+                };
+                match result {
+                    Ok(()) => {
+                        post.delete_pending = false;
+                        post.retry_noticed_at = None;
+                        repository.save_progress_post(&post)?;
+                    }
+                    Err(error) if error.is_retryable() => {
+                        let message = format!(
+                            "progress post delete for ask {ask_id} failed; retrying: {error}"
+                        );
+                        if notice_retry(&mut post, completed_at, notice, &message) {
+                            repository.save_progress_post(&post)?;
+                        }
+                    }
+                    Err(error) => {
+                        notice(&format!(
+                            "progress post delete for ask {ask_id} was rejected; not retrying: {error}"
+                        ));
+                        post.delete_pending = false;
+                        repository.save_progress_post(&post)?;
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -427,6 +699,9 @@ where
     P::Error: fmt::Display,
     L: ProgressRelay,
 {
+    if post.delete_pending {
+        return send_delete(repository, relay, notice, post, now);
+    }
     if post.ended {
         return Ok(());
     }
@@ -491,14 +766,18 @@ where
         SendOutcome::Accepted(event_id) => {
             post.post_event_id = Some(event_id);
             post.last_send_at = Some(now);
+            post.retry_noticed_at = None;
             repository.save_progress_post(&post)
         }
         SendOutcome::Retry(error) => {
             // The prepared id stays recorded; the next tick redelivers it.
-            notice(&format!(
+            let message = format!(
                 "progress post for ask {} was not accepted; retrying: {error}",
                 post.ask_id
-            ));
+            );
+            if notice_retry(&mut post, now, notice, &message) {
+                repository.save_progress_post(&post)?;
+            }
             Ok(())
         }
         SendOutcome::PrepareFailed(error) => {
@@ -534,7 +813,7 @@ where
     R: HostRepository,
     L: ProgressRelay,
 {
-    let (Some(body), Some(target)) = (post.pending_body.take(), post.post_event_id.as_deref())
+    let (Some(body), Some(target)) = (post.pending_body.clone(), post.post_event_id.as_deref())
     else {
         return Ok(());
     };
@@ -547,15 +826,24 @@ where
         return repository.save_progress_post(&post);
     };
     let stamped = stamp_outbound(&body, &outbound_prefix_for(bot_id));
-    post.edit_count += 1;
-    post.last_send_at = Some(now);
-    // Record before edit (D28). A lost edit is superseded by the next body.
-    repository.save_progress_post(&post)?;
-    if let Err(error) = relay.edit(&post.ask_id, &post.channel_id, &target, &stamped) {
-        notice(&format!(
-            "progress edit for ask {} failed; the next body supersedes it: {error}",
-            post.ask_id
-        ));
+    match relay.edit(&post.ask_id, &post.channel_id, &target, &stamped) {
+        Ok(ProgressRelayDispatch::Accepted) => {
+            post.edit_count += 1;
+            post.last_send_at = Some(now);
+            post.pending_body = None;
+            post.retry_noticed_at = None;
+            repository.save_progress_post(&post)?;
+        }
+        Ok(ProgressRelayDispatch::Pending) => {}
+        Err(error) => {
+            let message = format!(
+                "progress edit for ask {} failed; retrying the newest body: {error}",
+                post.ask_id
+            );
+            if notice_retry(&mut post, now, notice, &message) {
+                repository.save_progress_post(&post)?;
+            }
+        }
     }
     Ok(())
 }
@@ -566,6 +854,8 @@ pub(crate) struct RecordingProgressRelay {
     pub edits: std::sync::Mutex<Vec<(String, String, String)>>,
     pub deletes: std::sync::Mutex<Vec<(String, String)>>,
     pub fail_edit: std::sync::Mutex<bool>,
+    pub fail_delete: std::sync::Mutex<bool>,
+    pub reject_delete: std::sync::Mutex<bool>,
 }
 
 #[cfg(test)]
@@ -576,7 +866,7 @@ impl ProgressRelay for RecordingProgressRelay {
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
-    ) -> Result<(), PublishError> {
+    ) -> Result<ProgressRelayDispatch, PublishError> {
         self.edits.lock().expect("edits").push((
             channel_id.to_owned(),
             post_event_id.as_str().to_owned(),
@@ -587,7 +877,7 @@ impl ProgressRelay for RecordingProgressRelay {
                 detail: "edit dropped".to_owned(),
             });
         }
-        Ok(())
+        Ok(ProgressRelayDispatch::Accepted)
     }
 
     fn delete(
@@ -595,12 +885,22 @@ impl ProgressRelay for RecordingProgressRelay {
         _ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
-    ) -> Result<(), PublishError> {
+    ) -> Result<ProgressRelayDispatch, PublishError> {
         self.deletes
             .lock()
             .expect("deletes")
             .push((channel_id.to_owned(), post_event_id.as_str().to_owned()));
-        Ok(())
+        if *self.fail_delete.lock().expect("fail") {
+            return Err(PublishError::NotAccepted {
+                detail: "delete dropped".to_owned(),
+            });
+        }
+        if *self.reject_delete.lock().expect("reject") {
+            return Err(PublishError::Rejected {
+                detail: "delete forbidden".to_owned(),
+            });
+        }
+        Ok(ProgressRelayDispatch::Accepted)
     }
 }
 
@@ -618,6 +918,47 @@ mod tests {
         event_id, open_repository as open_repo, open_repository_with_tags, quiet, FakePublisher,
         CHANNEL,
     };
+
+    #[derive(Debug)]
+    struct BlockingRelay {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ProgressRelay for BlockingRelay {
+        fn edit(
+            &self,
+            _ask_id: &str,
+            _channel_id: &str,
+            _post_event_id: &EventId,
+            _content: &str,
+        ) -> Result<ProgressRelayDispatch, PublishError> {
+            Ok(self.block_until_released())
+        }
+
+        fn delete(
+            &self,
+            _ask_id: &str,
+            _channel_id: &str,
+            _post_event_id: &EventId,
+        ) -> Result<ProgressRelayDispatch, PublishError> {
+            Ok(self.block_until_released())
+        }
+    }
+
+    impl BlockingRelay {
+        fn block_until_released(&self) -> ProgressRelayDispatch {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(1));
+            ProgressRelayDispatch::Accepted
+        }
+    }
 
     /// Fix the open time so the hold is deterministic in tests.
     fn open_turn_at(repository: &mut SqliteRepository, opened_at: i64) -> TurnRecord {
@@ -650,6 +991,25 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    async fn apply_until(
+        repository: &mut SqliteRepository,
+        relay: &BackgroundProgressRelay,
+        done: impl Fn(&ProgressPost) -> bool,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                apply_relay_completions(repository, relay, &mut quiet()).unwrap();
+                let post = repository.progress_post("ask-1").unwrap().unwrap();
+                if done(&post) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("progress completion");
     }
 
     #[test]
@@ -1174,10 +1534,10 @@ mod tests {
             first_edit,
         );
         assert_eq!(notices.len(), 1);
-        assert!(notices[0].contains("supersedes"));
+        assert!(notices[0].contains("retrying"));
         let post = repository.progress_post("ask-1").unwrap().unwrap();
-        assert_eq!(post.edit_count, 1, "recorded before the edit");
-        assert!(post.pending_body.is_none());
+        assert_eq!(post.edit_count, 0, "failed edits do not consume the cap");
+        assert_eq!(post.pending_body.as_deref(), Some("two"));
         *relay.fail_edit.lock().unwrap() = false;
         record_progress(
             &mut repository,
@@ -1198,53 +1558,18 @@ mod tests {
         let edits = relay.edits.lock().unwrap();
         assert_eq!(edits.len(), 2);
         assert_eq!(edits[1].2, "[bot]: three");
+        assert_eq!(
+            repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .edit_count,
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn progress_tick_returns_while_an_edit_or_delete_is_outstanding() {
-        #[derive(Debug)]
-        struct BlockingRelay {
-            started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-            release: Mutex<std::sync::mpsc::Receiver<()>>,
-        }
-
-        impl ProgressRelay for BlockingRelay {
-            fn edit(
-                &self,
-                _ask_id: &str,
-                _channel_id: &str,
-                _post_event_id: &EventId,
-                _content: &str,
-            ) -> Result<(), PublishError> {
-                if let Some(started) = self.started.lock().unwrap().take() {
-                    let _ = started.send(());
-                }
-                let _ = self
-                    .release
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(std::time::Duration::from_secs(1));
-                Ok(())
-            }
-
-            fn delete(
-                &self,
-                _ask_id: &str,
-                _channel_id: &str,
-                _post_event_id: &EventId,
-            ) -> Result<(), PublishError> {
-                if let Some(started) = self.started.lock().unwrap().take() {
-                    let _ = started.send(());
-                }
-                let _ = self
-                    .release
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(std::time::Duration::from_secs(1));
-                Ok(())
-            }
-        }
-
         let mut repository = open_repo();
         let turn = open_turn_at(&mut repository, 1_000);
         let publisher = FakePublisher::default();
@@ -1289,9 +1614,10 @@ mod tests {
             .expect("edit started")
             .expect("start signal");
         let post = repository.progress_post("ask-1").unwrap().unwrap();
-        assert_eq!(post.edit_count, 1, "tick persisted before scheduling");
-        assert!(post.pending_body.is_none());
+        assert_eq!(post.edit_count, 0, "queued edit is not accepted yet");
+        assert_eq!(post.pending_body.as_deref(), Some("two"));
         release_tx.send(()).unwrap();
+        apply_until(&mut repository, &background, |post| post.edit_count == 1).await;
 
         let (delete_started_tx, delete_started_rx) = tokio::sync::oneshot::channel();
         *blocking.started.lock().unwrap() = Some(delete_started_tx);
@@ -1305,8 +1631,310 @@ mod tests {
             .await
             .expect("delete started")
             .expect("delete start signal");
-        assert!(repository.progress_post("ask-1").unwrap().unwrap().ended);
+        let post = repository.progress_post("ask-1").unwrap().unwrap();
+        assert!(post.ended);
+        assert!(post.delete_pending);
         release_tx.send(()).unwrap();
+        apply_until(&mut repository, &background, |post| !post.delete_pending).await;
+    }
+
+    #[test]
+    fn failed_edits_do_not_consume_the_edit_cap() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        let created = 1_000 + PROGRESS_INITIAL_HOLD_SECS;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created,
+        );
+        *relay.fail_edit.lock().unwrap() = true;
+        for index in 0..PROGRESS_EDIT_CAP {
+            record_progress(
+                &mut repository,
+                &mut quiet(),
+                &turn,
+                &format!("failed {index}"),
+                created + 1,
+            )
+            .unwrap();
+            flush_all(
+                &mut repository,
+                &publisher,
+                &relay,
+                &mut notices,
+                &turn,
+                created + PROGRESS_EDIT_INTERVAL_SECS,
+            );
+        }
+        let post = repository.progress_post("ask-1").unwrap().unwrap();
+        assert_eq!(post.edit_count, 0);
+        assert!(post.pending_body.is_some());
+
+        *relay.fail_edit.lock().unwrap() = false;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created + PROGRESS_EDIT_INTERVAL_SECS,
+        );
+        assert_eq!(
+            repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .edit_count,
+            1
+        );
+    }
+
+    #[test]
+    fn failed_cancel_delete_stays_pending_and_retries() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "working", 1_005).unwrap();
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            1_000 + PROGRESS_INITIAL_HOLD_SECS,
+        );
+        *relay.fail_delete.lock().unwrap() = true;
+        delete_progress_post(&mut repository, &relay, &mut quiet(), "ask-1").unwrap();
+        assert!(
+            repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .delete_pending
+        );
+        assert_eq!(
+            repository
+                .progress_posts_pending_flush(&turn.bot_id)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        *relay.fail_delete.lock().unwrap() = false;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            2_000,
+        );
+        assert!(
+            !repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .delete_pending
+        );
+        assert_eq!(relay.deletes.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn retryable_create_notices_are_rate_limited() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "working", 1_005).unwrap();
+        let start = 1_000 + PROGRESS_INITIAL_HOLD_SECS;
+        for offset in 0..300 {
+            *publisher.fail.lock().unwrap() = Some(PublishError::NotAccepted {
+                detail: "relay unavailable".to_owned(),
+            });
+            flush_all(
+                &mut repository,
+                &publisher,
+                &relay,
+                &mut notices,
+                &turn,
+                start + offset,
+            );
+        }
+        assert_eq!(publisher.sends.lock().unwrap().len(), 300);
+        assert_eq!(notices.len(), 10, "at most one notice per 30 seconds");
+    }
+
+    #[test]
+    fn accepted_create_starts_a_new_retry_notice_episode() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        *publisher.fail.lock().unwrap() = Some(PublishError::NotAccepted {
+            detail: "relay unavailable".to_owned(),
+        });
+        let created = 1_000 + PROGRESS_INITIAL_HOLD_SECS;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created,
+        );
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created + 1,
+        );
+        assert!(repository
+            .progress_post("ask-1")
+            .unwrap()
+            .unwrap()
+            .retry_noticed_at
+            .is_none());
+
+        record_progress(&mut repository, &mut quiet(), &turn, "edit", created + 2).unwrap();
+        *relay.fail_edit.lock().unwrap() = true;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created + 1 + PROGRESS_EDIT_INTERVAL_SECS,
+        );
+        assert_eq!(notices.len(), 2, "the first edit failure is not suppressed");
+    }
+
+    #[test]
+    fn retryable_edit_notices_are_rate_limited() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        let created = 1_000 + PROGRESS_INITIAL_HOLD_SECS;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created,
+        );
+        record_progress(&mut repository, &mut quiet(), &turn, "pending", created + 1).unwrap();
+        *relay.fail_edit.lock().unwrap() = true;
+        for offset in 0..300 {
+            flush_all(
+                &mut repository,
+                &publisher,
+                &relay,
+                &mut notices,
+                &turn,
+                created + PROGRESS_EDIT_INTERVAL_SECS + offset,
+            );
+        }
+        assert_eq!(notices.len(), 10, "at most one notice per 30 seconds");
+        assert_eq!(
+            repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .edit_count,
+            0
+        );
+    }
+
+    #[test]
+    fn retryable_delete_notices_are_rate_limited() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            1_000 + PROGRESS_INITIAL_HOLD_SECS,
+        );
+        *relay.fail_delete.lock().unwrap() = true;
+        let start = crate::unix_now().unwrap();
+        delete_progress_post(
+            &mut repository,
+            &relay,
+            &mut |text| notices.push(text.to_owned()),
+            "ask-1",
+        )
+        .unwrap();
+        for offset in 0..300 {
+            flush_all(
+                &mut repository,
+                &publisher,
+                &relay,
+                &mut notices,
+                &turn,
+                start + offset,
+            );
+        }
+        assert!(notices.len() <= 11, "at most one notice per 30 seconds");
+        assert!(
+            repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .delete_pending
+        );
+    }
+
+    #[test]
+    fn rejected_delete_ends_best_effort_retry() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            1_000 + PROGRESS_INITIAL_HOLD_SECS,
+        );
+        *relay.reject_delete.lock().unwrap() = true;
+        delete_progress_post(
+            &mut repository,
+            &relay,
+            &mut |text| notices.push(text.to_owned()),
+            "ask-1",
+        )
+        .unwrap();
+        let post = repository.progress_post("ask-1").unwrap().unwrap();
+        assert!(!post.delete_pending);
+        assert!(notices.iter().any(|notice| notice.contains("not retrying")));
     }
 
     /// The stored attempt after a retryable final publish failure: the

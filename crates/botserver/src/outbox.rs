@@ -414,9 +414,10 @@ impl ProgressRelay for BuzzPublisher {
         channel_id: &str,
         post_event_id: &EventId,
         content: &str,
-    ) -> Result<(), PublishError> {
+    ) -> Result<crate::progress::ProgressRelayDispatch, PublishError> {
         let event = buzz::message_edit(channel_id, post_event_id, content);
-        self.send_buzz_blocking(&event)
+        self.send_buzz_blocking(&event)?;
+        Ok(crate::progress::ProgressRelayDispatch::Accepted)
     }
 
     fn delete(
@@ -424,9 +425,10 @@ impl ProgressRelay for BuzzPublisher {
         _ask_id: &str,
         channel_id: &str,
         post_event_id: &EventId,
-    ) -> Result<(), PublishError> {
+    ) -> Result<crate::progress::ProgressRelayDispatch, PublishError> {
         let event = buzz::message_delete(channel_id, post_event_id);
-        self.send_buzz_blocking(&event)
+        self.send_buzz_blocking(&event)?;
+        Ok(crate::progress::ProgressRelayDispatch::Accepted)
     }
 }
 
@@ -974,8 +976,7 @@ where
     mark_posted(repository, reactions, turn, ask_id)
 }
 
-/// Record `posted`, drop any pending progress body (D42: a final that
-/// lands first discards it), and clear the in-flight marker (D35).
+/// Drop pending progress (D42), record `posted`, and clear the marker (D35).
 fn mark_posted<R, P, I>(
     repository: &mut R,
     reactions: &I,
@@ -986,10 +987,10 @@ where
     R: HostRepository,
     I: InFlightReaction,
 {
+    progress::discard_pending(repository, ask_id).map_err(OutboxError::Repository)?;
     let _ = repository
         .set_turn_state(ask_id, TurnState::Posted)
         .map_err(OutboxError::Repository)?;
-    progress::discard_pending(repository, ask_id).map_err(OutboxError::Repository)?;
     reactions.remove(&turn.event_id);
     Ok(InboxAction::Ack)
 }
@@ -1779,6 +1780,49 @@ mod tests {
             repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
             TurnState::Open
         );
+    }
+
+    #[test]
+    fn posted_transition_retries_after_progress_read_failure() {
+        let (mut repository, publisher) = open_repo();
+        repository.execute_batch_for_test(
+            "INSERT INTO progress_posts(ask_id, channel_id, reply_to_event_id, opened_at)
+             VALUES ('ask-1', 'ab12cd34-5678-90ab-cdef-0123456789ab',
+                     'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz', 1);",
+        );
+        let reactions = RecordingInFlightReaction::default();
+        let error = handle_delivery_with(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("final", "ask-1", "hello"),
+            &reactions,
+        )
+        .expect_err("invalid progress row");
+        assert!(matches!(error, OutboxError::Repository(_)));
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Open,
+            "Posted is committed only after fallible progress cleanup"
+        );
+        assert!(reactions.removes.lock().expect("removes").is_empty());
+
+        repository.execute_batch_for_test("DELETE FROM progress_posts WHERE ask_id = 'ask-1';");
+        let action = handle_delivery_with(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("final", "ask-1", "hello"),
+            &reactions,
+        )
+        .expect("retry");
+        assert_eq!(action, InboxAction::Ack);
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Posted
+        );
+        assert_eq!(reactions.removes.lock().expect("removes").len(), 1);
+        assert_eq!(publisher.sends.lock().expect("sends").len(), 1);
     }
 
     #[test]
