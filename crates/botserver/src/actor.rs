@@ -857,24 +857,13 @@ where
             }),
             Err(KelpieError::TargetUnavailable) => {
                 let snapshot_relpath = self.refresh_snapshot(session)?;
-                let occupant = self.start_occupant(
+                let mut session = session.clone();
+                self.continue_recorded_occupant(
                     kelpie,
                     waiter,
-                    session,
-                    &snapshot_relpath,
-                    Some(logical_id),
-                )?;
-                let mut session = session.clone();
-                session.renew_id = None;
-                self.repository
-                    .save_session(&session)
-                    .map_err(ActorError::Repository)?;
-                self.try_arm_renew(
-                    kelpie,
-                    occupant.logical_agent_id(),
-                    occupant.incarnation_id(),
-                    &snapshot_relpath,
                     &mut session,
+                    &snapshot_relpath,
+                    logical_id,
                 )?;
                 Ok(true)
             }
@@ -979,17 +968,20 @@ where
             &events,
         );
         let idempotency_key = format!("{}:{}", queued.event_id.as_str(), queued.sequence);
-        let receipt = waiter
-            .ask_named(
-                &session.session_name,
-                session.occupant_logical_id.as_deref(),
-                &rendered.body,
-                &idempotency_key,
-            )
-            .map_err(ActorError::Kelpie)?;
+        let receipt = self.ask_queued_with_recovery(
+            kelpie,
+            waiter,
+            &mut session,
+            &snapshot_relpath,
+            &rendered.body,
+            &idempotency_key,
+        )?;
         match receipt.delivery() {
             AskDelivery::Accepted | AskDelivery::Unknown => {}
             delivery @ (AskDelivery::Rejected | AskDelivery::TargetUnavailable) => {
+                waiter
+                    .cancel(receipt.message_id(), "queued ask was not delivered")
+                    .map_err(ActorError::Kelpie)?;
                 return Err(ActorError::AskNotDelivered(delivery));
             }
         }
@@ -1005,6 +997,83 @@ where
             .save_session(&session)
             .map_err(ActorError::Repository)?;
         Ok(())
+    }
+
+    fn ask_queued_with_recovery(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        session: &mut SessionRecord,
+        snapshot_relpath: &str,
+        body: &str,
+        idempotency_key: &str,
+    ) -> Result<crate::AskReceipt, ActorError<R::Error>> {
+        let first_attempt = waiter.ask_named(
+            &session.session_name,
+            session.occupant_logical_id.as_deref(),
+            body,
+            idempotency_key,
+        );
+        let unavailable_incarnation = match first_attempt {
+            Err(KelpieError::TargetUnavailable) => None,
+            Ok(receipt) if receipt.delivery() == AskDelivery::TargetUnavailable => {
+                let incarnation_id = receipt.recipient_incarnation().ok_or_else(|| {
+                    ActorError::Kelpie(KelpieError::InvalidReceipt(
+                        "unavailable ask omitted its recipient incarnation".to_owned(),
+                    ))
+                })?;
+                waiter
+                    .cancel(receipt.message_id(), "queued ask target unavailable")
+                    .map_err(ActorError::Kelpie)?;
+                Some(incarnation_id.to_owned())
+            }
+            other => return other.map_err(ActorError::Kelpie),
+        };
+        if let Some(incarnation_id) = unavailable_incarnation.as_deref() {
+            waiter
+                .retire_occupant(
+                    incarnation_id,
+                    &format!("{idempotency_key}:retire:{incarnation_id}"),
+                )
+                .map_err(ActorError::Kelpie)?;
+        }
+
+        let logical_id = session
+            .occupant_logical_id
+            .clone()
+            .ok_or(ActorError::UnnameableSession)?;
+        self.continue_recorded_occupant(kelpie, waiter, session, snapshot_relpath, &logical_id)?;
+        waiter
+            .ask_named(
+                &session.session_name,
+                Some(&logical_id),
+                body,
+                idempotency_key,
+            )
+            .map_err(ActorError::Kelpie)
+    }
+
+    fn continue_recorded_occupant(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        session: &mut SessionRecord,
+        snapshot_relpath: &str,
+        logical_id: &str,
+    ) -> Result<(), ActorError<R::Error>> {
+        let occupant =
+            self.start_occupant(kelpie, waiter, session, snapshot_relpath, Some(logical_id))?;
+        session.renew_id = None;
+        self.repository
+            .save_session(session)
+            .map_err(ActorError::Repository)?;
+        self.try_arm_renew(
+            kelpie,
+            occupant.logical_agent_id(),
+            occupant.incarnation_id(),
+            snapshot_relpath,
+            session,
+        )
     }
 
     fn start_occupant(
@@ -1349,8 +1418,24 @@ mod tests {
             "message_id": message_id,
             "operation_id": "ask-operation",
             "recipient": "occupant-agent",
+            "recipient_incarnation": "occupant-incarnation",
             "delivery_outcome": "accepted"
         }))
+    }
+
+    fn retired() -> CommandOutput {
+        success(&serde_json::json!({
+            "operation_id": "retire-operation",
+            "pane_released": false
+        }))
+    }
+
+    fn pending_ask(message_id: &str) -> CommandOutput {
+        success(&serde_json::json!([{
+            "ask_message_id": message_id,
+            "waiting_agent_id": "waiter-agent",
+            "state": "open"
+        }]))
     }
 
     fn renewed() -> CommandOutput {
@@ -2142,13 +2227,186 @@ mod tests {
     }
 
     #[test]
-    fn resume_queued_asks_a_later_channel_when_the_first_whoami_fails() {
+    #[allow(clippy::too_many_lines)]
+    fn queued_turn_recovers_an_unavailable_recorded_occupant_and_drains() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            whoami(),
+            failure("target_unavailable", "occupant pane is gone"),
+            pending_ask("ask-unavailable"),
+            cancelled(),
+            retired(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-2"),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let first = work('a', "bot: first", None);
+        let second = work('b', "bot: second", None);
+        actor
+            .repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: second.event_id.clone(),
+                    author_pubkey: "b".repeat(64),
+                    created_at: 2,
+                    kind: 9,
+                    content: second.nostr_body.clone(),
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(second.channel_id.clone()),
+                    target_event_id: None,
+                },
+                false,
+            )
+            .expect("index second");
+        actor
+            .handle_trigger(&kelpie, &waiter, &first)
+            .expect("first");
+        actor
+            .handle_trigger(&kelpie, &waiter, &second)
+            .expect("queued");
+        actor
+            .repository
+            .set_turn_state("ask-1", TurnState::Posted)
+            .expect("posted");
+
+        assert_eq!(
+            actor.resume_queued(&kelpie, &waiter).expect("recovered"),
+            Some(TriggerOutcome::Asked)
+        );
+
+        let session = actor
+            .repository
+            .session(actor.bot.id(), &second.channel_id)
+            .expect("session")
+            .expect("bound");
+        assert_eq!(
+            session.occupant_logical_id.as_deref(),
+            Some("occupant-agent")
+        );
+        assert_eq!(session.renew_id.as_deref(), Some("renew-id"));
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &second.channel_id)
+            .expect("turns");
+        assert_eq!(turns[1].state, TurnState::Open);
+        assert_eq!(turns[1].ask_id.as_deref(), Some("ask-2"));
+        assert_eq!(start_count(&runner), 2);
+        assert_eq!(continued_starts(&runner).len(), 1);
+        assert_eq!(panes.calls.lock().expect("pane calls").len(), 2);
+        let calls = runner.calls.lock().expect("calls");
+        let retire = calls
+            .iter()
+            .find(|call| call.0[1] == "retire")
+            .expect("retire stale incarnation");
+        assert!(retire
+            .0
+            .windows(2)
+            .any(|pair| pair == ["--incarnation", "occupant-incarnation"]));
+        let cancel = calls
+            .iter()
+            .find(|call| call.0[1] == "cancel")
+            .expect("cancel unavailable ask");
+        assert_eq!(cancel.0[2], "ask-unavailable");
+        let ask_keys = calls
+            .iter()
+            .filter(|call| call.0[1] == "ask")
+            .map(|call| {
+                let key = call
+                    .0
+                    .iter()
+                    .position(|argument| argument == "--idempotency-key")
+                    .expect("idempotency key");
+                call.0[key + 1].clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ask_keys.len(), 3);
+        assert_eq!(
+            &ask_keys[1..],
+            &[
+                format!("{}:2", second.event_id.as_str()),
+                format!("{}:2", second.event_id.as_str())
+            ]
+        );
+    }
+
+    #[test]
+    fn rejected_queued_ask_cancels_its_obligation() {
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            whoami(),
+            renewed(),
+            whoami(),
+            failure("rejected", "occupant rejected the prompt"),
+            pending_ask("ask-rejected"),
+            cancelled(),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "bot: rejected", None);
+        actor
+            .repository
+            .save_session(&crate::SessionRecord {
+                bot_id: actor.bot.id().clone(),
+                channel_id: trigger.channel_id.clone(),
+                session_name: "bot-foobar".to_owned(),
+                occupant_logical_id: Some("occupant-agent".to_owned()),
+                renew_id: None,
+                ask_context_event_id: None,
+                ask_context_created_at: None,
+            })
+            .expect("session");
+        actor
+            .repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: trigger.event_id.clone(),
+                    author_pubkey: "b".repeat(64),
+                    created_at: 1,
+                    kind: 9,
+                    content: trigger.nostr_body,
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(trigger.channel_id.clone()),
+                    target_event_id: None,
+                },
+                false,
+            )
+            .expect("index");
+        actor
+            .repository
+            .enqueue_unprocessed_turn(&NewTurn {
+                bot_id: actor.bot.id().clone(),
+                channel_id: trigger.channel_id,
+                event_id: trigger.event_id,
+                reply_to_event_id: None,
+            })
+            .expect("enqueue");
+
+        assert!(matches!(
+            actor.resume_queued(&kelpie, &waiter),
+            Err(ActorError::AskNotDelivered(AskDelivery::Rejected))
+        ));
+        let calls = runner.calls.lock().expect("calls");
+        let cancel = calls
+            .iter()
+            .find(|call| call.0[1] == "cancel")
+            .expect("cancel rejected ask");
+        assert_eq!(cancel.0[2], "ask-rejected");
+    }
+
+    #[test]
+    fn resume_queued_asks_a_later_channel_when_the_first_recovery_fails() {
         let first_channel = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
         let second_channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
             failure("conflict", "no ready agent for alias bot-aaa"),
             failure("conflict", "no ready agent for alias bot-aaa"),
+            failure("rejected", "recovery start failed"),
             whoami(),
             renewed(),
             whoami(),
@@ -2207,6 +2465,7 @@ mod tests {
         );
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls.iter().filter(|call| call.0[1] == "ask").count(), 1);
+        assert_eq!(calls.iter().filter(|call| call.0[1] == "start").count(), 1);
         assert_eq!(ask_request(&calls.last().expect("ask").1), "second");
     }
 

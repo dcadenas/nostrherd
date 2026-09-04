@@ -119,6 +119,7 @@ pub struct AskReceipt {
     message_id: String,
     operation_id: Option<String>,
     recipient: String,
+    recipient_incarnation: Option<String>,
     delivery: AskDelivery,
 }
 
@@ -139,6 +140,12 @@ impl AskReceipt {
     #[must_use]
     pub fn recipient(&self) -> &str {
         &self.recipient
+    }
+
+    /// Return the exact occupant incarnation targeted by this ask.
+    #[must_use]
+    pub fn recipient_incarnation(&self) -> Option<&str> {
+        self.recipient_incarnation.as_deref()
     }
 
     /// Return the final delivery state observed by Kelpie.
@@ -685,6 +692,10 @@ impl HostWaiter<'_> {
                 message_id: field(result, "message_id")?,
                 operation_id: Some(field(result, "operation_id")?),
                 recipient: field(result, "recipient")?,
+                recipient_incarnation: result
+                    .get("recipient_incarnation")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 delivery: ask_delivery(result)?,
             });
         }
@@ -699,8 +710,37 @@ impl HostWaiter<'_> {
             message_id: self.pending_ask_id(&recipient.logical_agent_id)?,
             operation_id: None,
             recipient: recipient.logical_agent_id,
+            recipient_incarnation: Some(recipient.incarnation_id),
             delivery,
         })
+    }
+
+    /// Retire an unavailable occupant incarnation without closing its missing pane.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot retire the exact incarnation.
+    pub fn retire_occupant(
+        &self,
+        incarnation_id: &str,
+        idempotency_key: &str,
+    ) -> Result<(), KelpieError> {
+        let output = self.client.invoke(
+            &[
+                "--json",
+                "retire",
+                "--incarnation",
+                incarnation_id,
+                "--idempotency-key",
+                idempotency_key,
+            ],
+            &[],
+        )?;
+        if output.success {
+            Ok(())
+        } else {
+            Err(output.rejected())
+        }
     }
 
     /// Cancel an in-flight ask owned by this waiter.

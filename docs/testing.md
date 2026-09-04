@@ -11,6 +11,16 @@ cargo test --all-targets
 `crates/botserver/src/spec_flows.rs` is in-process acceptance of SPEC
 flows 1–12. It is not a live relay proof.
 
+`queued_turn_recovers_an_unavailable_recorded_occupant_and_drains` proves a
+queued ask that finds its recorded occupant unavailable continues the same
+logical id, cancels the failed ask obligation, retires the stale Ready
+incarnation, retries with the stable turn idempotency key, and opens the turn.
+The live retry depends on dcadenas/kelpie issue 37 (failed-prompt retry
+semantics); this unit test supplies the post-fix receipts directly.
+
+`rejected_queued_ask_cancels_its_obligation` proves a terminally rejected ask
+does not leave stale work that can make later reconciliation ambiguous.
+
 `subscription_refresh_replaces_populated_channel_and_mutation_filters` uses
 nostr-sdk's in-process relay to keep fixed-ID refresh behavior in the normal CI
 gate. It replaces populated channel and active-turn scopes with changed values.
