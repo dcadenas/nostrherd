@@ -976,7 +976,7 @@ where
     mark_posted(repository, reactions, turn, ask_id)
 }
 
-/// Drop pending progress, record `posted`, and clear the in-flight marker.
+/// Drop pending progress (D42), record `posted`, and clear the marker (D35).
 fn mark_posted<R, P, I>(
     repository: &mut R,
     reactions: &I,

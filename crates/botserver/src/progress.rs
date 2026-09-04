@@ -50,8 +50,8 @@ pub struct ProgressPost {
     pub ended: bool,
     /// The one operator notice for the edit cap was already emitted.
     pub cap_noticed: bool,
-    /// Last operator notice for a retryable create failure.
-    pub create_retry_noticed_at: Option<i64>,
+    /// Last operator notice for a retryable relay failure.
+    pub retry_noticed_at: Option<i64>,
     /// A cancelled post still needs a kind-9005 accepted by the relay.
     pub delete_pending: bool,
 }
@@ -105,11 +105,12 @@ pub enum ProgressRelayCompletion {
     Edit {
         ask_id: String,
         body: String,
-        accepted_at: i64,
+        completed_at: i64,
         result: Result<(), PublishError>,
     },
     Delete {
         ask_id: String,
+        completed_at: i64,
         result: Result<(), PublishError>,
     },
 }
@@ -236,7 +237,7 @@ impl BackgroundProgressRelay {
                         ProgressRelayCompletion::Edit {
                             ask_id,
                             body,
-                            accepted_at: crate::unix_now().unwrap_or_default(),
+                            completed_at: crate::unix_now().unwrap_or_default(),
                             result,
                         }
                     }
@@ -253,7 +254,11 @@ impl BackgroundProgressRelay {
                                 }),
                             },
                         );
-                        ProgressRelayCompletion::Delete { ask_id, result }
+                        ProgressRelayCompletion::Delete {
+                            ask_id,
+                            completed_at: crate::unix_now().unwrap_or_default(),
+                            result,
+                        }
                     }
                 };
                 let _ = completion_sender.send(completion);
@@ -463,7 +468,7 @@ fn new_progress_post<R: HostRepository>(
         last_send_at: None,
         ended: false,
         cap_noticed: false,
-        create_retry_noticed_at: None,
+        retry_noticed_at: None,
         delete_pending: false,
     })
 }
@@ -513,9 +518,16 @@ pub fn delete_progress_post<R: HostRepository>(
     post.ended = true;
     post.pending_body = None;
     post.delete_pending = post.delete_target().is_some();
+    post.retry_noticed_at = None;
     repository.save_progress_post(&post)?;
     if post.delete_pending {
-        send_delete(repository, relay, notice, post)?;
+        send_delete(
+            repository,
+            relay,
+            notice,
+            post,
+            crate::unix_now().unwrap_or_default(),
+        )?;
     }
     Ok(())
 }
@@ -525,6 +537,7 @@ fn send_delete<R: HostRepository>(
     relay: &impl ProgressRelay,
     notice: &mut impl FnMut(&str),
     mut post: ProgressPost,
+    now: i64,
 ) -> Result<(), R::Error> {
     let Some(target) = post.delete_target() else {
         post.delete_pending = false;
@@ -533,17 +546,46 @@ fn send_delete<R: HostRepository>(
     match relay.delete(&post.ask_id, &post.channel_id, &target) {
         Ok(ProgressRelayDispatch::Accepted) => {
             post.delete_pending = false;
+            post.retry_noticed_at = None;
             repository.save_progress_post(&post)
         }
         Ok(ProgressRelayDispatch::Pending) => Ok(()),
         Err(error) => {
-            notice(&format!(
-                "progress post delete for ask {} failed; retrying: {error}",
-                post.ask_id
-            ));
+            if error.is_retryable() {
+                let message = format!(
+                    "progress post delete for ask {} failed; retrying: {error}",
+                    post.ask_id
+                );
+                if notice_retry(&mut post, now, notice, &message) {
+                    repository.save_progress_post(&post)?;
+                }
+            } else {
+                notice(&format!(
+                    "progress post delete for ask {} was rejected; not retrying: {error}",
+                    post.ask_id
+                ));
+                post.delete_pending = false;
+                repository.save_progress_post(&post)?;
+            }
             Ok(())
         }
     }
+}
+
+fn notice_retry(
+    post: &mut ProgressPost,
+    now: i64,
+    notice: &mut impl FnMut(&str),
+    message: &str,
+) -> bool {
+    let should_notice = post
+        .retry_noticed_at
+        .is_none_or(|last| now.saturating_sub(last) >= PROGRESS_EDIT_INTERVAL_SECS);
+    if should_notice {
+        notice(message);
+        post.retry_noticed_at = Some(now);
+    }
+    should_notice
 }
 
 /// Apply accepted or failed background relay results to durable progress state.
@@ -561,7 +603,7 @@ pub fn apply_relay_completions<R: HostRepository>(
             ProgressRelayCompletion::Edit {
                 ask_id,
                 body,
-                accepted_at,
+                completed_at,
                 result,
             } => {
                 let Some(mut post) = repository.progress_post(&ask_id)? else {
@@ -570,7 +612,8 @@ pub fn apply_relay_completions<R: HostRepository>(
                 match result {
                     Ok(()) => {
                         post.edit_count += 1;
-                        post.last_send_at = Some(accepted_at);
+                        post.last_send_at = Some(completed_at);
+                        post.retry_noticed_at = None;
                         let matches_pending = repository
                             .turn_by_ask_id(&ask_id)?
                             .and_then(|turn| {
@@ -586,23 +629,45 @@ pub fn apply_relay_completions<R: HostRepository>(
                         drop_pending_at_cap(&mut post, notice);
                         repository.save_progress_post(&post)?;
                     }
-                    Err(error) => notice(&format!(
-                        "progress edit for ask {ask_id} failed; retrying the newest body: {error}"
-                    )),
+                    Err(error) => {
+                        let message = format!(
+                            "progress edit for ask {ask_id} failed; retrying the newest body: {error}"
+                        );
+                        if notice_retry(&mut post, completed_at, notice, &message) {
+                            repository.save_progress_post(&post)?;
+                        }
+                    }
                 }
             }
-            ProgressRelayCompletion::Delete { ask_id, result } => {
+            ProgressRelayCompletion::Delete {
+                ask_id,
+                completed_at,
+                result,
+            } => {
                 let Some(mut post) = repository.progress_post(&ask_id)? else {
                     continue;
                 };
                 match result {
                     Ok(()) => {
                         post.delete_pending = false;
+                        post.retry_noticed_at = None;
                         repository.save_progress_post(&post)?;
                     }
-                    Err(error) => notice(&format!(
-                        "progress post delete for ask {ask_id} failed; retrying: {error}"
-                    )),
+                    Err(error) if error.is_retryable() => {
+                        let message = format!(
+                            "progress post delete for ask {ask_id} failed; retrying: {error}"
+                        );
+                        if notice_retry(&mut post, completed_at, notice, &message) {
+                            repository.save_progress_post(&post)?;
+                        }
+                    }
+                    Err(error) => {
+                        notice(&format!(
+                            "progress post delete for ask {ask_id} was rejected; not retrying: {error}"
+                        ));
+                        post.delete_pending = false;
+                        repository.save_progress_post(&post)?;
+                    }
                 }
             }
         }
@@ -635,7 +700,7 @@ where
     L: ProgressRelay,
 {
     if post.delete_pending {
-        return send_delete(repository, relay, notice, post);
+        return send_delete(repository, relay, notice, post, now);
     }
     if post.ended {
         return Ok(());
@@ -705,15 +770,11 @@ where
         }
         SendOutcome::Retry(error) => {
             // The prepared id stays recorded; the next tick redelivers it.
-            let should_notice = post
-                .create_retry_noticed_at
-                .is_none_or(|last| now.saturating_sub(last) >= PROGRESS_EDIT_INTERVAL_SECS);
-            if should_notice {
-                notice(&format!(
-                    "progress post for ask {} was not accepted; retrying: {error}",
-                    post.ask_id
-                ));
-                post.create_retry_noticed_at = Some(now);
+            let message = format!(
+                "progress post for ask {} was not accepted; retrying: {error}",
+                post.ask_id
+            );
+            if notice_retry(&mut post, now, notice, &message) {
                 repository.save_progress_post(&post)?;
             }
             Ok(())
@@ -769,13 +830,19 @@ where
             post.edit_count += 1;
             post.last_send_at = Some(now);
             post.pending_body = None;
+            post.retry_noticed_at = None;
             repository.save_progress_post(&post)?;
         }
         Ok(ProgressRelayDispatch::Pending) => {}
-        Err(error) => notice(&format!(
-            "progress edit for ask {} failed; retrying the newest body: {error}",
-            post.ask_id
-        )),
+        Err(error) => {
+            let message = format!(
+                "progress edit for ask {} failed; retrying the newest body: {error}",
+                post.ask_id
+            );
+            if notice_retry(&mut post, now, notice, &message) {
+                repository.save_progress_post(&post)?;
+            }
+        }
     }
     Ok(())
 }
@@ -787,6 +854,7 @@ pub(crate) struct RecordingProgressRelay {
     pub deletes: std::sync::Mutex<Vec<(String, String)>>,
     pub fail_edit: std::sync::Mutex<bool>,
     pub fail_delete: std::sync::Mutex<bool>,
+    pub reject_delete: std::sync::Mutex<bool>,
 }
 
 #[cfg(test)]
@@ -824,6 +892,11 @@ impl ProgressRelay for RecordingProgressRelay {
         if *self.fail_delete.lock().expect("fail") {
             return Err(PublishError::NotAccepted {
                 detail: "delete dropped".to_owned(),
+            });
+        }
+        if *self.reject_delete.lock().expect("reject") {
+            return Err(PublishError::Rejected {
+                detail: "delete forbidden".to_owned(),
             });
         }
         Ok(ProgressRelayDispatch::Accepted)
@@ -1699,6 +1772,120 @@ mod tests {
         }
         assert_eq!(publisher.sends.lock().unwrap().len(), 300);
         assert_eq!(notices.len(), 10, "at most one notice per 30 seconds");
+    }
+
+    #[test]
+    fn retryable_edit_notices_are_rate_limited() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        let created = 1_000 + PROGRESS_INITIAL_HOLD_SECS;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created,
+        );
+        record_progress(&mut repository, &mut quiet(), &turn, "pending", created + 1).unwrap();
+        *relay.fail_edit.lock().unwrap() = true;
+        for offset in 0..300 {
+            flush_all(
+                &mut repository,
+                &publisher,
+                &relay,
+                &mut notices,
+                &turn,
+                created + PROGRESS_EDIT_INTERVAL_SECS + offset,
+            );
+        }
+        assert_eq!(notices.len(), 10, "at most one notice per 30 seconds");
+        assert_eq!(
+            repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .edit_count,
+            0
+        );
+    }
+
+    #[test]
+    fn retryable_delete_notices_are_rate_limited() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            1_000 + PROGRESS_INITIAL_HOLD_SECS,
+        );
+        *relay.fail_delete.lock().unwrap() = true;
+        let start = crate::unix_now().unwrap();
+        delete_progress_post(
+            &mut repository,
+            &relay,
+            &mut |text| notices.push(text.to_owned()),
+            "ask-1",
+        )
+        .unwrap();
+        for offset in 0..300 {
+            flush_all(
+                &mut repository,
+                &publisher,
+                &relay,
+                &mut notices,
+                &turn,
+                start + offset,
+            );
+        }
+        assert!(notices.len() <= 11, "at most one notice per 30 seconds");
+        assert!(
+            repository
+                .progress_post("ask-1")
+                .unwrap()
+                .unwrap()
+                .delete_pending
+        );
+    }
+
+    #[test]
+    fn rejected_delete_ends_best_effort_retry() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            1_000 + PROGRESS_INITIAL_HOLD_SECS,
+        );
+        *relay.reject_delete.lock().unwrap() = true;
+        delete_progress_post(
+            &mut repository,
+            &relay,
+            &mut |text| notices.push(text.to_owned()),
+            "ask-1",
+        )
+        .unwrap();
+        let post = repository.progress_post("ask-1").unwrap().unwrap();
+        assert!(!post.delete_pending);
+        assert!(notices.iter().any(|notice| notice.contains("not retrying")));
     }
 
     /// The stored attempt after a retryable final publish failure: the

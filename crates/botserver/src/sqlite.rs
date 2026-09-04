@@ -107,7 +107,7 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "ALTER TABLE turns ADD COLUMN opened_at INTEGER")?;
     add_column_if_missing(
         connection,
-        "ALTER TABLE progress_posts ADD COLUMN create_retry_noticed_at INTEGER",
+        "ALTER TABLE progress_posts ADD COLUMN retry_noticed_at INTEGER",
     )?;
     add_column_if_missing(
         connection,
@@ -149,7 +149,7 @@ fn create_progress_posts_table(connection: &Connection) -> rusqlite::Result<()> 
               last_send_at INTEGER,
               ended INTEGER NOT NULL DEFAULT 0 CHECK(ended IN (0, 1)),
               cap_noticed INTEGER NOT NULL DEFAULT 0 CHECK(cap_noticed IN (0, 1)),
-              create_retry_noticed_at INTEGER,
+              retry_noticed_at INTEGER,
               delete_pending INTEGER NOT NULL DEFAULT 0 CHECK(delete_pending IN (0, 1))
           ) STRICT;
 
@@ -195,14 +195,14 @@ fn migrate_progress_posts_without_dispatched(connection: &Connection) -> rusqlit
              last_send_at INTEGER,
               ended INTEGER NOT NULL DEFAULT 0 CHECK(ended IN (0, 1)),
               cap_noticed INTEGER NOT NULL DEFAULT 0 CHECK(cap_noticed IN (0, 1)),
-              create_retry_noticed_at INTEGER,
+              retry_noticed_at INTEGER,
               delete_pending INTEGER NOT NULL DEFAULT 0 CHECK(delete_pending IN (0, 1))
          ) STRICT;
          INSERT INTO progress_posts_new(
              ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
              pending_body, post_body, prepared_event_id, prepared_created_at,
               post_event_id, edit_count, last_send_at, ended, cap_noticed,
-              create_retry_noticed_at, delete_pending
+              retry_noticed_at, delete_pending
          )
          SELECT ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
                 CASE
@@ -1023,7 +1023,7 @@ impl HostRepository for SqliteRepository {
                  ask_id, channel_id, reply_to_event_id, thread_root_event_id, opened_at,
                  pending_body, post_body, prepared_event_id, prepared_created_at,
                  post_event_id, edit_count, last_send_at, ended, cap_noticed,
-                 create_retry_noticed_at, delete_pending
+                 retry_noticed_at, delete_pending
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(ask_id) DO UPDATE SET
                  pending_body = excluded.pending_body,
@@ -1039,7 +1039,7 @@ impl HostRepository for SqliteRepository {
                  last_send_at = excluded.last_send_at,
                   ended = excluded.ended,
                   cap_noticed = excluded.cap_noticed,
-                  create_retry_noticed_at = excluded.create_retry_noticed_at,
+                  retry_noticed_at = excluded.retry_noticed_at,
                   delete_pending = excluded.delete_pending",
             params![
                 post.ask_id,
@@ -1056,7 +1056,7 @@ impl HostRepository for SqliteRepository {
                 post.last_send_at,
                 i64::from(post.ended),
                 i64::from(post.cap_noticed),
-                post.create_retry_noticed_at,
+                post.retry_noticed_at,
                 i64::from(post.delete_pending),
             ],
         )?;
@@ -1097,7 +1097,7 @@ impl HostRepository for SqliteRepository {
 const PROGRESS_SELECT: &str = "SELECT ask_id, channel_id, reply_to_event_id, thread_root_event_id,
         opened_at, pending_body, post_body, prepared_event_id, prepared_created_at,
         post_event_id, edit_count, last_send_at, ended, cap_noticed,
-        create_retry_noticed_at, delete_pending
+        retry_noticed_at, delete_pending
  FROM progress_posts";
 
 const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
@@ -1114,7 +1114,7 @@ const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
             p.opened_at, p.pending_body, p.post_body, p.prepared_event_id,
              p.prepared_created_at, p.post_event_id, p.edit_count,
              p.last_send_at, p.ended, p.cap_noticed,
-             p.create_retry_noticed_at, p.delete_pending,
+             p.retry_noticed_at, p.delete_pending,
              t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
             t.reply_to_event_id, t.state, t.opened_at
      FROM pending AS p
@@ -1148,7 +1148,7 @@ fn read_progress_post(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProgressPost>
         last_send_at: row.get(11)?,
         ended: ended != 0,
         cap_noticed: cap_noticed != 0,
-        create_retry_noticed_at: row.get(14)?,
+        retry_noticed_at: row.get(14)?,
         delete_pending: row.get::<_, i64>(15)? != 0,
     })
 }
@@ -1260,7 +1260,7 @@ mod tests {
             last_send_at: None,
             ended: false,
             cap_noticed: false,
-            create_retry_noticed_at: None,
+            retry_noticed_at: None,
             delete_pending: false,
         }
     }
