@@ -501,6 +501,15 @@ where
             ));
             Ok(())
         }
+        SendOutcome::PrepareFailed(error) => {
+            notice(&format!(
+                "progress post for ask {} could not be built; progress ended: {error}",
+                post.ask_id
+            ));
+            post.ended = true;
+            post.pending_body = None;
+            repository.save_progress_post(&post)
+        }
         SendOutcome::Rejected(error) => {
             notice(&format!(
                 "progress post for ask {} was rejected; progress ended: {error}",
@@ -1110,6 +1119,30 @@ mod tests {
         assert_eq!(publisher.sends.lock().unwrap().len(), 1);
         assert!(repository.progress_post("ask-1").unwrap().unwrap().ended);
         assert_eq!(notices.len(), 1);
+    }
+
+    #[test]
+    fn create_build_failure_keeps_its_operator_notice() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "working", 1_005).unwrap();
+        *publisher.fail_prepare.lock().unwrap() =
+            Some(PublishError::Build("invalid event".to_owned()));
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            1_000 + PROGRESS_INITIAL_HOLD_SECS,
+        );
+        assert!(publisher.sends.lock().unwrap().is_empty());
+        assert!(repository.progress_post("ask-1").unwrap().unwrap().ended);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("could not be built"));
     }
 
     #[test]

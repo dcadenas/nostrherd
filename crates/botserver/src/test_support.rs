@@ -16,6 +16,7 @@ pub(crate) struct FakePublisher {
     pub(crate) reply_to: Mutex<Vec<Option<String>>>,
     pub(crate) prepared: Mutex<Vec<OutboundAttempt>>,
     pub(crate) sends: Mutex<Vec<String>>,
+    pub(crate) fail_prepare: Mutex<Option<PublishError>>,
     pub(crate) fail: Mutex<Option<PublishError>>,
 }
 
@@ -35,6 +36,9 @@ impl OutboundPublisher for FakePublisher {
     type Error = PublishError;
 
     fn prepare(&self, attempt: &OutboundAttempt) -> Result<PreparedOutbound, Self::Error> {
+        if let Some(error) = self.fail_prepare.lock().expect("fail_prepare").take() {
+            return Err(error);
+        }
         let created_at = attempt.prepared_created_at.unwrap_or(1_700_000_000);
         let event_id = attempt
             .prepared_event_id

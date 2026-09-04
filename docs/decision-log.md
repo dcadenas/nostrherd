@@ -597,13 +597,11 @@ post. Queued turns have no ask id and therefore no progress. Progress
 for a turn that is not open, or whose outbound attempt is already
 dispatched, ACKs without relay.
 
-Durability (D28): the host records the progress row (post id,
-dispatched flag, edit count, last send time, pending body) before it
-ACKs the delivery, before `send`, and before each `edit`; relay
-happens on the refresh tick, never in the delivery handler. A crash
-after dispatch without a stored id never creates a second progress
-post for that ask; a create that was dispatched but never stored an id
-ends progress for that ask with one operator notice. A lost edit is
+Durability (D28): the host records the progress row (post id, prepared
+event id, edit count, last send time, pending body) before it ACKs the
+delivery, before `send`, and before each `edit`; relay happens on the
+refresh tick, never in the delivery handler. A crash after preparation
+without a stored accepted id redelivers the same prepared event. A lost edit is
 superseded by the next body. Progress publish and edit failures MUST
 NOT fail the turn and MUST NOT hold the ACK. `retryable` is not
 consulted for progress.
@@ -620,11 +618,16 @@ time, stored as `turns.opened_at` when the ask opens; an open turn
 recorded before that column existed counts from its first progress
 delivery. The 1024-byte cap includes the trailing `…`, applied to the
 unstamped body before the `[{bot-id}]:` stamp. The create is recorded
-with its prepared event id before send (D43), so a create dispatched
+with its prepared event id before send (D43), so a prepared create
 without an accepted id is redelivered under the same id on the next
-tick and relay-deduped; the "ends progress with one operator notice"
-branch remains for a row dispatched with no stored id. A non-retryable
-create rejection also ends progress for that ask with one notice.
+tick and relay-deduped. A build failure or non-retryable create rejection
+ends progress for that ask with one cause-specific notice.
+
+Implementation notes (issue 64): progress create uses the shared D28/D43
+prepare-record-send sequence. A recorded prepared event id is the durable
+evidence that send may have been invoked; `progress_posts` no longer stores a
+separate `dispatched` flag. Legacy rows whose old dispatched flag was set but
+whose prepared id was absent are ended during migration and are never resent.
 
 ## D43. Host publishes over its own nostr connection
 

@@ -691,7 +691,7 @@ where
                 .map_err(OutboxError::Repository)?;
             Ok(InboxAction::Ack)
         }
-        SendOutcome::Rejected(error) => {
+        SendOutcome::PrepareFailed(error) | SendOutcome::Rejected(error) => {
             notice(&format!(
                 "not retrying outbound for tell {message_id}: {error}"
             ));
@@ -710,6 +710,8 @@ where
 pub(crate) enum SendOutcome<E> {
     /// A relay accepted the event.
     Accepted(String),
+    /// The event could not be built and must not be sent.
+    PrepareFailed(E),
     /// The event was not sent and must not be sent again.
     Rejected(E),
     /// The event was not accepted; redelivering is safe.
@@ -727,7 +729,7 @@ where
 {
     let prepared = match publisher.prepare(to_publish) {
         Ok(prepared) => prepared,
-        Err(error) => return Ok(SendOutcome::Rejected(error)),
+        Err(error) => return Ok(SendOutcome::PrepareFailed(error)),
     };
     if to_publish.prepared_event_id.is_none() {
         to_publish.prepared_event_id = Some(prepared.event_id().to_owned());
@@ -956,7 +958,7 @@ where
                 ));
             }
         }
-        SendOutcome::Rejected(error) => {
+        SendOutcome::PrepareFailed(error) | SendOutcome::Rejected(error) => {
             notice(&format!("not retrying outbound for ask {ask_id}: {error}"));
             let _ = repository
                 .set_turn_state(ask_id, TurnState::Failed)
