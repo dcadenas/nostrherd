@@ -766,6 +766,7 @@ where
         SendOutcome::Accepted(event_id) => {
             post.post_event_id = Some(event_id);
             post.last_send_at = Some(now);
+            post.retry_noticed_at = None;
             repository.save_progress_post(&post)
         }
         SendOutcome::Retry(error) => {
@@ -1772,6 +1773,54 @@ mod tests {
         }
         assert_eq!(publisher.sends.lock().unwrap().len(), 300);
         assert_eq!(notices.len(), 10, "at most one notice per 30 seconds");
+    }
+
+    #[test]
+    fn accepted_create_starts_a_new_retry_notice_episode() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "start", 1_005).unwrap();
+        *publisher.fail.lock().unwrap() = Some(PublishError::NotAccepted {
+            detail: "relay unavailable".to_owned(),
+        });
+        let created = 1_000 + PROGRESS_INITIAL_HOLD_SECS;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created,
+        );
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created + 1,
+        );
+        assert!(repository
+            .progress_post("ask-1")
+            .unwrap()
+            .unwrap()
+            .retry_noticed_at
+            .is_none());
+
+        record_progress(&mut repository, &mut quiet(), &turn, "edit", created + 2).unwrap();
+        *relay.fail_edit.lock().unwrap() = true;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created + 1 + PROGRESS_EDIT_INTERVAL_SECS,
+        );
+        assert_eq!(notices.len(), 2, "the first edit failure is not suppressed");
     }
 
     #[test]

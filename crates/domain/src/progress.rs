@@ -6,7 +6,7 @@
 /// Seconds an ask must have been open before its progress post exists.
 pub const PROGRESS_INITIAL_HOLD_SECS: i64 = 20;
 
-/// Minimum seconds between two sends (create or edit) of one progress post.
+/// Minimum seconds between accepted create or edit sends for one progress post.
 pub const PROGRESS_EDIT_INTERVAL_SECS: i64 = 30;
 
 /// Maximum kind-40003 edits per ask; later bodies are dropped.
