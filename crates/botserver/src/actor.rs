@@ -1414,16 +1414,12 @@ mod tests {
     }
 
     fn asked(message_id: &str) -> CommandOutput {
-        asked_with_delivery(message_id, "accepted")
-    }
-
-    fn asked_with_delivery(message_id: &str, delivery: &str) -> CommandOutput {
         success(&serde_json::json!({
             "message_id": message_id,
             "operation_id": "ask-operation",
             "recipient": "occupant-agent",
             "recipient_incarnation": "occupant-incarnation",
-            "delivery_outcome": delivery
+            "delivery_outcome": "accepted"
         }))
     }
 
@@ -2346,7 +2342,8 @@ mod tests {
             whoami(),
             renewed(),
             whoami(),
-            asked_with_delivery("ask-rejected", "rejected"),
+            failure("rejected", "occupant rejected the prompt"),
+            pending_ask("ask-rejected"),
             cancelled(),
         ]);
         let waiter = kelpie.register_waiter().expect("waiter");
