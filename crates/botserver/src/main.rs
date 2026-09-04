@@ -403,6 +403,19 @@ struct SubscriptionErrorNotice {
     last_reported: Instant,
 }
 
+impl RelayPoll {
+    fn subscription_refresh_needed(
+        &self,
+        channel_ids: &[String],
+        active_event_ids: &[EventId],
+    ) -> bool {
+        !self.announced
+            || self.subscription_error.is_some()
+            || channel_ids != self.last_channel_ids
+            || active_event_ids != self.last_active_event_ids
+    }
+}
+
 fn update_retry(last_retry_error: &mut Option<String>, message: String) -> Option<&str> {
     if last_retry_error.as_ref() == Some(&message) {
         None
@@ -481,10 +494,7 @@ async fn poll_relay(
             }
         },
     };
-    if !poll.announced
-        || scope.channel_ids != poll.last_channel_ids
-        || scope.active_event_ids != poll.last_active_event_ids
-    {
+    if poll.subscription_refresh_needed(&scope.channel_ids, &scope.active_event_ids) {
         match refresh_subscription(
             subscriber,
             operator_pubkey,
@@ -867,6 +877,25 @@ mod tests {
             ),
             Some("refresh failed")
         );
+    }
+
+    #[test]
+    fn subscription_failure_keeps_refresh_active_after_scope_reverts() {
+        let channel_ids = vec!["channel-a".to_owned()];
+        let active_event_ids = vec![EventId::parse_hex(&"a".repeat(64)).expect("event")];
+        let poll = RelayPoll {
+            announced: true,
+            subscription_error: Some(SubscriptionErrorNotice {
+                message: "refresh failed".to_owned(),
+                last_reported: Instant::now(),
+            }),
+            last_retry_error: None,
+            last_queued_resume: Instant::now(),
+            last_channel_ids: channel_ids.clone(),
+            last_active_event_ids: active_event_ids.clone(),
+        };
+
+        assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
     }
 
     struct EnvRestore {
