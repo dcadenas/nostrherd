@@ -310,15 +310,26 @@ where
     if post.ended {
         return Ok(());
     }
-    if turn.state != TurnState::Open {
-        // Final or failure landed: keep the post, drop what was pending.
-        if post.pending_body.take().is_some() {
+    let final_dispatched = repository
+        .outbound_attempt(&post.ask_id)?
+        .is_some_and(|attempt| attempt.dispatched || attempt.outbound_event_id.is_some());
+    if turn.state != TurnState::Open || final_dispatched {
+        // The final landed or is landing (D42: a dispatched attempt means no
+        // relay): keep the post, drop what was pending. A create that never
+        // stored an accepted id ends here so the tick stops scanning it; its
+        // prepared id still excludes it from snapshots.
+        let mut changed = post.pending_body.take().is_some();
+        if post.dispatched && post.post_event_id.is_none() {
+            post.ended = true;
+            changed = true;
+        }
+        if changed {
             repository.save_progress_post(&post)?;
         }
         return Ok(());
     }
     if post.dispatched && post.post_event_id.is_none() {
-        return finish_dispatched_create(repository, publisher, notice, &turn.bot_id, post, now);
+        return finish_dispatched_create(repository, publisher, notice, post, now);
     }
     match next_progress_step(&post.clock(), now) {
         ProgressStep::Wait => Ok(()),
@@ -380,7 +391,6 @@ fn finish_dispatched_create<R, P>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    bot_id: &BotId,
     mut post: ProgressPost,
     now: i64,
 ) -> Result<(), R::Error>
@@ -389,7 +399,6 @@ where
     P: OutboundPublisher,
     P::Error: fmt::Display,
 {
-    let _ = bot_id;
     let Some(body) = post.post_body.clone() else {
         // Dispatched before a prepared id was recorded: a post may exist
         // under an id the host never stored. Never create a second one.
@@ -1230,6 +1239,96 @@ mod tests {
         let edits = relay.edits.lock().unwrap();
         assert_eq!(edits.len(), 2);
         assert_eq!(edits[1].2, "[bot]: three");
+    }
+
+    #[test]
+    fn flush_skips_relay_while_the_final_attempt_is_dispatched() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "pending", 1_005).unwrap();
+        // The final's send was invoked and hit a transient failure: the turn
+        // stays open while retry_outbound redelivers it (D28).
+        repository
+            .save_outbound_attempt(&OutboundAttempt {
+                ask_id: "ask-1".to_owned(),
+                body: "[bot]: done".to_owned(),
+                channel_id: CHANNEL.to_owned(),
+                reply_to_event_id: Some(event_id('a')),
+                thread_root_event_id: None,
+                mention: "c".repeat(64),
+                outbound_event_id: None,
+                prepared_event_id: Some("e".repeat(64)),
+                prepared_created_at: Some(1_700_000_000),
+                dispatched: true,
+            })
+            .unwrap();
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            1_000 + PROGRESS_INITIAL_HOLD_SECS,
+        );
+        assert!(publisher.sends.lock().unwrap().is_empty());
+        assert!(relay.edits.lock().unwrap().is_empty());
+        let post = repository.progress_post("ask-1").unwrap().unwrap();
+        assert!(post.pending_body.is_none(), "the pending body is discarded");
+        assert!(post.post_event_id.is_none());
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn unaccepted_create_on_a_closed_turn_is_ended_and_leaves_the_scan() {
+        let mut repository = open_repo();
+        let turn = open_turn_at(&mut repository, 1_000);
+        let publisher = FakePublisher::default();
+        let relay = RecordingProgressRelay::default();
+        let mut notices = Vec::new();
+        record_progress(&mut repository, &mut quiet(), &turn, "working", 1_005).unwrap();
+        *publisher.fail.lock().unwrap() = Some(PublishError::NotAccepted {
+            detail: "dropped".to_owned(),
+        });
+        let created = 1_000 + PROGRESS_INITIAL_HOLD_SECS;
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &turn,
+            created,
+        );
+        let post = repository.progress_post("ask-1").unwrap().unwrap();
+        assert!(post.dispatched && post.post_event_id.is_none());
+        let prepared = post.prepared_event_id.clone().unwrap();
+        repository
+            .set_turn_state("ask-1", TurnState::Posted)
+            .unwrap();
+        let posted = repository.turn_by_ask_id("ask-1").unwrap().unwrap();
+        assert_eq!(repository.progress_posts_pending_flush().unwrap().len(), 1);
+        flush_all(
+            &mut repository,
+            &publisher,
+            &relay,
+            &mut notices,
+            &posted,
+            created + 1,
+        );
+        assert_eq!(publisher.sends.lock().unwrap().len(), 1, "no redelivery");
+        let post = repository.progress_post("ask-1").unwrap().unwrap();
+        assert!(post.ended);
+        assert!(repository
+            .progress_posts_pending_flush()
+            .unwrap()
+            .is_empty());
+        // The dispatched create may have landed: it stays excluded.
+        assert_eq!(
+            repository.progress_post_event_ids(CHANNEL).unwrap(),
+            vec![EventId::parse_hex(&prepared).unwrap()]
+        );
     }
 
     #[test]
