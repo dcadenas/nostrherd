@@ -883,7 +883,7 @@ mod tests {
     fn subscription_failure_keeps_refresh_active_after_scope_reverts() {
         let channel_ids = vec!["channel-a".to_owned()];
         let active_event_ids = vec![EventId::parse_hex(&"a".repeat(64)).expect("event")];
-        let poll = RelayPoll {
+        let mut poll = RelayPoll {
             announced: true,
             subscription_error: Some(SubscriptionErrorNotice {
                 message: "refresh failed".to_owned(),
@@ -896,6 +896,8 @@ mod tests {
         };
 
         assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        poll.subscription_error = None;
+        assert!(!poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
     }
 
     struct EnvRestore {
