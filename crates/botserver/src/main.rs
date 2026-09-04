@@ -22,7 +22,9 @@ use botserver::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
 use botserver::sqlite::SqliteRepository;
-use botserver::{HostRepository, HostWaiter, KelpieClient, KelpieError, WAITER_IDEMPOTENCY_KEY};
+use botserver::{
+    unix_now, HostRepository, HostWaiter, KelpieClient, KelpieError, WAITER_IDEMPOTENCY_KEY,
+};
 use botserver_domain::{Bot, BotId, EventId};
 use clap::Parser;
 use futures::StreamExt;
@@ -237,16 +239,6 @@ fn register_host_waiter<'a>(
         }
         Err(error) => Err(error.into()),
     }
-}
-
-fn unix_now() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    )
-    .unwrap_or_default()
 }
 
 fn replay_since(repository: &SqliteRepository) -> Result<Timestamp, HostError> {
@@ -689,7 +681,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
                         eprintln!("outbound retry failed: {error}");
                     }
                     // Progress relays on the tick, never in the delivery handler (D42).
-                    if let Err(error) = actor.flush_progress(&publisher, unix_now()) {
+                    if let Err(error) = actor.flush_progress(&publisher, unix_now().unwrap_or_default()) {
                         eprintln!("progress flush failed: {error}");
                     }
                 }

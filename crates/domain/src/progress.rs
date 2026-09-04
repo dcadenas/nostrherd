@@ -48,8 +48,6 @@ pub struct ProgressClock {
     pub opened_at: i64,
     /// Last accepted send (create or edit), if any.
     pub last_send_at: Option<i64>,
-    /// Kind-40003 edits already sent for this ask.
-    pub edit_count: u32,
     /// Whether the progress post exists on the relay.
     pub post_exists: bool,
     /// Whether a newer body is waiting to be sent.
@@ -65,8 +63,6 @@ pub enum ProgressStep {
     Create,
     /// Edit the post in place with the newest pending body.
     Edit,
-    /// The edit cap is reached; drop the pending body.
-    Capped,
 }
 
 /// Decide the next step for one progress post at `now`.
@@ -81,9 +77,6 @@ pub fn next_progress_step(clock: &ProgressClock, now: i64) -> ProgressStep {
         } else {
             ProgressStep::Wait
         };
-    }
-    if clock.edit_count >= PROGRESS_EDIT_CAP {
-        return ProgressStep::Capped;
     }
     match clock.last_send_at {
         Some(last) if now.saturating_sub(last) < PROGRESS_EDIT_INTERVAL_SECS => ProgressStep::Wait,
@@ -131,11 +124,10 @@ mod tests {
         assert!(without_marker.chars().all(|character| character == '🦀'));
     }
 
-    fn clock(post_exists: bool, edit_count: u32, last_send_at: Option<i64>) -> ProgressClock {
+    fn clock(post_exists: bool, last_send_at: Option<i64>) -> ProgressClock {
         ProgressClock {
             opened_at: 1_000,
             last_send_at,
-            edit_count,
             post_exists,
             pending_body: true,
         }
@@ -143,17 +135,17 @@ mod tests {
 
     #[test]
     fn no_pending_body_waits_regardless_of_time() {
-        let mut idle = clock(false, 0, None);
+        let mut idle = clock(false, None);
         idle.pending_body = false;
         assert_eq!(next_progress_step(&idle, 1_000_000), ProgressStep::Wait);
-        let mut posted = clock(true, 3, Some(0));
+        let mut posted = clock(true, Some(0));
         posted.pending_body = false;
         assert_eq!(next_progress_step(&posted, 1_000_000), ProgressStep::Wait);
     }
 
     #[test]
     fn create_waits_for_the_initial_hold_from_open_time() {
-        let waiting = clock(false, 0, None);
+        let waiting = clock(false, None);
         assert_eq!(
             next_progress_step(&waiting, 1_000 + PROGRESS_INITIAL_HOLD_SECS - 1),
             ProgressStep::Wait
@@ -166,24 +158,13 @@ mod tests {
 
     #[test]
     fn edit_waits_for_the_interval_since_the_last_send() {
-        let posted = clock(true, 1, Some(2_000));
+        let posted = clock(true, Some(2_000));
         assert_eq!(
             next_progress_step(&posted, 2_000 + PROGRESS_EDIT_INTERVAL_SECS - 1),
             ProgressStep::Wait
         );
         assert_eq!(
             next_progress_step(&posted, 2_000 + PROGRESS_EDIT_INTERVAL_SECS),
-            ProgressStep::Edit
-        );
-    }
-
-    #[test]
-    fn edit_cap_drops_the_pending_body() {
-        let at_cap = clock(true, PROGRESS_EDIT_CAP, Some(0));
-        assert_eq!(next_progress_step(&at_cap, 1_000_000), ProgressStep::Capped);
-        let below_cap = clock(true, PROGRESS_EDIT_CAP - 1, Some(0));
-        assert_eq!(
-            next_progress_step(&below_cap, 1_000_000),
             ProgressStep::Edit
         );
     }

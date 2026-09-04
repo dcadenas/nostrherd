@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use botserver_domain::buzz::{self, BuzzEvent};
 use botserver_domain::{
@@ -342,7 +342,7 @@ impl OutboundPublisher for BuzzPublisher {
     fn prepare(&self, attempt: &OutboundAttempt) -> Result<PreparedOutbound, Self::Error> {
         let created_at = attempt
             .prepared_created_at
-            .unwrap_or_else(current_timestamp);
+            .unwrap_or_else(|| crate::unix_now().unwrap_or_default());
         let event = attempt_buzz_event(attempt);
         let mut builder = EventBuilder::new(Kind::Custom(event.kind()), event.content());
         for tag in event.tags() {
@@ -455,16 +455,6 @@ fn attempt_buzz_event(attempt: &OutboundAttempt) -> BuzzEvent {
         &thread_tags,
         Some(&attempt.mention),
     )
-}
-
-fn current_timestamp() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or_default(),
-    )
-    .unwrap_or_default()
 }
 
 /// Classify one inbox delivery against a persisted turn.
@@ -690,7 +680,11 @@ where
     }
     let mut to_publish = attempt.clone();
     to_publish.body = stamp_outbound(&attempt.body, &outbound_prefix_for(bot_id));
-    match record_and_send(repository, publisher, &mut to_publish)? {
+    match record_and_send(publisher, &mut to_publish, |attempt| {
+        repository.save_outbound_attempt(attempt)
+    })
+    .map_err(OutboxError::Repository)?
+    {
         SendOutcome::Accepted(event_id) => {
             let _ = repository
                 .mark_outbound_accepted(message_id, &event_id)
@@ -707,14 +701,13 @@ where
     }
 }
 
-/// Prepare, record the prepared id, and send one stamped attempt.
 /// Outcome of [`record_and_send`]: prepare, record, and send one
 /// stamped attempt.
 ///
 /// A build failure is terminal for the attempt; a retryable transport
 /// failure keeps the recorded prepared id so the retry redelivers the
 /// same event and the relay dedups (D43).
-enum SendOutcome<E> {
+pub(crate) enum SendOutcome<E> {
     /// A relay accepted the event.
     Accepted(String),
     /// The event was not sent and must not be sent again.
@@ -723,18 +716,13 @@ enum SendOutcome<E> {
     Retry(E),
 }
 
-type SendOutcomeResult<R, P> = Result<
-    SendOutcome<<P as OutboundPublisher>::Error>,
-    OutboxError<<R as HostRepository>::Error, <P as OutboundPublisher>::Error>,
->;
-
-fn record_and_send<R, P>(
-    repository: &mut R,
+/// Prepare, durably record, and send one stamped attempt.
+pub(crate) fn record_and_send<P, E>(
     publisher: &P,
     to_publish: &mut OutboundAttempt,
-) -> SendOutcomeResult<R, P>
+    mut save: impl FnMut(&OutboundAttempt) -> Result<(), E>,
+) -> Result<SendOutcome<P::Error>, E>
 where
-    R: HostRepository,
     P: OutboundPublisher,
 {
     let prepared = match publisher.prepare(to_publish) {
@@ -746,17 +734,13 @@ where
         to_publish.prepared_created_at = Some(prepared.created_at());
     }
     to_publish.dispatched = true;
-    repository
-        .save_outbound_attempt(to_publish)
-        .map_err(OutboxError::Repository)?;
+    save(to_publish)?;
     match publisher.publish(&prepared) {
         Ok(event_id) => Ok(SendOutcome::Accepted(event_id)),
         Err(error) if !P::retryable(&error) => Ok(SendOutcome::Rejected(error)),
         Err(error) => {
             to_publish.dispatched = false;
-            repository
-                .save_outbound_attempt(to_publish)
-                .map_err(OutboxError::Repository)?;
+            save(to_publish)?;
             Ok(SendOutcome::Retry(error))
         }
     }
@@ -826,8 +810,14 @@ where
         Decision::AckWithoutPublish => Ok(InboxAction::Ack),
         Decision::Progress { body } => {
             if let Some(turn) = turn {
-                progress::record_progress(repository, notice, &turn, &body, current_timestamp())
-                    .map_err(OutboxError::Repository)?;
+                progress::record_progress(
+                    repository,
+                    notice,
+                    &turn,
+                    &body,
+                    crate::unix_now().unwrap_or_default(),
+                )
+                .map_err(OutboxError::Repository)?;
             }
             Ok(InboxAction::Ack)
         }
@@ -895,10 +885,8 @@ where
         .map_or_else(String::new, |event: &IndexedRelayEvent| {
             event.author_pubkey.clone()
         });
-    let thread_root_event_id = indexed.as_ref().and_then(|event: &IndexedRelayEvent| {
-        let tags = serde_json::from_str::<Vec<Vec<String>>>(&event.tags_json).unwrap_or_default();
-        buzz::reply_thread_root(&turn.event_id, &tags)
-    });
+    let thread_root_event_id =
+        crate::thread_root_for(repository, &turn.event_id).map_err(OutboxError::Repository)?;
     let mut attempt = repository
         .outbound_attempt(ask_id)
         .map_err(OutboxError::Repository)?
@@ -953,7 +941,11 @@ where
     }
     let mut to_publish = attempt.clone();
     to_publish.body = stamp_outbound(&attempt.body, &outbound_prefix_for(&turn.bot_id));
-    match record_and_send(repository, publisher, &mut to_publish)? {
+    match record_and_send(publisher, &mut to_publish, |attempt| {
+        repository.save_outbound_attempt(attempt)
+    })
+    .map_err(OutboxError::Repository)?
+    {
         SendOutcome::Accepted(event_id) => {
             if !repository
                 .mark_outbound_accepted(ask_id, &event_id)
@@ -1026,77 +1018,9 @@ impl InFlightReaction for RecordingInFlightReaction {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
-    use rusqlite::Connection;
-
     use super::*;
-    use crate::sqlite::SqliteRepository;
-    use crate::{NewTurn, SessionRecord};
+    use crate::test_support::{event_id, fake_event_id, open_repo, open_repo_for};
     use botserver_domain::BotId;
-
-    #[derive(Debug)]
-    struct FakePublisher {
-        calls: Mutex<Vec<String>>,
-        reply_to: Mutex<Vec<Option<String>>>,
-        sends: Mutex<Vec<String>>,
-        fail: Mutex<bool>,
-    }
-
-    /// Deterministic stand-in id: the same attempt content and timestamp
-    /// prepare to the same id, which is what a redelivery relies on.
-    fn fake_event_id(attempt: &OutboundAttempt, created_at: i64) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        attempt.body.hash(&mut hasher);
-        attempt.channel_id.hash(&mut hasher);
-        attempt.reply_to_event_id.hash(&mut hasher);
-        attempt.thread_root_event_id.hash(&mut hasher);
-        attempt.mention.hash(&mut hasher);
-        created_at.hash(&mut hasher);
-        format!("{:064}", hasher.finish())
-    }
-
-    impl OutboundPublisher for FakePublisher {
-        type Error = PublishError;
-
-        fn prepare(&self, attempt: &OutboundAttempt) -> Result<PreparedOutbound, Self::Error> {
-            let created_at = attempt.prepared_created_at.unwrap_or(1_700_000_000);
-            let event_id = attempt
-                .prepared_event_id
-                .clone()
-                .unwrap_or_else(|| fake_event_id(attempt, created_at));
-            self.calls.lock().expect("calls").push(attempt.body.clone());
-            self.reply_to.lock().expect("reply_to").push(
-                attempt
-                    .reply_to_event_id
-                    .as_ref()
-                    .map(|event_id| event_id.as_str().to_owned()),
-            );
-            let signed =
-                nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(9), "")
-                    .finalize(&nostr_sdk::prelude::Keys::generate())
-                    .expect("dummy event");
-            Ok(PreparedOutbound::from_parts(signed, event_id, created_at))
-        }
-
-        fn publish(&self, prepared: &PreparedOutbound) -> Result<String, Self::Error> {
-            self.sends
-                .lock()
-                .expect("sends")
-                .push(prepared.event_id().to_owned());
-            if *self.fail.lock().expect("fail") {
-                return Err(PublishError::NotAccepted {
-                    detail: "connection dropped before OK".to_owned(),
-                });
-            }
-            Ok(prepared.event_id().to_owned())
-        }
-
-        fn retryable(error: &Self::Error) -> bool {
-            error.is_retryable()
-        }
-    }
 
     struct NonRetryPublisher;
 
@@ -1127,10 +1051,6 @@ mod tests {
         }
     }
 
-    fn event_id(character: char) -> EventId {
-        EventId::parse_hex(&character.to_string().repeat(64)).expect("event")
-    }
-
     fn delivery(disposition: &str, reply_to: &str, body: &str) -> InboxDelivery {
         parse_test_delivery(disposition, reply_to, body, "reply")
     }
@@ -1152,62 +1072,6 @@ mod tests {
             }
         }))
         .expect("delivery")
-    }
-
-    fn open_repo() -> (SqliteRepository, FakePublisher) {
-        open_repo_for("bot")
-    }
-
-    fn open_repo_for(bot: &str) -> (SqliteRepository, FakePublisher) {
-        let mut repository =
-            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
-                .expect("repository");
-        let bot_id = BotId::new(bot).expect("bot");
-        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
-        repository
-            .save_session(&SessionRecord {
-                bot_id: bot_id.clone(),
-                channel_id: channel_id.to_owned(),
-                session_name: format!("{bot}-foobar"),
-                occupant_logical_id: Some("occupant-agent".to_owned()),
-                renew_id: None,
-                ask_context_event_id: None,
-                ask_context_created_at: None,
-            })
-            .unwrap();
-        repository
-            .enqueue_unprocessed_turn(&NewTurn {
-                bot_id: bot_id.clone(),
-                channel_id: channel_id.to_owned(),
-                event_id: event_id('a'),
-                reply_to_event_id: None,
-            })
-            .unwrap();
-        repository
-            .open_next_turn(&bot_id, channel_id, "ask-1")
-            .unwrap();
-        repository
-            .index_event(
-                &IndexedRelayEvent {
-                    event_id: event_id('a'),
-                    author_pubkey: "c".repeat(64),
-                    created_at: 1,
-                    kind: 9,
-                    content: format!("{bot}: hello"),
-                    tags_json: "[]".to_owned(),
-                    channel_id: Some(channel_id.to_owned()),
-                    target_event_id: None,
-                },
-                false,
-            )
-            .unwrap();
-        let publisher = FakePublisher {
-            calls: Mutex::new(Vec::new()),
-            reply_to: Mutex::new(Vec::new()),
-            sends: Mutex::new(Vec::new()),
-            fail: Mutex::new(false),
-        };
-        (repository, publisher)
     }
 
     fn notices() -> impl FnMut(&str) {
@@ -1241,7 +1105,7 @@ mod tests {
         assert_eq!(post.pending_body.as_deref(), Some("working"));
         assert_eq!(post.reply_to_event_id, event_id('a'));
         assert!(post.post_event_id.is_none());
-        assert!(!post.dispatched);
+        assert!(post.prepared_event_id.is_none());
     }
 
     #[test]
@@ -1895,7 +1759,9 @@ mod tests {
     #[test]
     fn retryable_publish_failure_keeps_in_flight_reaction() {
         let (mut repository, publisher) = open_repo();
-        *publisher.fail.lock().expect("fail") = true;
+        *publisher.fail.lock().expect("fail") = Some(PublishError::NotAccepted {
+            detail: "connection dropped before OK".to_owned(),
+        });
         let reactions = RecordingInFlightReaction::default();
         let error = handle_delivery_with(
             &mut repository,

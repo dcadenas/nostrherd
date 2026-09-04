@@ -9,14 +9,15 @@
 use std::fmt;
 use std::sync::Arc;
 
-use botserver_domain::buzz;
 use botserver_domain::progress::{
     cap_progress_body, next_progress_step, ProgressClock, ProgressStep, PROGRESS_EDIT_CAP,
 };
 use botserver_domain::{outbound_prefix_for, stamp_outbound, BotId, EventId, TurnState};
 
-use crate::outbox::{OutboundAttempt, OutboundPublisher, PublishError};
-use crate::{HostRepository, IndexedRelayEvent, TurnRecord};
+use crate::outbox::{
+    record_and_send, OutboundAttempt, OutboundPublisher, PublishError, SendOutcome,
+};
+use crate::{HostRepository, TurnRecord};
 
 /// Durable progress state for one ask (D42 Durability).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,8 +38,6 @@ pub struct ProgressPost {
     /// Create event id recorded before send (D28, amended by D43).
     pub prepared_event_id: Option<String>,
     pub prepared_created_at: Option<i64>,
-    /// The create send was invoked at least once.
-    pub dispatched: bool,
     /// Create accepted by the relay; edits and the delete target this id.
     pub post_event_id: Option<String>,
     pub edit_count: u32,
@@ -56,7 +55,6 @@ impl ProgressPost {
         ProgressClock {
             opened_at: self.opened_at,
             last_send_at: self.last_send_at,
-            edit_count: self.edit_count,
             post_exists: self.post_event_id.is_some(),
             pending_body: self.pending_body.is_some(),
         }
@@ -64,16 +62,16 @@ impl ProgressPost {
 
     /// The relay event the delete must target, if a create may have landed.
     fn delete_target(&self) -> Option<EventId> {
-        let id = self.post_event_id.as_deref().or_else(|| {
-            self.dispatched
-                .then_some(self.prepared_event_id.as_deref()?)
-        })?;
+        let id = self
+            .post_event_id
+            .as_deref()
+            .or(self.prepared_event_id.as_deref())?;
         EventId::parse_hex(id)
     }
 
     fn create_attempt(&self, stamped_body: &str) -> OutboundAttempt {
         OutboundAttempt {
-            ask_id: format!("progress:{}", self.ask_id),
+            ask_id: self.ask_id.clone(),
             body: stamped_body.to_owned(),
             channel_id: self.channel_id.clone(),
             reply_to_event_id: Some(self.reply_to_event_id.clone()),
@@ -83,7 +81,7 @@ impl ProgressPost {
             outbound_event_id: self.post_event_id.clone(),
             prepared_event_id: self.prepared_event_id.clone(),
             prepared_created_at: self.prepared_created_at,
-            dispatched: self.dispatched,
+            dispatched: self.prepared_event_id.is_some(),
         }
     }
 }
@@ -331,14 +329,7 @@ fn new_progress_post<R: HostRepository>(
     ask_id: &str,
     now: i64,
 ) -> Result<ProgressPost, R::Error> {
-    let thread_root_event_id =
-        repository
-            .indexed_event(&turn.event_id)?
-            .and_then(|event: IndexedRelayEvent| {
-                let tags =
-                    serde_json::from_str::<Vec<Vec<String>>>(&event.tags_json).unwrap_or_default();
-                buzz::reply_thread_root(&turn.event_id, &tags)
-            });
+    let thread_root_event_id = crate::thread_root_for(repository, &turn.event_id)?;
     Ok(ProgressPost {
         ask_id: ask_id.to_owned(),
         channel_id: turn.channel_id.clone(),
@@ -349,7 +340,6 @@ fn new_progress_post<R: HostRepository>(
         post_body: None,
         prepared_event_id: None,
         prepared_created_at: None,
-        dispatched: false,
         post_event_id: None,
         edit_count: 0,
         last_send_at: None,
@@ -458,24 +448,13 @@ where
         }
         return Ok(());
     }
-    if post.dispatched && post.post_event_id.is_none() {
-        return finish_dispatched_create(repository, publisher, notice, post, now);
+    if post.prepared_event_id.is_some() && post.post_event_id.is_none() {
+        return create_post(repository, publisher, notice, &turn.bot_id, post, now);
     }
     match next_progress_step(&post.clock(), now) {
         ProgressStep::Wait => Ok(()),
         ProgressStep::Create => create_post(repository, publisher, notice, &turn.bot_id, post, now),
         ProgressStep::Edit => edit_post(repository, relay, notice, &turn.bot_id, post, now),
-        ProgressStep::Capped => {
-            post.pending_body = None;
-            if !post.cap_noticed {
-                notice(&format!(
-                    "progress for ask {} reached the {PROGRESS_EDIT_CAP}-edit cap; later bodies are dropped",
-                    post.ask_id
-                ));
-                post.cap_noticed = true;
-            }
-            repository.save_progress_post(&post)
-        }
     }
 }
 
@@ -492,99 +471,29 @@ where
     P: OutboundPublisher,
     P::Error: fmt::Display,
 {
-    let Some(body) = post.pending_body.take() else {
+    let body = post.post_body.clone().or_else(|| {
+        post.pending_body
+            .take()
+            .map(|body| stamp_outbound(&body, &outbound_prefix_for(bot_id)))
+    });
+    let Some(stamped) = body else {
         return Ok(());
     };
-    let stamped = stamp_outbound(&body, &outbound_prefix_for(bot_id));
-    let attempt = post.create_attempt(&stamped);
-    let prepared = match publisher.prepare(&attempt) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            notice(&format!(
-                "progress post for ask {} could not be built; progress ended: {error}",
-                post.ask_id
-            ));
-            post.ended = true;
-            return repository.save_progress_post(&post);
-        }
-    };
     post.post_body = Some(stamped);
-    post.prepared_event_id = Some(prepared.event_id().to_owned());
-    post.prepared_created_at = Some(prepared.created_at());
-    post.dispatched = true;
-    // Record before send (D28): a crash here redelivers the same id.
-    repository.save_progress_post(&post)?;
-    send_create(repository, publisher, notice, post, &prepared, now)
-}
-
-fn finish_dispatched_create<R, P>(
-    repository: &mut R,
-    publisher: &P,
-    notice: &mut impl FnMut(&str),
-    mut post: ProgressPost,
-    now: i64,
-) -> Result<(), R::Error>
-where
-    R: HostRepository,
-    P: OutboundPublisher,
-    P::Error: fmt::Display,
-{
-    let Some(body) = post.post_body.clone() else {
-        // Dispatched before a prepared id was recorded: a post may exist
-        // under an id the host never stored. Never create a second one.
-        notice(&format!(
-            "progress post for ask {} was dispatched without a stored id; progress ended",
-            post.ask_id
-        ));
-        post.ended = true;
-        post.pending_body = None;
-        return repository.save_progress_post(&post);
-    };
-    if post.prepared_event_id.is_none() {
-        notice(&format!(
-            "progress post for ask {} was dispatched without a stored id; progress ended",
-            post.ask_id
-        ));
-        post.ended = true;
-        post.pending_body = None;
-        return repository.save_progress_post(&post);
-    }
-    let attempt = post.create_attempt(&body);
-    let prepared = match publisher.prepare(&attempt) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            notice(&format!(
-                "progress post for ask {} could not be rebuilt; progress ended: {error}",
-                post.ask_id
-            ));
-            post.ended = true;
-            post.pending_body = None;
-            return repository.save_progress_post(&post);
-        }
-    };
-    send_create(repository, publisher, notice, post, &prepared, now)
-}
-
-fn send_create<R, P>(
-    repository: &mut R,
-    publisher: &P,
-    notice: &mut impl FnMut(&str),
-    mut post: ProgressPost,
-    prepared: &crate::outbox::PreparedOutbound,
-    now: i64,
-) -> Result<(), R::Error>
-where
-    R: HostRepository,
-    P: OutboundPublisher,
-    P::Error: fmt::Display,
-{
-    match publisher.publish(prepared) {
-        Ok(event_id) => {
+    let mut attempt = post.create_attempt(post.post_body.as_deref().expect("post body"));
+    let outcome = record_and_send(publisher, &mut attempt, |attempt| {
+        post.prepared_event_id
+            .clone_from(&attempt.prepared_event_id);
+        post.prepared_created_at = attempt.prepared_created_at;
+        repository.save_progress_post(&post)
+    })?;
+    match outcome {
+        SendOutcome::Accepted(event_id) => {
             post.post_event_id = Some(event_id);
             post.last_send_at = Some(now);
             repository.save_progress_post(&post)
         }
-        Err(error) if P::retryable(&error) => {
+        SendOutcome::Retry(error) => {
             // The prepared id stays recorded; the next tick redelivers it.
             notice(&format!(
                 "progress post for ask {} was not accepted; retrying: {error}",
@@ -592,7 +501,7 @@ where
             ));
             Ok(())
         }
-        Err(error) => {
+        SendOutcome::Rejected(error) => {
             notice(&format!(
                 "progress post for ask {} was rejected; progress ended: {error}",
                 post.ask_id
@@ -693,118 +602,13 @@ mod tests {
     use botserver_domain::progress::{
         PROGRESS_BODY_MAX_BYTES, PROGRESS_EDIT_INTERVAL_SECS, PROGRESS_INITIAL_HOLD_SECS,
     };
-    use nostr_sdk::prelude::FinalizeEvent;
-    use rusqlite::Connection;
 
     use super::*;
-    use crate::outbox::PreparedOutbound;
     use crate::sqlite::SqliteRepository;
-    use crate::{NewTurn, SessionRecord};
-
-    const CHANNEL: &str = "ab12cd34-5678-90ab-cdef-0123456789ab";
-
-    #[derive(Debug, Default)]
-    struct FakePublisher {
-        prepared: Mutex<Vec<OutboundAttempt>>,
-        sends: Mutex<Vec<String>>,
-        fail: Mutex<Option<PublishError>>,
-    }
-
-    fn fake_event_id(attempt: &OutboundAttempt, created_at: i64) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        attempt.body.hash(&mut hasher);
-        attempt.channel_id.hash(&mut hasher);
-        attempt.reply_to_event_id.hash(&mut hasher);
-        attempt.mention.hash(&mut hasher);
-        created_at.hash(&mut hasher);
-        format!("{:064x}", hasher.finish())
-    }
-
-    impl OutboundPublisher for FakePublisher {
-        type Error = PublishError;
-
-        fn prepare(&self, attempt: &OutboundAttempt) -> Result<PreparedOutbound, Self::Error> {
-            let created_at = attempt.prepared_created_at.unwrap_or(1_700_000_000);
-            let event_id = attempt
-                .prepared_event_id
-                .clone()
-                .unwrap_or_else(|| fake_event_id(attempt, created_at));
-            self.prepared
-                .lock()
-                .expect("prepared")
-                .push(attempt.clone());
-            let signed =
-                nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::Custom(9), "")
-                    .finalize(&nostr_sdk::prelude::Keys::generate())
-                    .expect("dummy event");
-            Ok(PreparedOutbound::from_parts(signed, event_id, created_at))
-        }
-
-        fn publish(&self, prepared: &PreparedOutbound) -> Result<String, Self::Error> {
-            self.sends
-                .lock()
-                .expect("sends")
-                .push(prepared.event_id().to_owned());
-            if let Some(error) = self.fail.lock().expect("fail").take() {
-                return Err(error);
-            }
-            Ok(prepared.event_id().to_owned())
-        }
-
-        fn retryable(error: &Self::Error) -> bool {
-            error.is_retryable()
-        }
-    }
-
-    fn event_id(character: char) -> EventId {
-        EventId::parse_hex(&character.to_string().repeat(64)).expect("event")
-    }
-
-    fn open_repo() -> SqliteRepository {
-        let mut repository =
-            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
-                .expect("repository");
-        let bot_id = BotId::new("bot").expect("bot");
-        repository
-            .save_session(&SessionRecord {
-                bot_id: bot_id.clone(),
-                channel_id: CHANNEL.to_owned(),
-                session_name: "bot-foobar".to_owned(),
-                occupant_logical_id: Some("occupant-agent".to_owned()),
-                renew_id: None,
-                ask_context_event_id: None,
-                ask_context_created_at: None,
-            })
-            .unwrap();
-        repository
-            .enqueue_unprocessed_turn(&NewTurn {
-                bot_id: bot_id.clone(),
-                channel_id: CHANNEL.to_owned(),
-                event_id: event_id('a'),
-                reply_to_event_id: None,
-            })
-            .unwrap();
-        repository
-            .open_next_turn(&bot_id, CHANNEL, "ask-1")
-            .unwrap();
-        repository
-            .index_event(
-                &IndexedRelayEvent {
-                    event_id: event_id('a'),
-                    author_pubkey: "c".repeat(64),
-                    created_at: 1,
-                    kind: 9,
-                    content: "bot: hello".to_owned(),
-                    tags_json: "[]".to_owned(),
-                    channel_id: Some(CHANNEL.to_owned()),
-                    target_event_id: None,
-                },
-                false,
-            )
-            .unwrap();
-        repository
-    }
+    use crate::test_support::{
+        event_id, open_repository as open_repo, open_repository_with_tags, quiet, FakePublisher,
+        CHANNEL,
+    };
 
     /// Fix the open time so the hold is deterministic in tests.
     fn open_turn_at(repository: &mut SqliteRepository, opened_at: i64) -> TurnRecord {
@@ -814,10 +618,6 @@ mod tests {
         repository.save_progress_post(&post).unwrap();
         turn.opened_at = Some(opened_at);
         turn
-    }
-
-    fn quiet() -> impl FnMut(&str) {
-        |_| {}
     }
 
     fn flush_all<L: ProgressRelay>(
@@ -854,7 +654,7 @@ mod tests {
         let post = repository.progress_post("ask-1").unwrap().unwrap();
         assert_eq!(post.pending_body.as_deref(), Some("working"));
         assert_eq!(post.reply_to_event_id, event_id('a'));
-        assert!(!post.dispatched);
+        assert!(post.prepared_event_id.is_none());
         flush_all(
             &mut repository,
             &publisher,
@@ -1214,7 +1014,13 @@ mod tests {
 
     #[test]
     fn crash_after_create_dispatch_redelivers_the_same_id() {
-        let mut repository = open_repo();
+        let root = event_id('b');
+        let parent = event_id('c');
+        let mut repository = open_repository_with_tags(&format!(
+            r#"[["e","{}","","root"],["e","{}","","reply"]]"#,
+            root.as_str(),
+            parent.as_str()
+        ));
         let turn = open_turn_at(&mut repository, 1_000);
         let publisher = FakePublisher::default();
         let relay = RecordingProgressRelay::default();
@@ -1233,7 +1039,7 @@ mod tests {
             created,
         );
         let post = repository.progress_post("ask-1").unwrap().unwrap();
-        assert!(post.dispatched);
+        assert!(post.prepared_event_id.is_some());
         assert!(post.post_event_id.is_none());
         let prepared_id = post
             .prepared_event_id
@@ -1261,41 +1067,16 @@ mod tests {
         );
         let sends = publisher.sends.lock().unwrap().clone();
         assert_eq!(sends, vec![prepared_id.clone(), prepared_id.clone()]);
+        assert!(publisher
+            .prepared
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|attempt| attempt.thread_root_event_id.as_ref() == Some(&root)));
         let post = repository.progress_post("ask-1").unwrap().unwrap();
         assert_eq!(post.post_event_id.as_deref(), Some(prepared_id.as_str()));
         assert_eq!(post.last_send_at, Some(created + 1));
         assert!(!post.ended);
-    }
-
-    #[test]
-    fn legacy_dispatch_without_prepared_id_ends_progress_with_one_notice() {
-        let mut repository = open_repo();
-        let turn = open_turn_at(&mut repository, 1_000);
-        let publisher = FakePublisher::default();
-        let relay = RecordingProgressRelay::default();
-        let mut post = repository.progress_post("ask-1").unwrap().unwrap();
-        post.dispatched = true;
-        post.pending_body = Some("next".to_owned());
-        repository.save_progress_post(&post).unwrap();
-        let mut notices = Vec::new();
-        flush_all(
-            &mut repository,
-            &publisher,
-            &relay,
-            &mut notices,
-            &turn,
-            1_000_000,
-        );
-        assert!(publisher.sends.lock().unwrap().is_empty());
-        assert_eq!(notices.len(), 1);
-        assert!(notices[0].contains("without a stored id"));
-        let post = repository.progress_post("ask-1").unwrap().unwrap();
-        assert!(post.ended);
-        assert!(post.pending_body.is_none());
-        assert!(repository
-            .progress_posts_pending_flush(&turn.bot_id)
-            .unwrap()
-            .is_empty());
     }
 
     #[test]
@@ -1614,7 +1395,7 @@ mod tests {
             created,
         );
         let post = repository.progress_post("ask-1").unwrap().unwrap();
-        assert!(post.dispatched && post.post_event_id.is_none());
+        assert!(post.prepared_event_id.is_some() && post.post_event_id.is_none());
         let prepared = post.prepared_event_id.clone().unwrap();
         repository
             .set_turn_state("ask-1", TurnState::Posted)
