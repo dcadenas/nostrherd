@@ -1029,7 +1029,7 @@ const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
             t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
             t.reply_to_event_id, t.state, t.opened_at
      FROM pending AS p
-     JOIN turns AS t ON t.ask_id = p.ask_id
+     CROSS JOIN turns AS t ON t.ask_id = p.ask_id
      JOIN sessions AS s ON s.id = t.session_id
      WHERE s.bot_id = ?1
      ORDER BY p.opened_at, p.ask_id";
@@ -1230,6 +1230,12 @@ mod tests {
                 .iter()
                 .any(|detail| detail.contains("progress_posts_pending_flush")),
             "query plan did not use pending index: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("turns_session_order")),
+            "query plan scanned the bot's turn history: {details:?}"
         );
     }
 
