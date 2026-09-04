@@ -33,6 +33,7 @@ use nostr_sdk::prelude::{Client, ClientNotification, Event, Keys, SignerAuthenti
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const EMPTY_REPLAY_OVERLAP_SECS: u64 = 900;
 const SUBSCRIPTION_REFRESH: Duration = Duration::from_secs(1);
+const SUBSCRIPTION_FAILURE_NOTICE_INTERVAL: Duration = Duration::from_mins(5);
 const RESUME_QUEUED_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
@@ -390,11 +391,29 @@ async fn refresh_subscription(
 
 struct RelayPoll {
     announced: bool,
-    last_subscription_error: Option<String>,
+    subscription_error: Option<SubscriptionErrorNotice>,
     last_retry_error: Option<String>,
     last_queued_resume: Instant,
     last_channel_ids: Vec<String>,
     last_active_event_ids: Vec<EventId>,
+}
+
+struct SubscriptionErrorNotice {
+    message: String,
+    last_reported: Instant,
+}
+
+impl RelayPoll {
+    fn subscription_refresh_needed(
+        &self,
+        channel_ids: &[String],
+        active_event_ids: &[EventId],
+    ) -> bool {
+        !self.announced
+            || self.subscription_error.is_some()
+            || channel_ids != self.last_channel_ids
+            || active_event_ids != self.last_active_event_ids
+    }
 }
 
 fn update_retry(last_retry_error: &mut Option<String>, message: String) -> Option<&str> {
@@ -408,6 +427,33 @@ fn update_retry(last_retry_error: &mut Option<String>, message: String) -> Optio
 
 fn note_retry(last_retry_error: &mut Option<String>, message: String) {
     if let Some(message) = update_retry(last_retry_error, message) {
+        eprintln!("{message}");
+    }
+}
+
+fn update_subscription_error(
+    notice: &mut Option<SubscriptionErrorNotice>,
+    message: String,
+    now: Instant,
+) -> Option<&str> {
+    let should_report = notice.as_ref().is_none_or(|previous| {
+        previous.message != message
+            || now.saturating_duration_since(previous.last_reported)
+                >= SUBSCRIPTION_FAILURE_NOTICE_INTERVAL
+    });
+    if should_report {
+        *notice = Some(SubscriptionErrorNotice {
+            message,
+            last_reported: now,
+        });
+        notice.as_ref().map(|current| current.message.as_str())
+    } else {
+        None
+    }
+}
+
+fn note_subscription_error(notice: &mut Option<SubscriptionErrorNotice>, message: String) {
+    if let Some(message) = update_subscription_error(notice, message, Instant::now()) {
         eprintln!("{message}");
     }
 }
@@ -448,10 +494,7 @@ async fn poll_relay(
             }
         },
     };
-    if !poll.announced
-        || scope.channel_ids != poll.last_channel_ids
-        || scope.active_event_ids != poll.last_active_event_ids
-    {
+    if poll.subscription_refresh_needed(&scope.channel_ids, &scope.active_event_ids) {
         match refresh_subscription(
             subscriber,
             operator_pubkey,
@@ -462,7 +505,7 @@ async fn poll_relay(
         .await
         {
             Ok(()) => {
-                poll.last_subscription_error = None;
+                poll.subscription_error = None;
                 poll.last_channel_ids.clone_from(&scope.channel_ids);
                 poll.last_active_event_ids
                     .clone_from(&scope.active_event_ids);
@@ -472,7 +515,7 @@ async fn poll_relay(
                 }
             }
             Err(error) => {
-                note_retry(&mut poll.last_subscription_error, error.to_string());
+                note_subscription_error(&mut poll.subscription_error, error.to_string());
             }
         }
         if !poll.announced {
@@ -641,7 +684,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut poll = RelayPoll {
         announced: false,
-        last_subscription_error: None,
+        subscription_error: None,
         last_retry_error: None,
         last_queued_resume: Instant::now(),
         last_channel_ids: Vec::new(),
@@ -797,6 +840,70 @@ mod tests {
             update_retry(&mut last, "different failure".to_owned()),
             Some("different failure")
         );
+    }
+
+    #[test]
+    fn persistent_subscription_failure_is_reported_at_a_bounded_interval() {
+        let mut notice = None;
+        let started = Instant::now();
+
+        assert_eq!(
+            update_subscription_error(&mut notice, "refresh failed".to_owned(), started),
+            Some("refresh failed")
+        );
+        assert_eq!(
+            update_subscription_error(
+                &mut notice,
+                "refresh failed".to_owned(),
+                started + SUBSCRIPTION_REFRESH,
+            ),
+            None
+        );
+        assert_eq!(
+            update_subscription_error(
+                &mut notice,
+                "refresh failed".to_owned(),
+                started + SUBSCRIPTION_FAILURE_NOTICE_INTERVAL,
+            ),
+            Some("refresh failed")
+        );
+
+        notice = None;
+        assert_eq!(
+            update_subscription_error(
+                &mut notice,
+                "refresh failed".to_owned(),
+                started + SUBSCRIPTION_REFRESH,
+            ),
+            Some("refresh failed")
+        );
+    }
+
+    #[test]
+    fn subscription_refresh_gate_covers_scope_errors_and_idle() {
+        let channel_ids = vec!["channel-a".to_owned()];
+        let active_event_ids = vec![EventId::parse_hex(&"a".repeat(64)).expect("event")];
+        let mut poll = RelayPoll {
+            announced: true,
+            subscription_error: Some(SubscriptionErrorNotice {
+                message: "refresh failed".to_owned(),
+                last_reported: Instant::now(),
+            }),
+            last_retry_error: None,
+            last_queued_resume: Instant::now(),
+            last_channel_ids: channel_ids.clone(),
+            last_active_event_ids: active_event_ids.clone(),
+        };
+
+        assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        poll.subscription_error = None;
+        assert!(!poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        poll.announced = false;
+        assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        poll.announced = true;
+        assert!(poll.subscription_refresh_needed(&["channel-b".to_owned()], &active_event_ids));
+        let other_event = EventId::parse_hex(&"b".repeat(64)).expect("event");
+        assert!(poll.subscription_refresh_needed(&channel_ids, &[other_event]));
     }
 
     struct EnvRestore {
