@@ -979,6 +979,9 @@ where
         match receipt.delivery() {
             AskDelivery::Accepted | AskDelivery::Unknown => {}
             delivery @ (AskDelivery::Rejected | AskDelivery::TargetUnavailable) => {
+                waiter
+                    .cancel(receipt.message_id(), "queued ask was not delivered")
+                    .map_err(ActorError::Kelpie)?;
                 return Err(ActorError::AskNotDelivered(delivery));
             }
         }
@@ -1411,12 +1414,16 @@ mod tests {
     }
 
     fn asked(message_id: &str) -> CommandOutput {
+        asked_with_delivery(message_id, "accepted")
+    }
+
+    fn asked_with_delivery(message_id: &str, delivery: &str) -> CommandOutput {
         success(&serde_json::json!({
             "message_id": message_id,
             "operation_id": "ask-operation",
             "recipient": "occupant-agent",
             "recipient_incarnation": "occupant-incarnation",
-            "delivery_outcome": "accepted"
+            "delivery_outcome": delivery
         }))
     }
 
@@ -2330,6 +2337,68 @@ mod tests {
                 format!("{}:2", second.event_id.as_str())
             ]
         );
+    }
+
+    #[test]
+    fn rejected_queued_ask_cancels_its_obligation() {
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            whoami(),
+            renewed(),
+            whoami(),
+            asked_with_delivery("ask-rejected", "rejected"),
+            cancelled(),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "bot: rejected", None);
+        actor
+            .repository
+            .save_session(&crate::SessionRecord {
+                bot_id: actor.bot.id().clone(),
+                channel_id: trigger.channel_id.clone(),
+                session_name: "bot-foobar".to_owned(),
+                occupant_logical_id: Some("occupant-agent".to_owned()),
+                renew_id: None,
+                ask_context_event_id: None,
+                ask_context_created_at: None,
+            })
+            .expect("session");
+        actor
+            .repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: trigger.event_id.clone(),
+                    author_pubkey: "b".repeat(64),
+                    created_at: 1,
+                    kind: 9,
+                    content: trigger.nostr_body,
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(trigger.channel_id.clone()),
+                    target_event_id: None,
+                },
+                false,
+            )
+            .expect("index");
+        actor
+            .repository
+            .enqueue_unprocessed_turn(&NewTurn {
+                bot_id: actor.bot.id().clone(),
+                channel_id: trigger.channel_id,
+                event_id: trigger.event_id,
+                reply_to_event_id: None,
+            })
+            .expect("enqueue");
+
+        assert!(matches!(
+            actor.resume_queued(&kelpie, &waiter),
+            Err(ActorError::AskNotDelivered(AskDelivery::Rejected))
+        ));
+        let calls = runner.calls.lock().expect("calls");
+        let cancel = calls
+            .iter()
+            .find(|call| call.0[1] == "cancel")
+            .expect("cancel rejected ask");
+        assert_eq!(cancel.0[2], "ask-rejected");
     }
 
     #[test]

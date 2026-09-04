@@ -218,6 +218,10 @@ continue that logical agent, and retry the ask once. Cancelling prevents stale
 obligations from accumulating; retiring the stale binding prevents two Ready
 incarnations from making later alias resolution ambiguous.
 
+The stable-key retry requires the outcome-aware prompt idempotency fix tracked
+by dcadenas/kelpie issue 37 (failed-prompt retry semantics). Deploy that Kelpie
+release before treating queued occupant recovery as live end-to-end behavior.
+
 A replacement pane has no occupant runtime, so `kelpie adopt` cannot
 bind it. The host continues the recorded id with `kelpie start
 --logical-id` on that pane. That is a new incarnation of the same
