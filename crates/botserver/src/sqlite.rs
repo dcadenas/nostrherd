@@ -2026,24 +2026,35 @@ mod tests {
                      UNIQUE(bot_id, channel_id)
                  ) STRICT;
                  CREATE TABLE turns (
-                     sequence INTEGER PRIMARY KEY,
-                     session_id INTEGER NOT NULL REFERENCES sessions(id),
-                     event_id TEXT NOT NULL,
-                     ask_id TEXT UNIQUE,
-                     reply_to_event_id TEXT,
-                     state TEXT NOT NULL
-                 ) STRICT;",
+                      sequence INTEGER PRIMARY KEY,
+                      session_id INTEGER NOT NULL REFERENCES sessions(id),
+                      event_id TEXT NOT NULL,
+                      ask_id TEXT UNIQUE,
+                      reply_to_event_id TEXT,
+                      state TEXT NOT NULL
+                  ) STRICT;
+                  INSERT INTO sessions(
+                      id, bot_id, channel_id, session_name,
+                      occupant_logical_id, renew_id
+                  ) VALUES (
+                      1, 'bot', 'ab12cd34-5678-90ab-cdef-0123456789ab',
+                      'bot-channel', 'logical-agent-id', 'renew-id'
+                  );
+                  INSERT INTO turns(
+                      sequence, session_id, event_id, ask_id,
+                      reply_to_event_id, state
+                  ) VALUES (
+                      1, 1,
+                      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                      NULL,
+                      'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                      'queued'
+                  );",
             )
             .unwrap();
         let mut repository = SqliteRepository::from_connection(connection).expect("migrated");
         let bot_id = BotId::new("bot").expect("bot id");
         let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
-        repository
-            .save_session(&session(&bot_id, channel_id))
-            .unwrap();
-        repository
-            .enqueue_turn(&turn(&bot_id, channel_id, 'a'))
-            .unwrap();
         repository
             .open_next_turn(&bot_id, channel_id, "ask-1")
             .unwrap();
