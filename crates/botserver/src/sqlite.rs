@@ -72,6 +72,28 @@ fn add_column_if_missing(connection: &Connection, sql: &str) -> rusqlite::Result
     Ok(())
 }
 
+fn column_exists(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        params![table, column],
+        |row| row.get(0),
+    )
+}
+
+fn migrate_turn_wake_columns(connection: &Connection) -> rusqlite::Result<()> {
+    if !column_exists(connection, "turns", "ask_body")? {
+        connection.execute("ALTER TABLE turns ADD COLUMN ask_body TEXT", [])?;
+    }
+    if !column_exists(connection, "turns", "publish_reply_to_event_id")? {
+        connection.execute(
+            "ALTER TABLE turns ADD COLUMN publish_reply_to_event_id TEXT",
+            [],
+        )?;
+        connection.execute("UPDATE turns SET publish_reply_to_event_id = event_id", [])?;
+    }
+    Ok(())
+}
+
 /// Column migrations and the nullable-reply rebuild, in order.
 ///
 /// The prepared-id columns are added after the rebuild: a pre-#54 table
@@ -107,11 +129,7 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE outbound_attempts ADD COLUMN prepared_created_at INTEGER",
     )?;
     add_column_if_missing(connection, "ALTER TABLE turns ADD COLUMN opened_at INTEGER")?;
-    add_column_if_missing(connection, "ALTER TABLE turns ADD COLUMN ask_body TEXT")?;
-    add_column_if_missing(
-        connection,
-        "ALTER TABLE turns ADD COLUMN publish_reply_to_event_id TEXT",
-    )?;
+    migrate_turn_wake_columns(connection)?;
     add_column_if_missing(
         connection,
         "ALTER TABLE watches ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
@@ -322,6 +340,11 @@ impl SqliteRepository {
                       publish_claimed IN (0, 1)
                   ),
                   opened_at INTEGER,
+                  ask_body TEXT,
+                  publish_reply_to_event_id TEXT CHECK(
+                      publish_reply_to_event_id IS NULL
+                      OR length(publish_reply_to_event_id) = 64
+                  ),
                   CHECK(
                       (state = 'queued' AND ask_id IS NULL)
                       OR (state = 'open' AND ask_id IS NOT NULL)
@@ -951,8 +974,9 @@ impl HostRepository for SqliteRepository {
 
     fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error> {
         let mut statement = self.connection.prepare(
-            "SELECT t.event_id FROM turns AS t
+            "SELECT t.publish_reply_to_event_id FROM turns AS t
              WHERE t.state IN ('queued', 'open')
+               AND t.publish_reply_to_event_id IS NOT NULL
              ORDER BY t.sequence",
         )?;
         let ids = statement
@@ -1003,6 +1027,8 @@ impl HostRepository for SqliteRepository {
         bot_id: &BotId,
         channel_id: &str,
         author_pubkey: &str,
+        cancel_event_id: &EventId,
+        cancel_created_at: i64,
     ) -> Result<usize, Self::Error> {
         self.connection.execute(
             "UPDATE watches SET state = 'cancelled'
@@ -1013,8 +1039,15 @@ impl HostRepository for SqliteRepository {
                AND EXISTS (
                    SELECT 1 FROM watch_authors AS a
                    WHERE a.watch_id = watches.watch_id AND a.author_pubkey = ?3
-               )",
-            params![bot_id.as_str(), channel_id, author_pubkey],
+               )
+               AND (created_at < ?4 OR (created_at = ?4 AND watch_id < ?5))",
+            params![
+                bot_id.as_str(),
+                channel_id,
+                author_pubkey,
+                cancel_created_at,
+                cancel_event_id.as_str()
+            ],
         )
     }
 
@@ -2015,6 +2048,44 @@ mod tests {
             .open_next_turn(&bot_id, channel_id, "ask-1")
             .unwrap();
         assert!(repository.claim_turn_for_publish("ask-1").unwrap());
+        assert_eq!(
+            repository
+                .turn_by_ask_id("ask-1")
+                .unwrap()
+                .expect("turn")
+                .publish_reply_to_event_id,
+            Some(event_id('a'))
+        );
+    }
+
+    #[test]
+    fn repeated_migration_keeps_host_wake_publish_target_empty() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        repository
+            .enqueue_turn(&NewTurn {
+                bot_id: bot_id.clone(),
+                channel_id: channel_id.to_owned(),
+                event_id: event_id('a'),
+                reply_to_event_id: Some(event_id('b')),
+                ask_body: Some("## Watch event".to_owned()),
+                publish_reply_to_event_id: None,
+            })
+            .unwrap();
+
+        run_column_migrations(&repository.connection).unwrap();
+
+        assert!(
+            repository.turns_for_session(&bot_id, channel_id).unwrap()[0]
+                .publish_reply_to_event_id
+                .is_none()
+        );
     }
 
     #[test]
@@ -2173,11 +2244,36 @@ mod tests {
         assert!(repository.watched_author_pubkeys(2_000).unwrap().is_empty());
         assert_eq!(
             repository
-                .cancel_watches(&bot_id, channel_id, &author)
+                .cancel_watches(&bot_id, channel_id, &author, &event_id('b'), 1)
                 .unwrap(),
             1
         );
         assert!(repository.watched_author_pubkeys(1_000).unwrap().is_empty());
+
+        repository
+            .save_watch(&WatchRecord {
+                watch_id: event_id('c'),
+                created_at: 2,
+                bot_id: bot_id.clone(),
+                channel_id: channel_id.to_owned(),
+                author_pubkeys: vec![author.clone()],
+                predicate_channel_id: None,
+                predicate_kind: None,
+                cooldown_secs: 60,
+                expires_at: None,
+                max_fires: Some(1),
+            })
+            .unwrap();
+        assert_eq!(
+            repository
+                .cancel_watches(&bot_id, channel_id, &author, &event_id('b'), 1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            repository.watched_author_pubkeys(1_000).unwrap(),
+            std::slice::from_ref(&author)
+        );
     }
 
     #[test]

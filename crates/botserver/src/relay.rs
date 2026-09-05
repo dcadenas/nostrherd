@@ -1119,6 +1119,8 @@ mod tests {
             _bot_id: &BotId,
             _channel_id: &str,
             _author_pubkey: &str,
+            _cancel_event_id: &EventId,
+            _cancel_created_at: i64,
         ) -> Result<usize, Self::Error> {
             unreachable!()
         }

@@ -403,8 +403,20 @@ where
                     .map_err(ActorError::Repository)?;
             }
             WatchCommand::Cancel { author_pubkey } => {
+                let now = crate::unix_now().map_err(ActorError::Snapshot)?;
+                let created_at = self
+                    .repository
+                    .indexed_event(declaration_event_id)
+                    .map_err(ActorError::Repository)?
+                    .map_or(now, |event| event.created_at);
                 self.repository
-                    .cancel_watches(self.bot.id(), channel_id, &author_pubkey)
+                    .cancel_watches(
+                        self.bot.id(),
+                        channel_id,
+                        &author_pubkey,
+                        declaration_event_id,
+                        created_at,
+                    )
                     .map_err(ActorError::Repository)?;
             }
         }
@@ -1742,6 +1754,11 @@ mod tests {
             [TurnState::Open, TurnState::Queued]
         );
         assert_eq!(runner.calls.lock().expect("calls").len(), 1);
+        assert!(actor
+            .pending_scope()
+            .expect("scope")
+            .active_event_ids
+            .is_empty());
     }
 
     #[test]

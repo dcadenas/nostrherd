@@ -787,3 +787,20 @@ the crash-safety and audit ledger. Only watches still inside their lifetime and
 fire limit contribute author subscription filters. Fire insertion, fire-count
 advance, and completion are one SQLite transaction. A deterministic wake Turn
 id is stored with the fire before Kelpie is called, so replay cannot double-wake.
+
+Watch activation uses the repository's existing relay cursor order,
+`(created_at, event_id)`, with the declaration event as the cursor. This avoids
+firing on history fetched when the new author subscription opens. It also means
+an event whose signed timestamp sorts before the declaration is history rather
+than new activity even if the host receives it later; this is the same durable
+ordering used by ask Context and relay replay, not host arrival time.
+
+Each declaration is an independent bounded watch. Repeating the create phrase
+creates another watch; cancellation by author closes all older active watches
+for that author in the declaring session. A replayed cancellation cannot close
+a watch declared after it. Once a source event records a fire, later edits or
+deletes do not cancel that wake.
+
+Host-initiated wakes do not relay progress in v1. D42 requires progress to
+reply to a triggering relay event, and a cross-channel watch has no such event
+in the declaring channel. The final remains a top-level stamped post.

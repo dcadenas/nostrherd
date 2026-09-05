@@ -1717,6 +1717,8 @@ pub trait HostRepository {
         bot_id: &BotId,
         channel_id: &str,
         author_pubkey: &str,
+        cancel_event_id: &EventId,
+        cancel_created_at: i64,
     ) -> Result<usize, Self::Error>;
 
     /// Authors whose active watches require relay subscription.
