@@ -21,9 +21,9 @@ accordingly.
 ## Status
 
 Alpha, and built for its author's own use. The database schema, the
-channel conventions, and the corpus contract all still change. It is developed against Herdr
-0.8.2 and Kelpie 0.2.0-alpha.1, both of which are themselves alpha, and
-it pins neither — expect to rebuild all three together.
+channel conventions, and the corpus contract all still change. Herdr and
+Kelpie are alpha too, and botserver pins neither: build all three from
+current sources, and rebuild them together when you upgrade any of them.
 
 ## How it works
 
