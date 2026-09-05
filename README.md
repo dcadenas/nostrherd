@@ -1,42 +1,114 @@
 # botserver
 
-Private host for personal Nostr bots that post **as you**, with a
-channel convention (`{bot-id}: …` in, `[{bot-id}]:` out; id `bot` →
-`bot:` / `[bot]:`), driven through Herdr and Kelpie.
+Run coding agents as bots on Nostr. You address one in a channel, it
+answers there, and it can also speak on its own — later, on a schedule,
+or when a particular person shows up.
 
-This is not an ACP child and not a Buzz managed-agent. The daemon watches
-the relay as your pubkey, wakes a corpus occupant per bot+channel, and
-publishes occupant `kelpie reply --final` (trigger answers) and occupant
-`kelpie tell` (bot-initiated posts) as `[{bot-id}]:`.
-
-## Binaries
-
-- `botserver` — host process (Kelpie waiter `botserver`) plus per-bot actors
-
-The occupant answers a trigger with `kelpie reply --final` and unstamped
-prose, and MAY `kelpie tell botserver` for a bot-initiated post (D38).
-The host is the only Nostr publisher (D31). Occupants MUST NOT receive
-the operator nsec.
-
-```bash
-envchain botserver-proof botserver \
-  --config /path/to/bots.toml \
-  --database /path/to/botserver.sqlite
+```text
+you   bot: how is the deploy looking?
+bot   [bot]: green. 14 minutes since the last failure.
 ```
 
-`envchain` wraps the process. `botserver` only reads `BUZZ_PRIVATE_KEY`
-and `BUZZ_RELAY_URL` from the environment (D29). There is no
-`--envchain` flag.
+The host watches the relay, wakes an agent when someone addresses it,
+and publishes what that agent writes. The agent never touches the relay
+and never holds a key.
 
-The command above uses throwaway live-test namespace `botserver-proof`.
-Personal operator keys use namespace `botserver`. Before running the
-host as yourself, read `docs/operator-runbook.md`.
+**Bots post as you.** botserver signs with your own Nostr key, so a bot
+is your identity speaking, not a separate account. Everything it says is
+attributable to you. Treat the key and the relay you point it at
+accordingly.
+
+## Status
+
+Alpha, and built for its author's own use. The database schema, the
+channel conventions, and the corpus contract all still change. It is developed against Herdr
+0.8.2 and Kelpie 0.2.0-alpha.1, both of which are themselves alpha, and
+it pins neither — expect to rebuild all three together.
+
+## How it works
+
+- **The host** (`botserver`) is one process. It subscribes to your
+  channels, and it is the only thing that publishes.
+- **A bot** is an id plus a corpus repository. The id is the address:
+  `bot:` reaches the bot with id `bot`, and its posts are stamped
+  `[bot]:`. A second bot with id `pr` answers `pr:` and stamps `[pr]:`.
+- **An occupant** is the coding agent, running in its own Herdr
+  workspace with the corpus as its working directory. One per bot per
+  channel, so a bot in two channels holds two separate conversations.
+- **Kelpie** carries messages between the host and the occupant, and
+  holds the durable timers behind anything deferred or repeating.
+
+The occupant writes prose. The host stamps it, publishes it, and owns
+every rule about what reaches the relay.
+
+## Requirements
+
+- Rust (stable) to build.
+- [Herdr](https://github.com/herdrdev/herdr) — terminal multiplexer.
+  Occupants run in its workspaces.
+- [Kelpie](https://github.com/dcadenas/kelpie) — coordination daemon.
+  `kelpied` must be running.
+- A coding-agent CLI that Herdr can launch, such as `claude` or
+  `opencode`.
+- A [Buzz](https://github.com/block/buzz) relay and a Nostr key for it.
+  For testing, build `buzz-relay` from that repository and run
+  `./tools/local-relay up`, which starts it against throwaway Postgres
+  and Redis containers; see `skills/local-relay/SKILL.md`. It needs
+  Docker.
+- [`envchain`](https://github.com/sorah/envchain) to hold the key.
+
+## Build
+
+```bash
+cargo build --release
+```
+
+## Configure
+
+A bot is one entry in `bots.toml`:
+
+```toml
+[[bots]]
+id = "bot"                      # the trigger: "bot: ..." in a channel
+corpus = "/path/to/corpus-repo" # the agent's working directory
+kind = "opencode"               # which agent CLI Herdr launches
+```
+
+The corpus is an ordinary git repository holding the bot's personality.
+Copy `corpus/template-bot/` to start one; its `AGENTS.md` is the only
+file you write. The host writes a contract block into `startup.md` and
+never touches anything else in the tree.
+
+Then put the key and relay somewhere the process can read them:
+
+```bash
+envchain --set botserver BUZZ_PRIVATE_KEY
+envchain --set botserver BUZZ_RELAY_URL
+```
+
+`botserver` reads only those two names from its environment. It has no
+flag that takes a key, and it never writes one to the database, the
+logs, or a process title.
+
+## Run
+
+```bash
+envchain botserver ./target/release/botserver \
+  --config bots.toml \
+  --database botserver.sqlite
+```
+
+`--check` loads the config and database and exits, without needing the
+key or Kelpie.
+
+Address the bot in a channel with `bot: hello` and a stamped reply
+should land. For running against your real relay and account, read
+`docs/operator-runbook.md` first.
 
 ## What a bot can do
 
 Everything below is what someone types in a channel and what the bot
-does about it. `bot:` is the trigger for a bot with id `bot`; a second
-bot with id `pr` answers `pr:` and stamps `[pr]:`.
+does about it.
 
 | What you type | What happens |
 | --- | --- |
@@ -45,45 +117,68 @@ bot with id `pr` answers `pr:` and stamps `[pr]:`.
 | `how is it going?` | Nothing. A bot stays silent unless addressed |
 | `bot: in 10 minutes give me the status of pr 123` | Confirms now, posts the answer ten minutes later on its own |
 | `bot: every 5 minutes report the queue` | Posts on that interval until cancelled |
+| `bot: watch <pubkey> here cooldown 30 max 5` | Wakes when that person next posts, and answers about it |
 | `bot: <long task>` | Posts a progress note, edits that same post as work advances, then posts the answer |
 | *edit your message* | Answers your new text and discards the old request |
 | *delete your message* | Abandons unposted work. An answer already sent stays up |
 | `bot: <second question while busy>` | Queues, answered after the first |
-| the same bot in another channel | A separate conversation with its own memory, seven days of history |
+| the same bot in another channel | A separate conversation, with seven days of that channel's history |
 | a direct message | Works like any channel |
 
-A bot can also post with no question asked, which is how the deferred
-and recurring rows above are delivered.
+Most of that is the agent reading plain English. Two things are not:
+the watch phrase and its `cancel watch <pubkey>` are parsed by the host
+itself, deliberately, so that arming a watch and sitting armed cost
+nothing — no agent runs until someone the watch names actually posts.
 
 ### How those are built
 
-Four primitives, composed:
+Five primitives, composed:
 
 - **Answer**: `kelpie reply <ask-id> --final` with unstamped prose. The
-  host stamps and publishes.
+  host stamps and publishes it.
 - **Progress**: `kelpie reply <ask-id> --progress` with the full current
-  status. The host maintains one post and edits it in place.
+  status. The host keeps one post and edits it in place.
 - **Speak unprompted**: `kelpie tell botserver`. The host publishes it
   stamped, answering nothing.
 - **Later, and again**: the same tell with `--due-in` for once, or
   `--every` for a repeat. Kelpie holds the delivery and the host
   publishes when it arrives. `kelpie schedules` lists them and
   `kelpie schedule-cancel` stops one.
+- **Wake on someone**: the watch phrase above. The host evaluates it
+  against the relay stream and wakes the agent only on a match.
 
-An occupant never touches the relay and never holds a key. It writes
-prose and the host publishes it (D31).
+An occupant never touches the relay and never holds a key.
 
-### Not yet
+## Known gaps
 
-Watching for events such as someone coming online, digesting many
-events into one message, and escalating to a human are proposed in
-`docs/proposals.md` and not built.
+- **No rate ceiling and no quiet hours.** A repeating post every five
+  minutes is 288 posts a day, and nothing in the host stops it. Set the
+  interval deliberately.
+- **A post can be lost silently.** If the relay times out while the
+  host's connection stays up, that post is retried only when the
+  connection next drops.
+- **Text containing the host's own routing tag never publishes**, with
+  no error the agent can see.
+- Digesting many events into one message, and escalating to a human,
+  are proposed in `docs/proposals.md` and not built.
 
-## Read order
+## Development
 
-`AGENTS.md` → `SPEC.md` → `docs/domain-model.md` → `docs/decision-log.md`
-→ `docs/open-questions.md`
+`AGENTS.md` is the map for agents working on this repository. `SPEC.md`
+is normative. `docs/decision-log.md` holds the numbered decisions that
+the rest of the documentation and the code comments cite as `D31`,
+`D42`, and so on; where the spec and a later decision disagree, the
+decision wins.
+
+Read order: `AGENTS.md` → `SPEC.md` → `docs/domain-model.md` →
+`docs/decision-log.md` → `docs/open-questions.md`
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+```
 
 ## License
 
-Private. Do not publish.
+MIT. See `LICENSE`.
