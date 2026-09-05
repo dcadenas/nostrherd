@@ -19,7 +19,8 @@ selected by convention, posting with a visible bot stamp.
 ## Goals
 
 1. Subscribe to the operator's relay traffic as the operator pubkey.
-2. Index events for context. Wake a bot session only on a **trigger**.
+2. Index events for context. Wake a bot session only on a **trigger** or a
+   matched durable author watch (D45).
 3. One in-process **actor per configured bot**. Each bot has a corpus
    git repo (home, `AGENTS.md`, `startup.md`, skill).
 4. Route a trigger to a session occupant named from bot + place
@@ -62,13 +63,17 @@ relay  ->  botserver (reconnecting inbox client, waiter)
 After parse, configuration is a set of `Bot` records. Runtime is one
 `BotActor` per bot. A trigger becomes a `Turn` bound to a `Session`.
 
-A `Turn` opens only on a **trigger** (D8, D9, D34). The inbound token is
+A user-originated `Turn` opens only on a **trigger** (D8, D9, D34). The inbound token is
 the configured bot id plus a colon (`bot:` when `id = "bot"`). No occupant
 is created until the first trigger for that place. Ordinary channel
 traffic, thread replies without the prefix, and `@daniel` without
 `{id}:` MUST NOT start or poke a session. Other authors MUST `p`-tag
 the operator. The operator's own `{id}:` (optional leading mention) is
 a trigger even when the event does not `p`-tag them.
+
+A host-initiated Turn opens only after a durable source records a fire. It
+MUST carry a typed section instead of a user request and otherwise queues,
+asks, stamps, and publishes through the same Turn pipeline (D45, D46).
 
 Session grain is one occupant per Buzz channel UUID, including DMs
 (D10). Thread ids are reply coordinates on the turn, not extra sessions.
@@ -123,6 +128,9 @@ final it MUST stamp `[{bot-id}]:`, post from sqlite coordinates, then
 `inbox.ack`. id `pr` publishes `[pr]:`. id `bot` publishes `[bot]:`.
 Occupants never get the operator nsec.
 
+A host-initiated wake has no user message in its declaring channel. Its final
+MUST therefore publish as a top-level stamped post without a reply or mention.
+
 Outbound `--reply-to` is the triggering EventId, including the first
 call. Keep the trigger's existing parent separately when snapshots need
 thread-root context.
@@ -176,6 +184,10 @@ Classify by `reply_to` in the host's Turn ids:
 
 SQLite is the host store. The relay is the store of messages. Corpus
 git is the store of bot personality. SQLite MUST NOT store nsecs.
+
+Author watches and their fire ledger are host state. A watch fire MUST be
+recorded before its wake Turn is enqueued. Replaying the matching relay event
+MUST NOT enqueue a second wake.
 
 ## Secrets
 
@@ -235,6 +247,10 @@ subset.
     inner tag posts one stamped kind 9 in that session's channel, not
     as a reply to a `{id}:` event. A nested `<botserver to="eng">`
     routes to that known place. Scratch outside the tag is not posted.
+14. **Author watch.** A `{id}: watch <pubkey>` trigger creates a bounded
+    watch. No occupant is polled. The first matching author message records a
+    fire and opens a `## Watch event` Turn on the declaring channel session.
+    Bursts inside its cooldown and unwatched authors open no wake Turn.
 
 ## Issue work
 

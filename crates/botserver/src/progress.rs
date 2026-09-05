@@ -399,6 +399,9 @@ pub fn record_progress<R: HostRepository>(
     if turn.state != TurnState::Open {
         return Ok(());
     }
+    if turn.publish_reply_to_event_id.is_none() {
+        return Ok(());
+    }
     if final_in_flight(repository, ask_id)? {
         return Ok(());
     }
@@ -452,11 +455,15 @@ fn new_progress_post<R: HostRepository>(
     ask_id: &str,
     now: i64,
 ) -> Result<ProgressPost, R::Error> {
-    let thread_root_event_id = crate::thread_root_for(repository, &turn.event_id)?;
+    let reply_to_event_id = turn
+        .publish_reply_to_event_id
+        .as_ref()
+        .expect("host wakes return before progress creation");
+    let thread_root_event_id = crate::thread_root_for(repository, reply_to_event_id)?;
     Ok(ProgressPost {
         ask_id: ask_id.to_owned(),
         channel_id: turn.channel_id.clone(),
-        reply_to_event_id: turn.event_id.clone(),
+        reply_to_event_id: reply_to_event_id.clone(),
         thread_root_event_id,
         opened_at: turn.opened_at.unwrap_or(now),
         pending_body: None,

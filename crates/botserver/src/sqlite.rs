@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use botserver_domain::{BotId, EventId, TurnTransition};
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 use crate::outbox::OutboundAttempt;
 use crate::progress::ProgressPost;
+use crate::watch::{WatchFire, WatchRecord};
 use crate::{
     HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord, TurnReplacement,
     TurnState,
@@ -70,6 +72,28 @@ fn add_column_if_missing(connection: &Connection, sql: &str) -> rusqlite::Result
     Ok(())
 }
 
+fn column_exists(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        params![table, column],
+        |row| row.get(0),
+    )
+}
+
+fn migrate_turn_wake_columns(connection: &Connection) -> rusqlite::Result<()> {
+    if !column_exists(connection, "turns", "ask_body")? {
+        connection.execute("ALTER TABLE turns ADD COLUMN ask_body TEXT", [])?;
+    }
+    if !column_exists(connection, "turns", "publish_reply_to_event_id")? {
+        connection.execute(
+            "ALTER TABLE turns ADD COLUMN publish_reply_to_event_id TEXT",
+            [],
+        )?;
+        connection.execute("UPDATE turns SET publish_reply_to_event_id = event_id", [])?;
+    }
+    Ok(())
+}
+
 /// Column migrations and the nullable-reply rebuild, in order.
 ///
 /// The prepared-id columns are added after the rebuild: a pre-#54 table
@@ -105,6 +129,11 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE outbound_attempts ADD COLUMN prepared_created_at INTEGER",
     )?;
     add_column_if_missing(connection, "ALTER TABLE turns ADD COLUMN opened_at INTEGER")?;
+    migrate_turn_wake_columns(connection)?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE watches ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
+    )?;
     add_column_if_missing(
         connection,
         "ALTER TABLE progress_posts ADD COLUMN retry_noticed_at INTEGER",
@@ -247,6 +276,7 @@ impl SqliteRepository {
     /// # Errors
     ///
     /// Returns an error when SQLite cannot configure or initialize the database.
+    #[allow(clippy::too_many_lines)]
     pub fn from_connection(connection: Connection) -> rusqlite::Result<Self> {
         connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         connection.execute_batch(
@@ -310,6 +340,11 @@ impl SqliteRepository {
                       publish_claimed IN (0, 1)
                   ),
                   opened_at INTEGER,
+                  ask_body TEXT,
+                  publish_reply_to_event_id TEXT CHECK(
+                      publish_reply_to_event_id IS NULL
+                      OR length(publish_reply_to_event_id) = 64
+                  ),
                   CHECK(
                       (state = 'queued' AND ask_id IS NULL)
                       OR (state = 'open' AND ask_id IS NOT NULL)
@@ -346,7 +381,40 @@ impl SqliteRepository {
                    ),
                    prepared_created_at INTEGER,
                    dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1))
-               ) STRICT;",
+               ) STRICT;
+
+              CREATE TABLE IF NOT EXISTS watches (
+                  watch_id TEXT PRIMARY KEY NOT NULL CHECK(length(watch_id) = 64),
+                  created_at INTEGER NOT NULL,
+                  session_id INTEGER NOT NULL REFERENCES sessions(id),
+                  predicate_channel_id TEXT,
+                  predicate_kind INTEGER,
+                  cooldown_secs INTEGER NOT NULL CHECK(cooldown_secs > 0),
+                  expires_at INTEGER,
+                  max_fires INTEGER CHECK(max_fires IS NULL OR max_fires > 0),
+                  fire_count INTEGER NOT NULL DEFAULT 0 CHECK(fire_count >= 0),
+                  last_fired_at INTEGER,
+                  state TEXT NOT NULL DEFAULT 'active' CHECK(
+                      state IN ('active', 'cancelled', 'completed')
+                  )
+              ) STRICT;
+
+              CREATE TABLE IF NOT EXISTS watch_authors (
+                  watch_id TEXT NOT NULL REFERENCES watches(watch_id),
+                  author_pubkey TEXT NOT NULL CHECK(length(author_pubkey) = 64),
+                  PRIMARY KEY(watch_id, author_pubkey)
+              ) STRICT;
+
+              CREATE TABLE IF NOT EXISTS watch_fires (
+                  watch_id TEXT NOT NULL REFERENCES watches(watch_id),
+                  source_event_id TEXT NOT NULL CHECK(length(source_event_id) = 64),
+                  wake_event_id TEXT NOT NULL UNIQUE CHECK(length(wake_event_id) = 64),
+                  fired_at INTEGER NOT NULL,
+                  PRIMARY KEY(watch_id, source_event_id)
+              ) STRICT;
+
+              CREATE INDEX IF NOT EXISTS watch_authors_active
+                  ON watch_authors(author_pubkey, watch_id);",
         )?;
         create_progress_posts_table(&connection)?;
         migrate_progress_posts_without_dispatched(&connection)?;
@@ -667,7 +735,8 @@ impl HostRepository for SqliteRepository {
         )?;
         let record = transaction.query_row(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                    t.reply_to_event_id, t.state, t.opened_at
+                    t.reply_to_event_id, t.state, t.opened_at, t.ask_body,
+                    t.publish_reply_to_event_id
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
              WHERE t.sequence = ?1",
@@ -770,7 +839,8 @@ impl HostRepository for SqliteRepository {
         }
         let record = transaction.query_row(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                    t.reply_to_event_id, t.state, t.opened_at
+                    t.reply_to_event_id, t.state, t.opened_at, t.ask_body,
+                    t.publish_reply_to_event_id
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
              WHERE t.event_id = ?1 AND t.state = ?2
@@ -815,7 +885,8 @@ impl HostRepository for SqliteRepository {
         }
         let cancelled = transaction.query_row(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                    t.reply_to_event_id, t.state, t.opened_at
+                    t.reply_to_event_id, t.state, t.opened_at, t.ask_body,
+                    t.publish_reply_to_event_id
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
              WHERE t.event_id = ?1 AND t.state = ?2
@@ -833,7 +904,8 @@ impl HostRepository for SqliteRepository {
         self.connection
             .query_row(
                 "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                        t.reply_to_event_id, t.state, t.opened_at
+                        t.reply_to_event_id, t.state, t.opened_at, t.ask_body,
+                        t.publish_reply_to_event_id
                  FROM turns AS t
                  JOIN sessions AS s ON s.id = t.session_id
                  WHERE t.ask_id = ?1",
@@ -847,7 +919,8 @@ impl HostRepository for SqliteRepository {
         self.connection
             .query_row(
                 "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                        t.reply_to_event_id, t.state, t.opened_at
+                        t.reply_to_event_id, t.state, t.opened_at, t.ask_body,
+                        t.publish_reply_to_event_id
                  FROM turns AS t
                  JOIN sessions AS s ON s.id = t.session_id
                  WHERE t.event_id = ?1 AND t.state IN ('queued', 'open')",
@@ -864,7 +937,8 @@ impl HostRepository for SqliteRepository {
     ) -> Result<Vec<TurnRecord>, Self::Error> {
         let mut statement = self.connection.prepare(
             "SELECT t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-                    t.reply_to_event_id, t.state, t.opened_at
+                    t.reply_to_event_id, t.state, t.opened_at, t.ask_body,
+                    t.publish_reply_to_event_id
              FROM turns AS t
              JOIN sessions AS s ON s.id = t.session_id
              WHERE s.bot_id = ?1 AND s.channel_id = ?2
@@ -900,8 +974,9 @@ impl HostRepository for SqliteRepository {
 
     fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error> {
         let mut statement = self.connection.prepare(
-            "SELECT t.event_id FROM turns AS t
+            "SELECT t.publish_reply_to_event_id FROM turns AS t
              WHERE t.state IN ('queued', 'open')
+               AND t.publish_reply_to_event_id IS NOT NULL
              ORDER BY t.sequence",
         )?;
         let ids = statement
@@ -911,6 +986,168 @@ impl HostRepository for SqliteRepository {
             })?
             .collect();
         ids
+    }
+
+    fn save_watch(&mut self, watch: &WatchRecord) -> Result<(), Self::Error> {
+        let transaction = self.connection.transaction()?;
+        let session_id: i64 = transaction.query_row(
+            "SELECT id FROM sessions WHERE bot_id = ?1 AND channel_id = ?2",
+            params![watch.bot_id.as_str(), watch.channel_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO watches(
+                 watch_id, created_at, session_id, predicate_channel_id, predicate_kind,
+                 cooldown_secs, expires_at, max_fires
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(watch_id) DO NOTHING",
+            params![
+                watch.watch_id.as_str(),
+                watch.created_at,
+                session_id,
+                watch.predicate_channel_id,
+                watch.predicate_kind,
+                watch.cooldown_secs,
+                watch.expires_at,
+                watch.max_fires,
+            ],
+        )?;
+        for author in &watch.author_pubkeys {
+            transaction.execute(
+                "INSERT INTO watch_authors(watch_id, author_pubkey) VALUES (?1, ?2)
+                 ON CONFLICT(watch_id, author_pubkey) DO NOTHING",
+                params![watch.watch_id.as_str(), author],
+            )?;
+        }
+        transaction.commit()
+    }
+
+    fn cancel_watches(
+        &mut self,
+        bot_id: &BotId,
+        channel_id: &str,
+        author_pubkey: &str,
+        cancel_event_id: &EventId,
+        cancel_created_at: i64,
+    ) -> Result<usize, Self::Error> {
+        self.connection.execute(
+            "UPDATE watches SET state = 'cancelled'
+             WHERE state = 'active'
+               AND session_id = (
+                   SELECT id FROM sessions WHERE bot_id = ?1 AND channel_id = ?2
+               )
+               AND EXISTS (
+                   SELECT 1 FROM watch_authors AS a
+                   WHERE a.watch_id = watches.watch_id AND a.author_pubkey = ?3
+               )
+               AND (created_at < ?4 OR (created_at = ?4 AND watch_id < ?5))",
+            params![
+                bot_id.as_str(),
+                channel_id,
+                author_pubkey,
+                cancel_created_at,
+                cancel_event_id.as_str()
+            ],
+        )
+    }
+
+    fn watched_author_pubkeys(&self, now: i64) -> Result<Vec<String>, Self::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT a.author_pubkey
+             FROM watch_authors AS a
+             JOIN watches AS w ON w.watch_id = a.watch_id
+             WHERE w.state = 'active'
+               AND (w.expires_at IS NULL OR w.expires_at > ?1)
+               AND (w.max_fires IS NULL OR w.fire_count < w.max_fires)
+             ORDER BY a.author_pubkey",
+        )?;
+        let authors = statement.query_map([now], |row| row.get(0))?.collect();
+        authors
+    }
+
+    fn record_matching_watch_fires(
+        &mut self,
+        event: &IndexedRelayEvent,
+        now: i64,
+    ) -> Result<Vec<WatchFire>, Self::Error> {
+        let transaction = self.connection.transaction()?;
+        let mut statement = transaction.prepare(
+            "SELECT w.watch_id, s.bot_id, s.channel_id
+             FROM watches AS w
+             JOIN sessions AS s ON s.id = w.session_id
+             JOIN watch_authors AS a ON a.watch_id = w.watch_id
+             WHERE w.state = 'active'
+               AND a.author_pubkey = ?1
+               AND (w.predicate_channel_id IS NULL OR w.predicate_channel_id = ?2)
+               AND (w.predicate_kind IS NULL OR w.predicate_kind = ?3)
+               AND (
+                   ?5 > w.created_at OR (?5 = w.created_at AND ?6 > w.watch_id)
+               )
+               AND (w.expires_at IS NULL OR w.expires_at > ?4)
+               AND (w.max_fires IS NULL OR w.fire_count < w.max_fires)
+               AND (w.last_fired_at IS NULL OR w.last_fired_at + w.cooldown_secs <= ?4)
+             ORDER BY w.watch_id",
+        )?;
+        let candidates = statement
+            .query_map(
+                params![
+                    event.author_pubkey,
+                    event.channel_id,
+                    event.kind,
+                    now,
+                    event.created_at,
+                    event.event_id.as_str()
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut fires = Vec::new();
+        for (watch_id_raw, bot_id_raw, channel_id) in candidates {
+            let wake_event_id = wake_event_id(&watch_id_raw, &event.event_id);
+            let changed = transaction.execute(
+                "INSERT INTO watch_fires(watch_id, source_event_id, wake_event_id, fired_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(watch_id, source_event_id) DO NOTHING",
+                params![
+                    watch_id_raw,
+                    event.event_id.as_str(),
+                    wake_event_id.as_str(),
+                    now
+                ],
+            )?;
+            if changed == 0 {
+                continue;
+            }
+            transaction.execute(
+                "UPDATE watches SET
+                     fire_count = fire_count + 1,
+                     last_fired_at = ?2,
+                     state = CASE
+                         WHEN max_fires IS NOT NULL AND fire_count + 1 >= max_fires
+                         THEN 'completed' ELSE state END
+                 WHERE watch_id = ?1",
+                params![watch_id_raw, now],
+            )?;
+            fires.push(WatchFire {
+                watch_id: parse_event_id(&watch_id_raw, 0)?,
+                wake_event_id,
+                source_event_id: event.event_id.clone(),
+                bot_id: parse_bot_id(&bot_id_raw, 1)?,
+                channel_id,
+                author_pubkey: event.author_pubkey.clone(),
+                source_channel_id: event.channel_id.clone(),
+                source_kind: event.kind,
+            });
+        }
+        transaction.commit()?;
+        Ok(fires)
     }
 
     fn save_outbound_attempt(&mut self, attempt: &OutboundAttempt) -> Result<(), Self::Error> {
@@ -1115,8 +1352,9 @@ const PROGRESS_PENDING_SELECT: &str = "WITH pending AS MATERIALIZED (
              p.prepared_created_at, p.post_event_id, p.edit_count,
              p.last_send_at, p.ended, p.cap_noticed,
              p.retry_noticed_at, p.delete_pending,
-             t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
-            t.reply_to_event_id, t.state, t.opened_at
+              t.sequence, s.bot_id, s.channel_id, t.event_id, t.ask_id,
+             t.reply_to_event_id, t.state, t.opened_at, t.ask_body,
+             t.publish_reply_to_event_id
      FROM pending AS p
      CROSS JOIN turns AS t ON t.ask_id = p.ask_id
      JOIN sessions AS s ON s.id = t.session_id
@@ -1158,6 +1396,7 @@ fn read_turn_at(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Turn
     let event_id: String = row.get(offset + 3)?;
     let reply_to_event_id: Option<String> = row.get(offset + 5)?;
     let state: String = row.get(offset + 6)?;
+    let publish_reply_to_event_id: Option<String> = row.get(offset + 9)?;
     Ok(TurnRecord {
         sequence: row.get(offset)?,
         bot_id: parse_bot_id(&bot_id, offset + 1)?,
@@ -1171,6 +1410,11 @@ fn read_turn_at(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Turn
         state: TurnState::parse(&state)
             .ok_or_else(|| invalid_value(offset + 6, "invalid turn state"))?,
         opened_at: row.get(offset + 7)?,
+        ask_body: row.get(offset + 8)?,
+        publish_reply_to_event_id: publish_reply_to_event_id
+            .as_deref()
+            .map(|value| parse_event_id(value, offset + 9))
+            .transpose()?,
     })
 }
 
@@ -1181,13 +1425,17 @@ fn insert_queued_turn(connection: &Connection, turn: &NewTurn) -> rusqlite::Resu
         |row| row.get(0),
     )?;
     connection.execute(
-        "INSERT INTO turns(session_id, event_id, reply_to_event_id, state)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO turns(
+             session_id, event_id, reply_to_event_id, state, ask_body,
+             publish_reply_to_event_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             session_id,
             turn.event_id.as_str(),
             turn.reply_to_event_id.as_ref().map(EventId::as_str),
             TurnState::Queued.as_str(),
+            turn.ask_body,
+            turn.publish_reply_to_event_id.as_ref().map(EventId::as_str),
         ],
     )?;
 
@@ -1200,7 +1448,14 @@ fn insert_queued_turn(connection: &Connection, turn: &NewTurn) -> rusqlite::Resu
         reply_to_event_id: turn.reply_to_event_id.clone(),
         state: TurnState::Queued,
         opened_at: None,
+        ask_body: turn.ask_body.clone(),
+        publish_reply_to_event_id: turn.publish_reply_to_event_id.clone(),
     })
+}
+
+fn wake_event_id(watch_id: &str, source_event_id: &EventId) -> EventId {
+    let digest = Sha256::digest(format!("watch:{watch_id}:{}", source_event_id.as_str()));
+    EventId::parse_hex(&format!("{digest:x}")).expect("sha256 is 32 bytes")
 }
 
 fn parse_bot_id(value: &str, column: usize) -> rusqlite::Result<BotId> {
@@ -1241,6 +1496,8 @@ mod tests {
             channel_id: channel_id.to_owned(),
             event_id: event_id(value),
             reply_to_event_id: Some(event_id('f')),
+            ask_body: None,
+            publish_reply_to_event_id: Some(event_id(value)),
         }
     }
 
@@ -1429,6 +1686,8 @@ mod tests {
                 channel_id: "channel".to_owned(),
                 event_id: event.event_id.clone(),
                 reply_to_event_id: None,
+                ask_body: None,
+                publish_reply_to_event_id: Some(event.event_id.clone()),
             })
             .unwrap()
             .is_some());
@@ -1767,28 +2026,77 @@ mod tests {
                      UNIQUE(bot_id, channel_id)
                  ) STRICT;
                  CREATE TABLE turns (
-                     sequence INTEGER PRIMARY KEY,
-                     session_id INTEGER NOT NULL REFERENCES sessions(id),
-                     event_id TEXT NOT NULL,
-                     ask_id TEXT UNIQUE,
-                     reply_to_event_id TEXT,
-                     state TEXT NOT NULL
-                 ) STRICT;",
+                      sequence INTEGER PRIMARY KEY,
+                      session_id INTEGER NOT NULL REFERENCES sessions(id),
+                      event_id TEXT NOT NULL,
+                      ask_id TEXT UNIQUE,
+                      reply_to_event_id TEXT,
+                      state TEXT NOT NULL
+                  ) STRICT;
+                  INSERT INTO sessions(
+                      id, bot_id, channel_id, session_name,
+                      occupant_logical_id, renew_id
+                  ) VALUES (
+                      1, 'bot', 'ab12cd34-5678-90ab-cdef-0123456789ab',
+                      'bot-channel', 'logical-agent-id', 'renew-id'
+                  );
+                  INSERT INTO turns(
+                      sequence, session_id, event_id, ask_id,
+                      reply_to_event_id, state
+                  ) VALUES (
+                      1, 1,
+                      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                      NULL,
+                      'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                      'queued'
+                  );",
             )
             .unwrap();
         let mut repository = SqliteRepository::from_connection(connection).expect("migrated");
         let bot_id = BotId::new("bot").expect("bot id");
         let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
         repository
-            .save_session(&session(&bot_id, channel_id))
-            .unwrap();
-        repository
-            .enqueue_turn(&turn(&bot_id, channel_id, 'a'))
-            .unwrap();
-        repository
             .open_next_turn(&bot_id, channel_id, "ask-1")
             .unwrap();
         assert!(repository.claim_turn_for_publish("ask-1").unwrap());
+        assert_eq!(
+            repository
+                .turn_by_ask_id("ask-1")
+                .unwrap()
+                .expect("turn")
+                .publish_reply_to_event_id,
+            Some(event_id('a'))
+        );
+    }
+
+    #[test]
+    fn repeated_migration_keeps_host_wake_publish_target_empty() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        repository
+            .enqueue_turn(&NewTurn {
+                bot_id: bot_id.clone(),
+                channel_id: channel_id.to_owned(),
+                event_id: event_id('a'),
+                reply_to_event_id: Some(event_id('b')),
+                ask_body: Some("## Watch event".to_owned()),
+                publish_reply_to_event_id: None,
+            })
+            .unwrap();
+
+        run_column_migrations(&repository.connection).unwrap();
+
+        assert!(
+            repository.turns_for_session(&bot_id, channel_id).unwrap()[0]
+                .publish_reply_to_event_id
+                .is_none()
+        );
     }
 
     #[test]
@@ -1840,6 +2148,143 @@ mod tests {
             )
             .unwrap();
         assert_eq!(notnull, 0);
+    }
+
+    #[test]
+    fn watched_author_fires_once_per_cooldown_and_unwatched_author_does_not() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        repository
+            .save_watch(&WatchRecord {
+                watch_id: event_id('a'),
+                created_at: 10,
+                bot_id,
+                channel_id: channel_id.to_owned(),
+                author_pubkeys: vec!["b".repeat(64)],
+                predicate_channel_id: None,
+                predicate_kind: None,
+                cooldown_secs: 1_800,
+                expires_at: None,
+                max_fires: Some(3),
+            })
+            .unwrap();
+        let event = |id, author: String, created_at| IndexedRelayEvent {
+            event_id: event_id(id),
+            author_pubkey: author,
+            created_at,
+            kind: 9,
+            content: "activity".to_owned(),
+            tags_json: "[]".to_owned(),
+            channel_id: Some("elsewhere".to_owned()),
+            target_event_id: None,
+        };
+
+        assert_eq!(
+            repository
+                .record_matching_watch_fires(&event('c', "c".repeat(64), 11), 1_000)
+                .unwrap(),
+            []
+        );
+        assert_eq!(
+            repository
+                .record_matching_watch_fires(&event('c', "b".repeat(64), 9), 1_000)
+                .unwrap(),
+            []
+        );
+        let first = repository
+            .record_matching_watch_fires(&event('d', "b".repeat(64), 11), 1_000)
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].channel_id, channel_id);
+        assert_eq!(
+            repository
+                .record_matching_watch_fires(&event('e', "b".repeat(64), 12), 1_100)
+                .unwrap(),
+            []
+        );
+        assert_eq!(
+            repository
+                .record_matching_watch_fires(&event('d', "b".repeat(64), 11), 2_800)
+                .unwrap(),
+            []
+        );
+        assert_eq!(
+            repository
+                .record_matching_watch_fires(&event('f', "b".repeat(64), 13), 2_800)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn watch_scope_lifetime_and_cancel_control_author_subscription() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let author = "b".repeat(64);
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        repository
+            .save_watch(&WatchRecord {
+                watch_id: event_id('a'),
+                created_at: 0,
+                bot_id: bot_id.clone(),
+                channel_id: channel_id.to_owned(),
+                author_pubkeys: vec![author.clone()],
+                predicate_channel_id: Some(channel_id.to_owned()),
+                predicate_kind: Some(40_002),
+                cooldown_secs: 60,
+                expires_at: Some(2_000),
+                max_fires: None,
+            })
+            .unwrap();
+        assert_eq!(
+            repository.watched_author_pubkeys(1_999).unwrap(),
+            std::slice::from_ref(&author)
+        );
+        assert!(repository.watched_author_pubkeys(2_000).unwrap().is_empty());
+        assert_eq!(
+            repository
+                .cancel_watches(&bot_id, channel_id, &author, &event_id('b'), 1)
+                .unwrap(),
+            1
+        );
+        assert!(repository.watched_author_pubkeys(1_000).unwrap().is_empty());
+
+        repository
+            .save_watch(&WatchRecord {
+                watch_id: event_id('c'),
+                created_at: 2,
+                bot_id: bot_id.clone(),
+                channel_id: channel_id.to_owned(),
+                author_pubkeys: vec![author.clone()],
+                predicate_channel_id: None,
+                predicate_kind: None,
+                cooldown_secs: 60,
+                expires_at: None,
+                max_fires: Some(1),
+            })
+            .unwrap();
+        assert_eq!(
+            repository
+                .cancel_watches(&bot_id, channel_id, &author, &event_id('b'), 1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            repository.watched_author_pubkeys(1_000).unwrap(),
+            std::slice::from_ref(&author)
+        );
     }
 
     #[test]

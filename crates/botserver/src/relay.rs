@@ -12,6 +12,7 @@ use nostr_sdk::prelude::{
     Timestamp,
 };
 
+use crate::watch::WatchFire;
 use crate::{HostRepository, IndexedRelayEvent};
 
 const CHANNEL_MESSAGE_KIND: u16 = 9;
@@ -278,6 +279,31 @@ impl<R: HostRepository> RelayIngest<R> {
         &mut self.repository
     }
 
+    /// Record eligible watch fires for an event already indexed by [`Self::ingest`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the indexed event or watch state cannot be read or persisted.
+    pub fn record_watch_fires(
+        &mut self,
+        event_id: &EventId,
+        now: i64,
+    ) -> Result<Vec<WatchFire>, IngestError<R::Error>> {
+        let Some(event) = self
+            .repository
+            .indexed_event(event_id)
+            .map_err(IngestError::Repository)?
+        else {
+            return Ok(Vec::new());
+        };
+        if !matches!(event.kind, CHANNEL_MESSAGE_KIND | STREAM_MESSAGE_V2_KIND) {
+            return Ok(Vec::new());
+        }
+        self.repository
+            .record_matching_watch_fires(&event, now)
+            .map_err(IngestError::Repository)
+    }
+
     fn trigger_token(&self, bot_id: &BotId) -> Option<&str> {
         self.inbound_triggers
             .iter()
@@ -449,6 +475,7 @@ impl RelaySubscriber {
         operator_pubkey: &str,
         channel_ids: &[String],
         active_event_ids: &[EventId],
+        watched_author_pubkeys: &[String],
         since: Timestamp,
     ) -> Result<(), RelaySubscribeError> {
         self.subscribe_filter("botserver-messages", message_filter(operator_pubkey, since))
@@ -461,6 +488,11 @@ impl RelaySubscriber {
         self.update_filter(
             "botserver-mutations",
             mutation_filter(active_event_ids, since),
+        )
+        .await?;
+        self.update_filter(
+            "botserver-watched-authors",
+            author_filter(watched_author_pubkeys, since),
         )
         .await?;
         Ok(())
@@ -545,6 +577,20 @@ impl RelaySubscriber {
         since: Timestamp,
     ) -> Result<Vec<Event>, RelaySubscribeError> {
         self.fetch_filtered(mutation_filter(active_event_ids, since))
+            .await
+    }
+
+    /// Fetch stored message activity for watched authors since `since`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an SDK error when the fetch cannot complete.
+    pub async fn fetch_watched_author_messages(
+        &self,
+        author_pubkeys: &[String],
+        since: Timestamp,
+    ) -> Result<Vec<Event>, RelaySubscribeError> {
+        self.fetch_filtered(author_filter(author_pubkeys, since))
             .await
     }
 
@@ -710,6 +756,25 @@ fn channel_filter(channel_ids: &[String], since: Timestamp) -> Option<Filter> {
                 SingleLetterTag::LOWERCASE_H,
                 channel_ids.iter().map(String::as_str),
             )
+            .since(since),
+    )
+}
+
+fn author_filter(author_pubkeys: &[String], since: Timestamp) -> Option<Filter> {
+    let authors = author_pubkeys
+        .iter()
+        .filter_map(|pubkey| PublicKey::parse(pubkey).ok())
+        .collect::<Vec<_>>();
+    if authors.is_empty() {
+        return None;
+    }
+    Some(
+        Filter::new()
+            .kinds([
+                Kind::Custom(CHANNEL_MESSAGE_KIND),
+                Kind::Custom(STREAM_MESSAGE_V2_KIND),
+            ])
+            .authors(authors)
             .since(since),
     )
 }
@@ -1017,6 +1082,8 @@ mod tests {
                     event_id: event_id.clone(),
                     ask_id: Some("ask-id".to_owned()),
                     reply_to_event_id: None,
+                    ask_body: None,
+                    publish_reply_to_event_id: Some(event_id.clone()),
                     state: TurnState::Open,
                     opened_at: None,
                 }),
@@ -1041,6 +1108,33 @@ mod tests {
 
         fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error> {
             unreachable!()
+        }
+
+        fn save_watch(&mut self, _watch: &crate::watch::WatchRecord) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        fn cancel_watches(
+            &mut self,
+            _bot_id: &BotId,
+            _channel_id: &str,
+            _author_pubkey: &str,
+            _cancel_event_id: &EventId,
+            _cancel_created_at: i64,
+        ) -> Result<usize, Self::Error> {
+            unreachable!()
+        }
+
+        fn watched_author_pubkeys(&self, _now: i64) -> Result<Vec<String>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        fn record_matching_watch_fires(
+            &mut self,
+            _event: &IndexedRelayEvent,
+            _now: i64,
+        ) -> Result<Vec<crate::watch::WatchFire>, Self::Error> {
+            Ok(Vec::new())
         }
 
         fn save_outbound_attempt(
@@ -1567,7 +1661,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_refresh_replaces_populated_channel_and_mutation_filters() {
+    async fn subscription_refresh_replaces_all_dynamic_filters() {
         let relay = LocalRelay::new();
         relay.run().await.expect("run relay");
         let client = Client::new();
@@ -1580,12 +1674,15 @@ mod tests {
         let operator = Keys::generate().public_key().to_hex();
         let first = EventId::parse_hex(&"a".repeat(64)).expect("first event");
         let second = EventId::parse_hex(&"b".repeat(64)).expect("second event");
+        let first_author = Keys::generate().public_key().to_hex();
+        let second_author = Keys::generate().public_key().to_hex();
 
         subscriber
             .subscribe(
                 &operator,
                 &["channel-a".to_owned()],
                 std::slice::from_ref(&first),
+                std::slice::from_ref(&first_author),
                 Timestamp::zero(),
             )
             .await
@@ -1595,6 +1692,7 @@ mod tests {
                 &operator,
                 &["channel-b".to_owned()],
                 std::slice::from_ref(&second),
+                std::slice::from_ref(&second_author),
                 Timestamp::zero(),
             )
             .await
@@ -1616,6 +1714,10 @@ mod tests {
         assert_eq!(
             filter_json("botserver-mutations")["#e"],
             serde_json::json!([second.as_str()])
+        );
+        assert_eq!(
+            filter_json("botserver-watched-authors")["authors"],
+            serde_json::json!([second_author])
         );
 
         client.disconnect().await;

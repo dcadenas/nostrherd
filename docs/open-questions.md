@@ -12,5 +12,5 @@ by guessing.
 | Q5 | Progress posts vs one stamped reply at end for long work | Turn state | decided (D17) |
 | Q6 | Token- or event-count renew | Kelpie | later |
 | Q7 | Mechanism for relaying occupant progress prose (stamped or not, reply-in-thread vs new post, rate caps) | Channel noise, D17/D33 host behavior | decided (D42) |
-| Q8 | Presence proxy: author-activity watches waking occupants | Wake path, ingest filters | later (proposal: docs/proposals.md) |
+| Q8 | Presence proxy: author-activity watches waking occupants | Wake path, ingest filters | decided (D45, D46) |
 | Q9 | Host-side recurring schedules for occupants | Scheduler, turns, D12 | later (proposal: docs/proposals.md) |

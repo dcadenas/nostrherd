@@ -40,6 +40,18 @@ An edit that re-queues the same EventId keeps the marker up. Relayed
 progress (D42) is one host-created, host-edited stamped post per ask —
 kept on final, Buzz-deleted (kind 9005) on cancel, excluded from
 snapshots and ask Context — with its own durable progress row (D28).
+A host-initiated Turn persists its typed ask body and has no relay reply target
+or mention. Its final still uses the same stamped publish attempt and terminal
+Turn transition (D45, D46).
+
+### Watch
+
+Durable host predicate declared by one bot session. Holds: author public keys,
+optional channel and kind, cooldown, expiry or maximum fires, fire count, and
+state. A separate immutable fire ledger maps one matched source event to one
+synthetic wake Turn id. The host records that mapping before it asks an
+occupant. Kelpie has no relay visibility, so this state does not duplicate its
+timer ledger (D44, D45).
 
 ## Values
 
