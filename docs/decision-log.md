@@ -685,3 +685,78 @@ progress edits and deletes go through the same client, not `buzz
 messages`. SPEC "Host publish" and "Inbox" are unchanged (they never
 named the CLI). docs/testing.md and docs/operator-runbook.md recipes
 flip buzz to peer/verification only; skills/local-relay is unchanged.
+
+## D44. Recurring schedules live in Kelpie; the host owns restraint
+
+Status: accepted
+
+Amends P2 in `docs/proposals.md`, which previously placed the cron in
+the host.
+
+A repeating schedule is a durable timer bound to a logical agent. That
+is Kelpie's, not the host's: `kelpie tell --every`, with `schedules`
+and `schedule-cancel`. The host MUST NOT keep its own schedule table,
+firing loop, high-water mark, or missed-fire policy.
+
+Reason: a second durable scheduler means a second implementation of
+record-before-send, idempotent firing and crash recovery. Two of this
+repository's own defects came from one rule written in two places, and
+one of them published nothing for ninety-two minutes. One timer with
+two consumers is the smaller surface.
+
+An occupant arms its own schedule. Fixed text is a repeating
+`kelpie tell botserver`, which D38's publish path already posts
+stamped, with no `--reply-to` and no marker. A fresh status each time
+is a repeating tell the occupant sends to itself, after which it tells
+`botserver` with the result. Neither needs host code.
+
+A schedule fires only while its target is addressable. Kelpie fails
+closed and MUST NOT start, revive, or restart an agent to deliver one,
+so an absent occupant misses firings rather than being resurrected.
+This is deliberate: reviving on a timer is what turns a timer into a
+workflow engine.
+
+The host stores nothing about schedules. `inbox.delivery` carries no
+schedule provenance, so a host mapping would be a second source of
+truth that cannot be reconciled against Kelpie's.
+
+Restraint is the host's and MUST ship with the first recurring
+capability, not after it. An occupant proposes; the host enforces, as
+in D42's edit cap. A per-bot, per-channel ceiling on host-initiated
+posts and a quiet-hours window are enforced at the publish path, so no
+occupant can bypass them by scheduling more aggressively.
+
+## D45. Author watches are host-evaluated; no model runs until a match
+
+Status: accepted
+
+Accepts P1 in `docs/proposals.md`.
+
+"Online" means observable relay activity by an author. There is no
+presence protocol on this stack and the host MUST NOT fake one.
+
+A watch is evaluated in the host, against the relay stream it already
+subscribes to with scoped filters and persisted cursors (D18, D24). No
+occupant runs until a watch matches.
+
+Reason: the alternative is an occupant polling its own snapshot on a
+repeating schedule, which spends a language-model invocation per tick
+whether or not anything happened, sees only its own channel, and
+notices no sooner than its interval. Host evaluation costs nothing per
+non-event, watches a person across every channel the host sees, and
+fires immediately. That is what makes many watches affordable.
+
+A watch record in host SQLite does not contradict D44. The test is
+whether the other side already owns the mechanism: Kelpie owns a
+durable timer, so a host schedule table would duplicate it; Kelpie
+cannot see the relay, so a watch has no counterpart and the host is the
+only place it can live.
+
+A match fires a host-initiated wake: a turn opened without a person
+writing a trigger, carrying a typed section so the occupant can tell a
+wake from a request. That wake is shared with every other deferred
+source and MUST be built once.
+
+Firing is durable and cooldown-bounded. The host records the fire
+before waking, so a crash cannot replay it, and a per-watch cooldown
+keeps one person's burst from poking a bot repeatedly.
