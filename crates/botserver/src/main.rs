@@ -341,31 +341,48 @@ async fn observe_event(
     operator_pubkey: &str,
     event: &Event,
 ) -> Result<(), HostError> {
-    if let Some(action) = ingest.ingest(event)? {
+    let action = ingest.ingest(event)?;
+    let event_id = EventId::parse_hex(&event.id.to_hex()).expect("SDK event ids are 32 bytes");
+    if let Some(action) = action {
         let event_id = ingest_event_id(&action).clone();
-        let Some(bot_id) = action_bot_id(ingest.repository_mut(), &action)? else {
+        if let Some(bot_id) = action_bot_id(ingest.repository_mut(), &action)? {
+            if let Some(actor) = actor_for_bot(actors, &bot_id) {
+                let display =
+                    channel_display_for(actor, subscriber, operator_pubkey, &action).await;
+                match actor.handle_ingest(kelpie, waiter, &action, &display) {
+                    Ok(outcome) => match action {
+                        IngestAction::TurnCandidate { .. } => {
+                            eprintln!("observed trigger {} {outcome:?}", event_id.as_str());
+                        }
+                        IngestAction::Edit { .. } | IngestAction::Delete { .. } => {
+                            eprintln!("observed ingest {} {outcome:?}", event_id.as_str());
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!("occupant dispatch failed {} {error}", event_id.as_str());
+                    }
+                }
+            } else {
+                ingest.repository_mut().mark_event_processed(&event_id)?;
+            }
+        } else {
             ingest.repository_mut().mark_event_processed(&event_id)?;
-            return Ok(());
+        }
+    }
+    let fires = ingest.record_watch_fires(&event_id, unix_now().map_err(HostError::Runtime)?)?;
+    for fire in fires {
+        let Some(actor) = actor_for_bot(actors, &fire.bot_id) else {
+            continue;
         };
-        let Some(actor) = actor_for_bot(actors, &bot_id) else {
-            ingest.repository_mut().mark_event_processed(&event_id)?;
-            return Ok(());
-        };
-        let display = channel_display_for(actor, subscriber, operator_pubkey, &action).await;
-        let outcome = match actor.handle_ingest(kelpie, waiter, &action, &display) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                eprintln!("occupant dispatch failed {} {error}", event_id.as_str());
-                return Ok(());
-            }
-        };
-        match action {
-            IngestAction::TurnCandidate { .. } => {
-                eprintln!("observed trigger {} {outcome:?}", event_id.as_str());
-            }
-            IngestAction::Edit { .. } | IngestAction::Delete { .. } => {
-                eprintln!("observed ingest {} {outcome:?}", event_id.as_str());
-            }
+        match actor.handle_watch_fire(kelpie, waiter, &fire) {
+            Ok(outcome) => eprintln!(
+                "observed watch fire {} {outcome:?}",
+                fire.wake_event_id.as_str()
+            ),
+            Err(error) => eprintln!(
+                "watch wake dispatch failed {} {error}",
+                fire.wake_event_id.as_str()
+            ),
         }
     }
     Ok(())
@@ -377,12 +394,14 @@ async fn refresh_subscription(
     repository: &SqliteRepository,
     channel_ids: &[String],
     active_event_ids: &[EventId],
+    watched_author_pubkeys: &[String],
 ) -> Result<(), HostError> {
     subscriber
         .subscribe(
             operator_pubkey,
             channel_ids,
             active_event_ids,
+            watched_author_pubkeys,
             replay_since(repository)?,
         )
         .await?;
@@ -396,6 +415,7 @@ struct RelayPoll {
     last_queued_resume: Instant,
     last_channel_ids: Vec<String>,
     last_active_event_ids: Vec<EventId>,
+    last_watched_author_pubkeys: Vec<String>,
 }
 
 struct SubscriptionErrorNotice {
@@ -408,11 +428,13 @@ impl RelayPoll {
         &self,
         channel_ids: &[String],
         active_event_ids: &[EventId],
+        watched_author_pubkeys: &[String],
     ) -> bool {
         !self.announced
             || self.subscription_error.is_some()
             || channel_ids != self.last_channel_ids
             || active_event_ids != self.last_active_event_ids
+            || watched_author_pubkeys != self.last_watched_author_pubkeys
     }
 }
 
@@ -463,6 +485,7 @@ async fn fetch_stored_events(
     operator_pubkey: &str,
     channel_ids: &[String],
     active_event_ids: &[EventId],
+    watched_author_pubkeys: &[String],
     since: Timestamp,
 ) -> Result<Vec<Event>, RelaySubscribeError> {
     let mut events = subscriber.fetch_messages(operator_pubkey, since).await?;
@@ -472,6 +495,11 @@ async fn fetch_stored_events(
             .await?,
     );
     events.extend(subscriber.fetch_mutations(active_event_ids, since).await?);
+    events.extend(
+        subscriber
+            .fetch_watched_author_messages(watched_author_pubkeys, since)
+            .await?,
+    );
     Ok(events)
 }
 
@@ -494,13 +522,18 @@ async fn poll_relay(
             }
         },
     };
-    if poll.subscription_refresh_needed(&scope.channel_ids, &scope.active_event_ids) {
+    if poll.subscription_refresh_needed(
+        &scope.channel_ids,
+        &scope.active_event_ids,
+        &scope.watched_author_pubkeys,
+    ) {
         match refresh_subscription(
             subscriber,
             operator_pubkey,
             ingest.repository_mut(),
             &scope.channel_ids,
             &scope.active_event_ids,
+            &scope.watched_author_pubkeys,
         )
         .await
         {
@@ -509,6 +542,8 @@ async fn poll_relay(
                 poll.last_channel_ids.clone_from(&scope.channel_ids);
                 poll.last_active_event_ids
                     .clone_from(&scope.active_event_ids);
+                poll.last_watched_author_pubkeys
+                    .clone_from(&scope.watched_author_pubkeys);
                 if !poll.announced {
                     eprintln!("botserver connected");
                     poll.announced = true;
@@ -539,6 +574,7 @@ async fn poll_relay(
         operator_pubkey,
         &scope.channel_ids,
         &scope.active_event_ids,
+        &scope.watched_author_pubkeys,
         since,
     )
     .await
@@ -642,6 +678,7 @@ fn handle_host_delivery(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result<(), HostError> {
     let operator_pubkey = operator.keys.public_key().to_hex();
     let kelpie = KelpieClient::default();
@@ -689,6 +726,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
         last_queued_resume: Instant::now(),
         last_channel_ids: Vec::new(),
         last_active_event_ids: Vec::new(),
+        last_watched_author_pubkeys: Vec::new(),
     };
     loop {
         tokio::select! {
@@ -893,17 +931,27 @@ mod tests {
             last_queued_resume: Instant::now(),
             last_channel_ids: channel_ids.clone(),
             last_active_event_ids: active_event_ids.clone(),
+            last_watched_author_pubkeys: Vec::new(),
         };
 
-        assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids, &[]));
         poll.subscription_error = None;
-        assert!(!poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        assert!(!poll.subscription_refresh_needed(&channel_ids, &active_event_ids, &[]));
         poll.announced = false;
-        assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids));
+        assert!(poll.subscription_refresh_needed(&channel_ids, &active_event_ids, &[]));
         poll.announced = true;
-        assert!(poll.subscription_refresh_needed(&["channel-b".to_owned()], &active_event_ids));
+        assert!(poll.subscription_refresh_needed(
+            &["channel-b".to_owned()],
+            &active_event_ids,
+            &[]
+        ));
         let other_event = EventId::parse_hex(&"b".repeat(64)).expect("event");
-        assert!(poll.subscription_refresh_needed(&channel_ids, &[other_event]));
+        assert!(poll.subscription_refresh_needed(&channel_ids, &[other_event], &[]));
+        assert!(poll.subscription_refresh_needed(
+            &channel_ids,
+            &active_event_ids,
+            &["c".repeat(64)]
+        ));
     }
 
     struct EnvRestore {

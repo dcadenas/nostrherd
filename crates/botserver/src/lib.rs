@@ -1379,6 +1379,7 @@ pub mod progress;
 pub mod relay;
 pub mod snapshot;
 pub mod sqlite;
+pub mod watch;
 
 #[cfg(test)]
 mod spec_flows;
@@ -1432,6 +1433,10 @@ pub struct NewTurn {
     pub channel_id: String,
     pub event_id: EventId,
     pub reply_to_event_id: Option<EventId>,
+    /// Persisted ask source for host-initiated turns.
+    pub ask_body: Option<String>,
+    /// Relay event answered by the final, absent for host-initiated wakes.
+    pub publish_reply_to_event_id: Option<EventId>,
 }
 
 /// One persisted turn in session order.
@@ -1443,6 +1448,8 @@ pub struct TurnRecord {
     pub event_id: EventId,
     pub ask_id: Option<String>,
     pub reply_to_event_id: Option<EventId>,
+    pub ask_body: Option<String>,
+    pub publish_reply_to_event_id: Option<EventId>,
     pub state: TurnState,
     /// Unix seconds when the turn opened (D42 hold start). `None` for a
     /// queued turn, and for open turns recorded before this column existed.
@@ -1692,6 +1699,43 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the turns cannot be read.
     fn active_event_ids(&self) -> Result<Vec<EventId>, Self::Error>;
+
+    /// Store one idempotent watch declaration and its author set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the watch cannot be persisted.
+    fn save_watch(&mut self, watch: &crate::watch::WatchRecord) -> Result<(), Self::Error>;
+
+    /// Cancel active watches in one session for an author.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when watch state cannot be updated.
+    fn cancel_watches(
+        &mut self,
+        bot_id: &BotId,
+        channel_id: &str,
+        author_pubkey: &str,
+    ) -> Result<usize, Self::Error>;
+
+    /// Authors whose active watches require relay subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when watch state cannot be read.
+    fn watched_author_pubkeys(&self, now: i64) -> Result<Vec<String>, Self::Error>;
+
+    /// Atomically record every eligible fire before returning wake work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when watch state cannot be read or persisted.
+    fn record_matching_watch_fires(
+        &mut self,
+        event: &IndexedRelayEvent,
+        now: i64,
+    ) -> Result<Vec<crate::watch::WatchFire>, Self::Error>;
 
     /// Persist an outbound attempt without overwriting an accepted event id.
     ///

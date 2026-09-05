@@ -51,6 +51,15 @@ Ask body shape (request, then capped Context) is proved by
 `crates/botserver/src/ask_body.rs` and
 `ask_context_includes_unprefixed_line_between_triggers`.
 
+Host-initiated watch turns are proved by
+`host_watch_fire_opens_a_normal_turn_with_a_typed_section`,
+`host_watch_fire_queues_behind_an_open_turn`, and
+`host_wake_final_publishes_without_a_reply_or_mention`. SQLite matching and
+record-before-wake behavior are proved by
+`watched_author_fires_once_per_cooldown_and_unwatched_author_does_not` and
+`watch_scope_lifetime_and_cancel_control_author_subscription`. Dynamic author
+filter replacement is covered by `subscription_refresh_replaces_all_dynamic_filters`.
+
 Occupant Herdr allocation argv (`workspace create`, not `tab create`)
 is `allocate_uses_workspace_create_not_tab_create` (D39, I16).
 
@@ -73,6 +82,7 @@ Invariants and their tests: `docs/invariants.md`.
 | 11 Long work | `flow_11_one_ask_while_the_occupant_works`, `flow_11_progress_is_one_edited_post_then_a_final` (D42: progress post after the hold, edit in place, final leaves it up) | landed (`dcadenas/botserver#20`); progress relay: issue 60 recipe below |
 | 12 Desktop | `flow_12_host_does_not_publish_presence_or_typing` | landed (`dcadenas/botserver#20`) |
 | 13 Bot-initiated tell | `known_occupant_tell_posts_without_trigger_reply_to`, `occupant_tell_tag_routes_and_drops_scratch` | optional |
+| 14 Author watch | `host_watch_fire_opens_a_normal_turn_with_a_typed_section`, `watched_author_fires_once_per_cooldown_and_unwatched_author_does_not`, `host_wake_final_publishes_without_a_reply_or_mention` | issue 73 required |
 
 Live columns are issues 18–20. Occupant start/ask from the running host
 (`dcadenas/botserver#17`) uses the local relay; it is not the flow 2 live

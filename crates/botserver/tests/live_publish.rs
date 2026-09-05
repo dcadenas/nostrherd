@@ -239,7 +239,7 @@ async fn live_refresh_replaces_channel_and_active_turn_filters() {
     let mut notifications = subscriber.notifications();
 
     subscriber
-        .subscribe(&operator, &[], &[], Timestamp::now())
+        .subscribe(&operator, &[], &[], &[], Timestamp::now())
         .await
         .expect("initial subscriptions");
 
@@ -259,6 +259,7 @@ async fn live_refresh_replaces_channel_and_active_turn_filters() {
             &operator,
             std::slice::from_ref(&channel),
             std::slice::from_ref(&trigger),
+            &[],
             Timestamp::now(),
         )
         .await

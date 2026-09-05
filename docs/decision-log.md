@@ -760,3 +760,30 @@ source and MUST be built once.
 Firing is durable and cooldown-bounded. The host records the fire
 before waking, so a crash cannot replay it, and a per-watch cooldown
 keeps one person's burst from poking a bot repeatedly.
+
+## D46. Watch v1 uses trigger phrases and retains its ledger
+
+Status: accepted
+
+Closes the implementation choices left open by D45 and P1.
+
+Watch management uses exact trigger requests. Create is `watch
+<pubkey[,pubkey...]>`, with optional `here`, `kind <number>`, `cooldown
+<minutes>`, `expires <minutes>`, and `max <fires>` clauses. Kind is limited to
+indexed channel message kinds 9 and 40002. Cancel is `cancel
+watch <pubkey>` and cancels active watches for that author in the declaring
+bot session. Public keys are explicit in v1; name resolution would add an
+unrelated identity directory. A declaration with no explicit expiry or fire
+limit defaults to one fire, and cooldown defaults to 30 minutes.
+
+A watch always wakes the session in which it was declared, including a direct
+message. An unscoped watch observes that author across subscribed channels;
+`here` narrows matching to the declaring channel. The matched message remains
+context, not a reply coordinate: the wake final is a top-level stamped post in
+the declaring channel with no mention.
+
+Expired, completed, and cancelled watch rows and all fire rows are retained as
+the crash-safety and audit ledger. Only watches still inside their lifetime and
+fire limit contribute author subscription filters. Fire insertion, fire-count
+advance, and completion are one SQLite transaction. A deterministic wake Turn
+id is stored with the fire before Kelpie is called, so replay cannot double-wake.

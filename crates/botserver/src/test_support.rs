@@ -118,6 +118,8 @@ fn open_repo_for_tags(bot: &str, tags_json: &str) -> (SqliteRepository, FakePubl
             channel_id: CHANNEL.to_owned(),
             event_id: event_id('a'),
             reply_to_event_id: None,
+            ask_body: None,
+            publish_reply_to_event_id: Some(event_id('a')),
         })
         .unwrap();
     repository

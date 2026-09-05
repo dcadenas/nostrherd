@@ -14,6 +14,7 @@ use crate::outbox::{
 };
 use crate::progress::{self, NoopProgressRelay, ProgressRelay};
 use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
+use crate::watch::{parse_watch_command, WatchCommand, WatchFire, WatchRecord};
 use crate::{
     occupant_bootstrap, AskDelivery, HostRepository, HostWaiter, IndexedRelayEvent, KelpieClient,
     KelpieError, NewTurn, OccupantLaunch, SessionRecord, TurnState,
@@ -64,6 +65,7 @@ pub struct TriggerWork {
 pub struct PendingScope {
     pub channel_ids: Vec<String>,
     pub active_event_ids: Vec<EventId>,
+    pub watched_author_pubkeys: Vec<String>,
 }
 
 /// How the actor treated one trigger.
@@ -278,6 +280,7 @@ where
     ///
     /// Returns an error when persistence cannot list sessions or turns.
     pub fn pending_scope(&self) -> Result<PendingScope, ActorError<R::Error>> {
+        let now = crate::unix_now().map_err(ActorError::Snapshot)?;
         Ok(PendingScope {
             channel_ids: self
                 .repository
@@ -286,6 +289,10 @@ where
             active_event_ids: self
                 .repository
                 .active_event_ids()
+                .map_err(ActorError::Repository)?,
+            watched_author_pubkeys: self
+                .repository
+                .watched_author_pubkeys(now)
                 .map_err(ActorError::Repository)?,
         })
     }
@@ -310,6 +317,7 @@ where
             work.channel_display.as_str()
         };
         self.ensure_session(&work.channel_id, display)?;
+        self.apply_watch_command(&work.event_id, &work.channel_id, &work.nostr_body)?;
         let Some(_) = self
             .repository
             .enqueue_unprocessed_turn(&NewTurn {
@@ -317,6 +325,8 @@ where
                 channel_id: work.channel_id.clone(),
                 event_id: work.event_id.clone(),
                 reply_to_event_id: work.reply_to_event_id.clone(),
+                ask_body: None,
+                publish_reply_to_event_id: Some(work.event_id.clone()),
             })
             .map_err(ActorError::Repository)?
         else {
@@ -328,6 +338,77 @@ where
         }
         self.ask_oldest_queued(kelpie, waiter, &work.channel_id, &work.nostr_body)?;
         Ok(TriggerOutcome::Asked)
+    }
+
+    /// Queue a previously recorded host watch fire on its declaring session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence, pane allocation, or Kelpie fails.
+    pub fn handle_watch_fire(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        fire: &WatchFire,
+    ) -> Result<TriggerOutcome, ActorError<R::Error>> {
+        self.repository
+            .enqueue_turn(&NewTurn {
+                bot_id: self.bot.id().clone(),
+                channel_id: fire.channel_id.clone(),
+                event_id: fire.wake_event_id.clone(),
+                reply_to_event_id: Some(fire.source_event_id.clone()),
+                ask_body: Some(fire.ask_body()),
+                publish_reply_to_event_id: None,
+            })
+            .map_err(ActorError::Repository)?;
+        if !self.should_ask_event(&fire.channel_id, &fire.wake_event_id)? {
+            return Ok(TriggerOutcome::Queued);
+        }
+        self.ask_oldest_queued(kelpie, waiter, &fire.channel_id, &fire.ask_body())?;
+        Ok(TriggerOutcome::Asked)
+    }
+
+    fn apply_watch_command(
+        &mut self,
+        declaration_event_id: &EventId,
+        channel_id: &str,
+        request: &str,
+    ) -> Result<(), ActorError<R::Error>> {
+        let Some(command) = parse_watch_command(request) else {
+            return Ok(());
+        };
+        match command {
+            WatchCommand::Create(watch) => {
+                let now = crate::unix_now().map_err(ActorError::Snapshot)?;
+                let created_at = self
+                    .repository
+                    .indexed_event(declaration_event_id)
+                    .map_err(ActorError::Repository)?
+                    .map_or(now, |event| event.created_at);
+                self.repository
+                    .save_watch(&WatchRecord {
+                        watch_id: declaration_event_id.clone(),
+                        created_at,
+                        bot_id: self.bot.id().clone(),
+                        channel_id: channel_id.to_owned(),
+                        author_pubkeys: watch.author_pubkeys,
+                        predicate_channel_id: watch.channel_only.then(|| channel_id.to_owned()),
+                        predicate_kind: watch.kind,
+                        cooldown_secs: watch.cooldown_secs,
+                        expires_at: watch
+                            .expires_after_secs
+                            .map(|duration| now.saturating_add(duration)),
+                        max_fires: watch.max_fires,
+                    })
+                    .map_err(ActorError::Repository)?;
+            }
+            WatchCommand::Cancel { author_pubkey } => {
+                self.repository
+                    .cancel_watches(self.bot.id(), channel_id, &author_pubkey)
+                    .map_err(ActorError::Repository)?;
+            }
+        }
+        Ok(())
     }
 
     /// Handle one ingest action for this bot.
@@ -725,6 +806,8 @@ where
                 channel_id: active.channel_id.clone(),
                 event_id: target_event_id.clone(),
                 reply_to_event_id: active.reply_to_event_id.clone(),
+                ask_body: None,
+                publish_reply_to_event_id: Some(target_event_id.clone()),
             })
             .map_err(ActorError::Repository)?
         else {
@@ -828,6 +911,13 @@ where
     }
 
     fn queued_ask_body(&self, event_id: &EventId) -> Result<Option<String>, ActorError<R::Error>> {
+        let turn = self
+            .repository
+            .active_turn_for_event(event_id)
+            .map_err(ActorError::Repository)?;
+        if let Some(body) = turn.as_ref().and_then(|turn| turn.ask_body.clone()) {
+            return Ok(Some(body));
+        }
         Ok(self
             .repository
             .latest_body_for_event(event_id)
@@ -896,6 +986,7 @@ where
             .is_some_and(|turn| turn.event_id == *event_id))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn ask_oldest_queued(
         &mut self,
         kelpie: &KelpieClient,
@@ -946,9 +1037,14 @@ where
             .min_by_key(|turn| turn.sequence)
             .ok_or(ActorError::UnnameableSession)?;
         let events = self.channel_events_for_occupant(channel_id)?;
+        let context_event_id = queued
+            .ask_body
+            .as_ref()
+            .and(queued.reply_to_event_id.as_ref())
+            .unwrap_or(&queued.event_id);
         let trigger_created_at = match self
             .repository
-            .indexed_event(&queued.event_id)
+            .indexed_event(context_event_id)
             .map_err(ActorError::Repository)?
         {
             Some(event) => event.created_at,
@@ -969,7 +1065,7 @@ where
             &session.session_name,
             channel_id,
             cursor.as_ref(),
-            &queued.event_id,
+            context_event_id,
             trigger_created_at,
             &events,
         );
@@ -1225,6 +1321,8 @@ pub fn persist_ingest<R: HostRepository>(
                     channel_id: channel_id.clone(),
                     event_id: event_id.clone(),
                     reply_to_event_id: reply_to_event_id.clone(),
+                    ask_body: None,
+                    publish_reply_to_event_id: Some(event_id.clone()),
                 })
                 .map_err(ActorError::Repository)?
             else {
@@ -1532,6 +1630,138 @@ mod tests {
             runner,
             panes,
         )
+    }
+
+    #[test]
+    fn host_watch_fire_opens_a_normal_turn_with_a_typed_section() {
+        let (mut actor, kelpie, runner, _panes) =
+            actor([adopt(), whoami(), renewed(), whoami(), asked("ask-watch")]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        actor
+            .repository
+            .save_session(&SessionRecord {
+                bot_id: actor.bot.id().clone(),
+                channel_id: channel_id.to_owned(),
+                session_name: "bot-foobar".to_owned(),
+                occupant_logical_id: Some("occupant-agent".to_owned()),
+                renew_id: None,
+                ask_context_event_id: None,
+                ask_context_created_at: None,
+            })
+            .expect("session");
+        let fire = WatchFire {
+            watch_id: event_id('a'),
+            wake_event_id: event_id('b'),
+            source_event_id: event_id('c'),
+            bot_id: actor.bot.id().clone(),
+            channel_id: channel_id.to_owned(),
+            author_pubkey: "d".repeat(64),
+            source_channel_id: Some("elsewhere".to_owned()),
+            source_kind: 9,
+        };
+
+        assert_eq!(
+            actor
+                .handle_watch_fire(&kelpie, &waiter, &fire)
+                .expect("wake"),
+            TriggerOutcome::Asked
+        );
+        let turn = actor
+            .repository
+            .turns_for_session(actor.bot.id(), channel_id)
+            .expect("turns")
+            .pop()
+            .expect("turn");
+        assert_eq!(turn.state, TurnState::Open);
+        assert!(turn.publish_reply_to_event_id.is_none());
+        let calls = runner.calls.lock().expect("calls");
+        let body = &calls.last().expect("ask").1;
+        let body = String::from_utf8_lossy(body);
+        assert!(body.starts_with("## Watch event\n\n"));
+        assert!(body.contains("## Context"));
+    }
+
+    #[test]
+    fn host_watch_fire_queues_behind_an_open_turn() {
+        let (mut actor, kelpie, runner, _panes) = actor([adopt()]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        actor
+            .repository
+            .save_session(&SessionRecord {
+                bot_id: actor.bot.id().clone(),
+                channel_id: channel_id.to_owned(),
+                session_name: "bot-foobar".to_owned(),
+                occupant_logical_id: Some("occupant-agent".to_owned()),
+                renew_id: None,
+                ask_context_event_id: None,
+                ask_context_created_at: None,
+            })
+            .expect("session");
+        actor
+            .repository
+            .enqueue_turn(&NewTurn {
+                bot_id: actor.bot.id().clone(),
+                channel_id: channel_id.to_owned(),
+                event_id: event_id('a'),
+                reply_to_event_id: None,
+                ask_body: Some("## Existing wake".to_owned()),
+                publish_reply_to_event_id: None,
+            })
+            .expect("existing turn");
+        actor
+            .repository
+            .open_next_turn(actor.bot.id(), channel_id, "ask-open")
+            .expect("open");
+        let fire = WatchFire {
+            watch_id: event_id('b'),
+            wake_event_id: event_id('c'),
+            source_event_id: event_id('d'),
+            bot_id: actor.bot.id().clone(),
+            channel_id: channel_id.to_owned(),
+            author_pubkey: "e".repeat(64),
+            source_channel_id: Some("elsewhere".to_owned()),
+            source_kind: 9,
+        };
+
+        assert_eq!(
+            actor
+                .handle_watch_fire(&kelpie, &waiter, &fire)
+                .expect("wake"),
+            TriggerOutcome::Queued
+        );
+        assert_eq!(
+            actor
+                .repository
+                .turns_for_session(actor.bot.id(), channel_id)
+                .expect("turns")
+                .iter()
+                .map(|turn| turn.state)
+                .collect::<Vec<_>>(),
+            [TurnState::Open, TurnState::Queued]
+        );
+        assert_eq!(runner.calls.lock().expect("calls").len(), 1);
+    }
+
+    #[test]
+    fn trigger_phrase_creates_a_watched_author_scope() {
+        let (mut actor, kelpie, _runner, _panes) =
+            actor([adopt(), start(), renewed(), whoami(), asked("ask-watch")]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let author = "d".repeat(64);
+        let trigger = work('a', &format!("watch {author} max 2"), None);
+
+        assert_eq!(
+            actor
+                .handle_trigger(&kelpie, &waiter, &trigger)
+                .expect("handle"),
+            TriggerOutcome::Asked
+        );
+        assert_eq!(
+            actor.pending_scope().expect("scope").watched_author_pubkeys,
+            [author]
+        );
     }
 
     #[test]
@@ -2132,6 +2362,8 @@ mod tests {
                 channel_id: first_channel.to_owned(),
                 event_id: event_id('a'),
                 reply_to_event_id: None,
+                ask_body: None,
+                publish_reply_to_event_id: Some(event_id('a')),
             })
             .expect("first enqueue");
         actor
@@ -2173,6 +2405,8 @@ mod tests {
                 channel_id: second_channel.to_owned(),
                 event_id: event_id('b'),
                 reply_to_event_id: None,
+                ask_body: None,
+                publish_reply_to_event_id: Some(event_id('b')),
             })
             .expect("second enqueue");
 
@@ -2222,6 +2456,8 @@ mod tests {
                 channel_id: trigger.channel_id.clone(),
                 event_id: trigger.event_id.clone(),
                 reply_to_event_id: None,
+                ask_body: None,
+                publish_reply_to_event_id: Some(trigger.event_id.clone()),
             })
             .expect("enqueue");
 
@@ -2389,6 +2625,8 @@ mod tests {
                 channel_id: trigger.channel_id,
                 event_id: trigger.event_id,
                 reply_to_event_id: None,
+                ask_body: None,
+                publish_reply_to_event_id: Some(event_id('a')),
             })
             .expect("enqueue");
 
@@ -2459,6 +2697,8 @@ mod tests {
                     channel_id: channel.to_owned(),
                     event_id: event,
                     reply_to_event_id: None,
+                    ask_body: None,
+                    publish_reply_to_event_id: Some(event_id(character)),
                 })
                 .expect("enqueue");
         }
@@ -2490,6 +2730,8 @@ mod tests {
                 channel_id: trigger.channel_id.clone(),
                 event_id: trigger.event_id.clone(),
                 reply_to_event_id: None,
+                ask_body: None,
+                publish_reply_to_event_id: Some(trigger.event_id.clone()),
             })
             .expect("enqueue");
 

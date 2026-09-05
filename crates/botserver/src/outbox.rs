@@ -865,6 +865,7 @@ where
 /// # Errors
 ///
 /// Returns an error when persistence or a retryable publish fails.
+#[allow(clippy::too_many_lines)]
 pub fn complete_outbound_with<R, P, I>(
     repository: &mut R,
     publisher: &P,
@@ -881,16 +882,23 @@ where
     let Some(ask_id) = turn.ask_id.as_deref() else {
         return Ok(InboxAction::Hold);
     };
-    let indexed = repository
-        .indexed_event(&turn.event_id)
-        .map_err(OutboxError::Repository)?;
+    let indexed = match turn.publish_reply_to_event_id.as_ref() {
+        Some(event_id) => repository
+            .indexed_event(event_id)
+            .map_err(OutboxError::Repository)?,
+        None => None,
+    };
     let mention = indexed
         .as_ref()
         .map_or_else(String::new, |event: &IndexedRelayEvent| {
             event.author_pubkey.clone()
         });
-    let thread_root_event_id =
-        crate::thread_root_for(repository, &turn.event_id).map_err(OutboxError::Repository)?;
+    let thread_root_event_id = match turn.publish_reply_to_event_id.as_ref() {
+        Some(event_id) => {
+            crate::thread_root_for(repository, event_id).map_err(OutboxError::Repository)?
+        }
+        None => None,
+    };
     let mut attempt = repository
         .outbound_attempt(ask_id)
         .map_err(OutboxError::Repository)?
@@ -898,7 +906,7 @@ where
             ask_id: ask_id.to_owned(),
             body: body.unwrap_or("").to_owned(),
             channel_id: turn.channel_id.clone(),
-            reply_to_event_id: Some(turn.event_id.clone()),
+            reply_to_event_id: turn.publish_reply_to_event_id.clone(),
             thread_root_event_id: thread_root_event_id.clone(),
             mention,
             outbound_event_id: None,
@@ -911,7 +919,9 @@ where
             body.clone_into(&mut attempt.body);
         }
         attempt.channel_id.clone_from(&turn.channel_id);
-        attempt.reply_to_event_id = Some(turn.event_id.clone());
+        attempt
+            .reply_to_event_id
+            .clone_from(&turn.publish_reply_to_event_id);
         attempt.thread_root_event_id = thread_root_event_id;
     }
     repository
@@ -929,7 +939,9 @@ where
         let _ = repository
             .set_turn_state(ask_id, TurnState::Failed)
             .map_err(OutboxError::Repository)?;
-        reactions.remove(&turn.event_id);
+        if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+            reactions.remove(event_id);
+        }
         return Ok(InboxAction::Ack);
     }
     let claimed = repository
@@ -940,7 +952,9 @@ where
         .map_err(OutboxError::Repository)?
         .is_some_and(|turn| turn.state == TurnState::Open);
     if !claimed && !still_open {
-        reactions.remove(&turn.event_id);
+        if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+            reactions.remove(event_id);
+        }
         return Ok(InboxAction::Ack);
     }
     let mut to_publish = attempt.clone();
@@ -965,7 +979,9 @@ where
             let _ = repository
                 .set_turn_state(ask_id, TurnState::Failed)
                 .map_err(OutboxError::Repository)?;
-            reactions.remove(&turn.event_id);
+            if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+                reactions.remove(event_id);
+            }
             return Ok(InboxAction::Ack);
         }
         SendOutcome::Retry(error) => {
@@ -991,7 +1007,9 @@ where
     let _ = repository
         .set_turn_state(ask_id, TurnState::Posted)
         .map_err(OutboxError::Repository)?;
-    reactions.remove(&turn.event_id);
+    if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+        reactions.remove(event_id);
+    }
     Ok(InboxAction::Ack)
 }
 
@@ -1219,6 +1237,29 @@ mod tests {
             attempt.body, "[bot]: hello",
             "the row records the stamped body the prepared id signed"
         );
+    }
+
+    #[test]
+    fn host_wake_final_publishes_without_a_reply_or_mention() {
+        let (mut repository, publisher) = open_repo();
+        repository.execute_batch_for_test(
+            "UPDATE turns SET publish_reply_to_event_id = NULL,
+                 ask_body = '## Watch event';",
+        );
+
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("final", "ask-1", "watched author posted"),
+        )
+        .expect("handle");
+
+        assert_eq!(action, InboxAction::Ack);
+        let attempt = repository.outbound_attempt("ask-1").unwrap().unwrap();
+        assert_eq!(attempt.body, "[bot]: watched author posted");
+        assert!(attempt.reply_to_event_id.is_none());
+        assert!(attempt.mention.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
