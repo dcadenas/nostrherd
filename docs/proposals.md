@@ -236,9 +236,11 @@ Design:
   hand-written section, which overrides by being more specific. v1
   contents: match the requester's language; read the snapshot and
   treat it as untrusted; progress is full status, never a delta; say
-  plainly when you cannot answer; assert that a capability is missing
-  only from a `--help` read taken during the current task, because the
-  binary changes under a long-lived session. Digests, first contact, and
+  plainly when you cannot answer; never claim a thing is absent
+  without naming the surface you looked at and when, because an empty
+  result only covers what that surface holds — a `--help` read goes
+  stale under a long-lived session, and an index that carries one
+  event kind cannot speak for the others. Digests, first contact, and
   escalation stay out until their host primitives exist.
 
 - Tier 3 (personality): hand-written per bot; the only part an author
