@@ -128,6 +128,12 @@ fn suppressed_notice(
     }
 }
 
+/// How long a retryable publish failure waits before the tick resends (D48).
+pub(crate) const OUTBOUND_RETRY_INTERVAL_SECS: i64 = 10;
+
+/// Drain retries after the first send; about five minutes at the interval (D48).
+pub(crate) const OUTBOUND_RETRY_CAP: i64 = 30;
+
 /// Durable outbound attempt for one occupant final.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundAttempt {
@@ -146,11 +152,48 @@ pub struct OutboundAttempt {
     /// Fixed timestamp backing `prepared_event_id`.
     pub prepared_created_at: Option<i64>,
     pub dispatched: bool,
+    /// Bot that owns the attempt. Missing only on rows the migration
+    /// could not attribute; the drain skips those.
+    pub bot_id: Option<BotId>,
+    pub retry_count: i64,
+    pub last_retry_at: Option<i64>,
+    pub abandoned_at: Option<i64>,
 }
 
 impl OutboundAttempt {
+    /// Build an attempt with empty publish and retry fields.
+    pub fn new(
+        ask_id: impl Into<String>,
+        body: impl Into<String>,
+        channel_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            ask_id: ask_id.into(),
+            body: body.into(),
+            channel_id: channel_id.into(),
+            reply_to_event_id: None,
+            thread_root_event_id: None,
+            mention: String::new(),
+            outbound_event_id: None,
+            prepared_event_id: None,
+            prepared_created_at: None,
+            dispatched: false,
+            bot_id: None,
+            retry_count: 0,
+            last_retry_at: None,
+            abandoned_at: None,
+        }
+    }
+
     fn payload_is_mutable(&self) -> bool {
         self.outbound_event_id.is_none() && self.prepared_event_id.is_none() && !self.dispatched
+    }
+
+    fn retry_is_due(&self, now: i64) -> bool {
+        match self.last_retry_at {
+            None => true,
+            Some(last) => now.saturating_sub(last) >= OUTBOUND_RETRY_INTERVAL_SECS,
+        }
     }
 }
 
@@ -614,11 +657,22 @@ fn decide(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> Decision {
     }
 }
 
+fn unpublishable_tell_feedback(message_id: &str) -> String {
+    format!(
+        "your tell {message_id} did not publish: the body had no publishable text (empty, unclosed, or more than one routing tag). To quote the tag as prose, write \\<botserver and \\</botserver>."
+    )
+}
+
+fn unroutable_tell_feedback(message_id: &str) -> String {
+    format!("your tell {message_id} did not publish: the destination did not route.")
+}
+
 fn handle_occupant_tell<R, P>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
     restraint: &PublishRestraint,
+    occupant_feedback: &mut impl FnMut(&str, &str),
     delivery: &InboxDelivery,
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
 where
@@ -635,6 +689,10 @@ where
             delivery.message_id(),
             session.session_name
         ));
+        occupant_feedback(
+            &session.session_name,
+            &unpublishable_tell_feedback(delivery.message_id()),
+        );
         return Ok(InboxAction::Ack);
     };
     let Some(destination) =
@@ -645,6 +703,10 @@ where
             delivery.message_id(),
             session.session_name
         ));
+        occupant_feedback(
+            &session.session_name,
+            &unroutable_tell_feedback(delivery.message_id()),
+        );
         return Ok(InboxAction::Ack);
     };
     publish_initiated(
@@ -749,16 +811,8 @@ where
         .outbound_attempt(message_id)
         .map_err(OutboxError::Repository)?
         .unwrap_or_else(|| OutboundAttempt {
-            ask_id: message_id.to_owned(),
-            body: body.to_owned(),
-            channel_id: destination.channel_id.clone(),
-            reply_to_event_id: None,
-            thread_root_event_id: None,
-            mention: String::new(),
-            outbound_event_id: None,
-            prepared_event_id: None,
-            prepared_created_at: None,
-            dispatched: false,
+            bot_id: Some(bot_id.clone()),
+            ..OutboundAttempt::new(message_id, body, destination.channel_id.clone())
         });
     if attempt.payload_is_mutable() {
         body.clone_into(&mut attempt.body);
@@ -770,8 +824,11 @@ where
     repository
         .save_outbound_attempt(&attempt)
         .map_err(OutboxError::Repository)?;
-    if attempt.outbound_event_id.is_some() {
+    if attempt.outbound_event_id.is_some() || attempt.abandoned_at.is_some() {
         return Ok(InboxAction::Ack);
+    }
+    if attempt.bot_id.is_none() {
+        attempt.bot_id = Some(bot_id.clone());
     }
     if attempt.dispatched && attempt.prepared_event_id.is_none() {
         // Attempt recorded before prepared ids existed: a send may have
@@ -918,8 +975,46 @@ where
     P: OutboundPublisher,
     I: InFlightReaction,
 {
+    handle_delivery_with_feedback(
+        repository,
+        publisher,
+        notice,
+        restraint,
+        delivery,
+        reactions,
+        &mut |_, _| {},
+    )
+}
+
+/// Persist, publish, and notify the occupant when a tell cannot be posted.
+///
+/// # Errors
+///
+/// Returns an error when persistence or publish fails. A publish failure does
+/// not ACK, so reconnect can retry the same outbound attempt.
+pub fn handle_delivery_with_feedback<R, P, I>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    restraint: &PublishRestraint,
+    delivery: &InboxDelivery,
+    reactions: &I,
+    occupant_feedback: &mut impl FnMut(&str, &str),
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+    I: InFlightReaction,
+{
     if delivery.kind() == "tell" {
-        return handle_occupant_tell(repository, publisher, notice, restraint, delivery);
+        return handle_occupant_tell(
+            repository,
+            publisher,
+            notice,
+            restraint,
+            occupant_feedback,
+            delivery,
+        );
     }
     let Some(ask_id) = delivery.reply_to() else {
         return Ok(InboxAction::Ack);
@@ -1037,16 +1132,11 @@ where
         .outbound_attempt(ask_id)
         .map_err(OutboxError::Repository)?
         .unwrap_or_else(|| OutboundAttempt {
-            ask_id: ask_id.to_owned(),
-            body: body.unwrap_or("").to_owned(),
-            channel_id: turn.channel_id.clone(),
             reply_to_event_id: turn.publish_reply_to_event_id.clone(),
             thread_root_event_id: thread_root_event_id.clone(),
             mention,
-            outbound_event_id: None,
-            prepared_event_id: None,
-            prepared_created_at: None,
-            dispatched: false,
+            bot_id: Some(turn.bot_id.clone()),
+            ..OutboundAttempt::new(ask_id, body.unwrap_or(""), turn.channel_id.clone())
         });
     if attempt.payload_is_mutable() {
         if let Some(body) = body {
@@ -1061,6 +1151,12 @@ where
     repository
         .save_outbound_attempt(&attempt)
         .map_err(OutboxError::Repository)?;
+    if attempt.bot_id.is_none() {
+        attempt.bot_id = Some(turn.bot_id.clone());
+    }
+    if attempt.abandoned_at.is_some() {
+        return fail_turn(repository, reactions, turn, ask_id);
+    }
     if attempt.outbound_event_id.is_some() {
         if turn.ask_body.is_some() {
             // Accepted earlier: backfill the D47 ledger idempotently, in
@@ -1170,6 +1266,181 @@ where
         }
     }
     mark_posted(repository, reactions, turn, ask_id)
+}
+
+/// Record `failed` and clear the marker (D35) without publishing.
+fn fail_turn<R, P, I>(
+    repository: &mut R,
+    reactions: &I,
+    turn: &TurnRecord,
+    ask_id: &str,
+) -> Result<InboxAction, OutboxError<R::Error, P>>
+where
+    R: HostRepository,
+    I: InFlightReaction,
+{
+    let _ = repository
+        .set_turn_state(ask_id, TurnState::Failed)
+        .map_err(OutboxError::Repository)?;
+    if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+        reactions.remove(event_id);
+    }
+    Ok(InboxAction::Ack)
+}
+
+/// Whether this undispatched attempt should be resent on the current tick (D47).
+#[must_use]
+pub fn outbound_retry_due(attempt: &OutboundAttempt, now: i64) -> bool {
+    attempt.abandoned_at.is_none()
+        && attempt.outbound_event_id.is_none()
+        && attempt.retry_is_due(now)
+}
+
+/// Bound, notice, and stop retrying one outbound attempt (D47).
+///
+/// # Errors
+///
+/// Returns an error when persistence fails.
+pub fn abandon_outbound<R, I>(
+    repository: &mut R,
+    notice: &mut impl FnMut(&str),
+    reactions: &I,
+    attempt: &OutboundAttempt,
+    now: i64,
+    reason: &str,
+) -> Result<(), R::Error>
+where
+    R: HostRepository,
+    I: InFlightReaction,
+{
+    let mut abandoned = attempt.clone();
+    abandoned.abandoned_at = Some(now);
+    repository.save_outbound_attempt(&abandoned)?;
+    notice(&format!(
+        "abandoned outbound for {} after {} retries: {reason}",
+        attempt.ask_id, attempt.retry_count
+    ));
+    if let Some(turn) = repository.turn_by_ask_id(&attempt.ask_id)? {
+        if turn.state == TurnState::Open {
+            let _ = repository.release_publish_claim(&attempt.ask_id)?;
+            let _ = repository.set_turn_state(&attempt.ask_id, TurnState::Failed)?;
+            if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+                reactions.remove(event_id);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resend one undispatched attempt, reusing its prepared event id (D47).
+///
+/// Does not ACK. A later reconnect finds `outbound_event_id` or
+/// `abandoned_at` and ACKs without a second send.
+///
+/// # Errors
+///
+/// Returns an error when persistence or a retryable publish fails.
+pub fn retry_undispatched<R, P, I>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    restraint: &PublishRestraint,
+    reactions: &I,
+    attempt: &OutboundAttempt,
+    bot_id: &BotId,
+    now: i64,
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+    I: InFlightReaction,
+{
+    if attempt.retry_count >= OUTBOUND_RETRY_CAP
+        || (attempt.dispatched && attempt.prepared_event_id.is_none())
+    {
+        let reason = if attempt.dispatched && attempt.prepared_event_id.is_none() {
+            "send already invoked without a prepared event id"
+        } else {
+            "retry bound reached"
+        };
+        abandon_outbound(repository, notice, reactions, attempt, now, reason)
+            .map_err(OutboxError::Repository)?;
+        return Ok(InboxAction::Ack);
+    }
+    let mut paced = attempt.clone();
+    paced.retry_count = attempt.retry_count.saturating_add(1);
+    paced.last_retry_at = Some(now);
+    if paced.bot_id.is_none() {
+        paced.bot_id = Some(bot_id.clone());
+    }
+    repository
+        .save_outbound_attempt(&paced)
+        .map_err(OutboxError::Repository)?;
+    if let Some(turn) = repository
+        .turn_by_ask_id(&paced.ask_id)
+        .map_err(OutboxError::Repository)?
+    {
+        if turn.state != TurnState::Open {
+            let mut abandoned = paced.clone();
+            abandoned.abandoned_at = Some(now);
+            repository
+                .save_outbound_attempt(&abandoned)
+                .map_err(OutboxError::Repository)?;
+            return Ok(InboxAction::Ack);
+        }
+        return complete_outbound_with(
+            repository,
+            publisher,
+            notice,
+            restraint,
+            &turn,
+            None,
+            reactions,
+        );
+    }
+    republish_tell(repository, publisher, notice, &paced, bot_id)
+}
+
+fn republish_tell<R, P>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    attempt: &OutboundAttempt,
+    bot_id: &BotId,
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+{
+    if attempt.dispatched && attempt.prepared_event_id.is_none() {
+        notice(&format!(
+            "not retrying outbound for tell {}; send already invoked",
+            attempt.ask_id
+        ));
+        return Ok(InboxAction::Ack);
+    }
+    let mut to_publish = attempt.clone();
+    to_publish.body = stamp_outbound(&attempt.body, &outbound_prefix_for(bot_id));
+    match record_and_send(publisher, &mut to_publish, |attempt| {
+        repository.save_outbound_attempt(attempt)
+    })
+    .map_err(OutboxError::Repository)?
+    {
+        SendOutcome::Accepted(event_id) => {
+            let _ = repository
+                .mark_outbound_accepted(&attempt.ask_id, &event_id)
+                .map_err(OutboxError::Repository)?;
+            Ok(InboxAction::Ack)
+        }
+        SendOutcome::PrepareFailed(error) | SendOutcome::Rejected(error) => {
+            notice(&format!(
+                "not retrying outbound for tell {}: {error}",
+                attempt.ask_id
+            ));
+            Ok(InboxAction::Ack)
+        }
+        SendOutcome::Retry(error) => Err(OutboxError::Publish(error)),
+    }
 }
 
 /// Drop pending progress (D42), record `posted`, and clear the marker (D35).
@@ -1475,16 +1746,9 @@ mod tests {
         let publisher =
             BuzzPublisher::new(Client::builder().build(), keys.clone(), "ws://127.0.0.1:1");
         let mut attempt = OutboundAttempt {
-            ask_id: "ask-1".to_owned(),
-            body: "[bot]: hello".to_owned(),
-            channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
             reply_to_event_id: Some(event_id('a')),
-            thread_root_event_id: None,
             mention: keys.public_key().to_hex(),
-            outbound_event_id: None,
-            prepared_event_id: None,
-            prepared_created_at: None,
-            dispatched: false,
+            ..OutboundAttempt::new("ask-1", "[bot]: hello", crate::test_support::CHANNEL)
         };
 
         attempt.prepared_created_at = Some(1_700_000_000);
@@ -1507,16 +1771,13 @@ mod tests {
         let (mut repository, publisher) = open_repo();
         repository
             .save_outbound_attempt(&OutboundAttempt {
-                ask_id: "ask-1".to_owned(),
-                body: "hello".to_owned(),
-                channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
                 reply_to_event_id: Some(event_id('a')),
-                thread_root_event_id: None,
                 mention: "c".repeat(64),
-                outbound_event_id: None,
                 prepared_event_id: Some("e".repeat(64)),
                 prepared_created_at: Some(1_700_000_000),
                 dispatched: true,
+                bot_id: Some(BotId::new("bot").expect("bot")),
+                ..OutboundAttempt::new("ask-1", "hello", crate::test_support::CHANNEL)
             })
             .unwrap();
         repository.claim_turn_for_publish("ask-1").unwrap();
@@ -1584,16 +1845,14 @@ mod tests {
         let (mut repository, publisher) = open_repo();
         repository
             .save_outbound_attempt(&OutboundAttempt {
-                ask_id: "ask-1".to_owned(),
-                body: "hello".to_owned(),
-                channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
                 reply_to_event_id: Some(event_id('a')),
-                thread_root_event_id: None,
                 mention: "c".repeat(64),
                 outbound_event_id: Some("d".repeat(64)),
                 prepared_event_id: Some("d".repeat(64)),
                 prepared_created_at: Some(1_700_000_000),
                 dispatched: true,
+                bot_id: Some(BotId::new("bot").expect("bot")),
+                ..OutboundAttempt::new("ask-1", "hello", crate::test_support::CHANNEL)
             })
             .unwrap();
         repository.claim_turn_for_publish("ask-1").unwrap();
@@ -1618,16 +1877,11 @@ mod tests {
         let (mut repository, publisher) = open_repo();
         repository
             .save_outbound_attempt(&OutboundAttempt {
-                ask_id: "ask-1".to_owned(),
-                body: "hello".to_owned(),
-                channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
                 reply_to_event_id: Some(event_id('a')),
-                thread_root_event_id: None,
                 mention: "c".repeat(64),
-                outbound_event_id: None,
-                prepared_event_id: None,
-                prepared_created_at: None,
                 dispatched: true,
+                bot_id: Some(BotId::new("bot").expect("bot")),
+                ..OutboundAttempt::new("ask-1", "hello", crate::test_support::CHANNEL)
             })
             .unwrap();
         repository.claim_turn_for_publish("ask-1").unwrap();
@@ -1749,6 +2003,7 @@ mod tests {
         let attempt = repository.outbound_attempt("tell-1").unwrap().unwrap();
         assert!(attempt.reply_to_event_id.is_none());
         assert!(attempt.mention.is_empty());
+        assert_eq!(attempt.bot_id.as_ref().map(BotId::as_str), Some("bot"));
     }
 
     #[test]
@@ -2399,5 +2654,162 @@ mod tests {
             classify_delivery(&delivery("final", "missing", "x"), None),
             InboxAction::Hold
         );
+    }
+
+    #[test]
+    fn occupant_tell_timeout_is_retried_on_the_tick_with_the_same_id() {
+        let (mut repository, publisher) = open_repo();
+        *publisher.fail.lock().expect("fail") = Some(PublishError::NotAccepted {
+            detail: "timeout".to_owned(),
+        });
+        let err = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-retry", "queue is clear", Some("bot-foobar"), None),
+        )
+        .expect_err("retryable");
+        assert!(err.to_string().contains("timeout"));
+        let first = repository
+            .outbound_attempt("tell-retry")
+            .unwrap()
+            .expect("row");
+        let prepared = first.prepared_event_id.clone().expect("prepared");
+        assert!(!first.dispatched);
+        assert!(first.outbound_event_id.is_none());
+
+        let action = retry_undispatched(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &PublishRestraint::unrestrained(),
+            &NoopInFlightReaction,
+            &first,
+            &BotId::new("bot").expect("bot"),
+            1_700_000_010,
+        )
+        .expect("drain");
+        assert_eq!(action, InboxAction::Ack);
+        let retried = repository
+            .outbound_attempt("tell-retry")
+            .unwrap()
+            .expect("row");
+        assert_eq!(
+            retried.prepared_event_id.as_deref(),
+            Some(prepared.as_str())
+        );
+        assert_eq!(
+            retried.outbound_event_id.as_deref(),
+            Some(prepared.as_str())
+        );
+        assert_eq!(retried.retry_count, 1);
+        let sends = publisher.sends.lock().expect("sends");
+        assert_eq!(sends.len(), 2);
+        assert!(sends.iter().all(|event_id| event_id == &prepared));
+    }
+
+    #[test]
+    fn ask_final_abandon_after_the_retry_bound_fails_the_turn() {
+        let (mut repository, publisher) = open_repo();
+        let attempt = OutboundAttempt {
+            reply_to_event_id: Some(event_id('a')),
+            mention: "c".repeat(64),
+            prepared_event_id: Some("e".repeat(64)),
+            prepared_created_at: Some(1_700_000_000),
+            bot_id: Some(BotId::new("bot").expect("bot")),
+            retry_count: OUTBOUND_RETRY_CAP,
+            last_retry_at: Some(1),
+            ..OutboundAttempt::new("ask-1", "[bot]: hello", crate::test_support::CHANNEL)
+        };
+        repository.save_outbound_attempt(&attempt).unwrap();
+        let mut notices = Vec::new();
+        retry_undispatched(
+            &mut repository,
+            &publisher,
+            &mut |notice| notices.push(notice.to_owned()),
+            &PublishRestraint::unrestrained(),
+            &NoopInFlightReaction,
+            &attempt,
+            &BotId::new("bot").expect("bot"),
+            1_700_000_000,
+        )
+        .expect("abandon");
+        assert!(notices.iter().any(|notice| notice.contains("abandoned")));
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Failed
+        );
+        assert!(publisher.sends.lock().expect("sends").is_empty());
+        let stored = repository.outbound_attempt("ask-1").unwrap().unwrap();
+        assert!(stored.abandoned_at.is_some());
+    }
+
+    #[test]
+    fn escaped_routing_marker_in_a_tell_publishes() {
+        let (mut repository, publisher) = open_repo();
+        handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell(
+                "tell-escape",
+                "route with the \\<botserver to=\"eng\"> tag",
+                Some("bot-foobar"),
+                None,
+            ),
+        )
+        .expect("handle");
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["[bot]: route with the <botserver to=\"eng\"> tag".to_owned()]
+        );
+    }
+
+    #[test]
+    fn unpublishable_tell_feeds_back_to_the_occupant() {
+        let (mut repository, publisher) = open_repo();
+        let mut feedback = Vec::new();
+        let action = handle_delivery_with_feedback(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &PublishRestraint::unrestrained(),
+            &occupant_tell(
+                "tell-bad",
+                "<botserver to=\"eng\">a</botserver><botserver>b</botserver>",
+                Some("bot-foobar"),
+                None,
+            ),
+            &NoopInFlightReaction,
+            &mut |name, body| feedback.push((name.to_owned(), body.to_owned())),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(feedback.len(), 1);
+        assert_eq!(feedback[0].0, "bot-foobar");
+        assert!(feedback[0].1.contains("tell-bad"));
+        assert!(feedback[0].1.contains("\\<botserver"));
+    }
+
+    #[test]
+    fn abandoned_tell_acks_without_sending_on_reconnect() {
+        let (mut repository, publisher) = open_repo();
+        repository
+            .save_outbound_attempt(&OutboundAttempt {
+                bot_id: Some(BotId::new("bot").expect("bot")),
+                abandoned_at: Some(1),
+                ..OutboundAttempt::new("tell-dead", "queue is clear", crate::test_support::CHANNEL)
+            })
+            .unwrap();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell("tell-dead", "queue is clear", Some("bot-foobar"), None),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
     }
 }

@@ -55,7 +55,11 @@ exclusion.
 
 `TriggerMatch`, `TurnTransition`, and `parse_occupant_tell` are parsed
 types in `crates/domain`. Illegal trigger text, illegal turn changes,
-and malformed tell tags are `None`, not stringly-typed later.
+and malformed tell tags are `None`, not stringly-typed later. A
+backslash before the routing marker is prose (`occupant_tell_escapes_the_marker_as_prose`).
+Retryable publish failures are drained on the host tick
+(`occupant_tell_timeout_is_retried_on_the_tick_with_the_same_id`); the
+retry bound fails an open ask (`ask_final_abandon_after_the_retry_bound_fails_the_turn`).
 
 Ask body shape (request, then capped Context) is proved by
 `crates/botserver/src/ask_body.rs` and

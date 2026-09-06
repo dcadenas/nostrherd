@@ -211,10 +211,9 @@ Design:
     from any other. Put whatever the woken you will need — what this
     schedule is for, its stop rule, its schedule id — in the arm body
     itself. The arm body is your wake body.
-  - Never write text containing the literal marker that opens the
-    routing tag. The host's tell parser sees a second one and
-    publishes nothing, with no error you can observe. Name the tag in
-    prose instead.
+  - To quote the host routing tag as prose, write `\<botserver` and
+    `\</botserver>`. A tell the host refuses comes back to you as a
+    kelpie tell naming the message id and the reason.
   - The host stamps `[{id}]:`. Never stamp yourself.
   - Never call the Buzz/Nostr relay, never wrap envchain, never use
     `nak` or `buzz messages send`. The host is the only publisher (D31).

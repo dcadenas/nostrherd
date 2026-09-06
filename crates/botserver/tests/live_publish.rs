@@ -64,16 +64,8 @@ fn tag_values(event: &nostr_sdk::prelude::Event, name: &str) -> Vec<String> {
 
 fn attempt_for(channel: &str, trigger: &EventId, body: &str) -> OutboundAttempt {
     OutboundAttempt {
-        ask_id: format!("live-{}", trigger.as_str()),
-        body: body.to_owned(),
-        channel_id: channel.to_owned(),
         reply_to_event_id: Some(trigger.clone()),
-        thread_root_event_id: None,
-        mention: String::new(),
-        outbound_event_id: None,
-        prepared_event_id: None,
-        prepared_created_at: None,
-        dispatched: false,
+        ..OutboundAttempt::new(format!("live-{}", trigger.as_str()), body, channel)
     }
 }
 

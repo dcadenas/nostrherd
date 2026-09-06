@@ -743,6 +743,36 @@ impl HostWaiter<'_> {
         }
     }
 
+    /// Tell a session occupant. Best-effort occupant feedback uses this
+    /// so a refused tell is visible to the bot, not only the operator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot resolve the alias or rejects
+    /// the tell.
+    pub fn tell_occupant(&self, alias: &str, body: &str) -> Result<(), KelpieError> {
+        let recipient = self.resolve_recipient(alias)?;
+        let output = self.client.invoke(
+            &[
+                "--json",
+                "tell",
+                "--recipient-id",
+                &recipient.logical_agent_id,
+                "--recipient-incarnation",
+                &recipient.incarnation_id,
+                "--stdin",
+                "--sender-id",
+                self.identity.logical_agent_id(),
+            ],
+            body.as_bytes(),
+        )?;
+        if output.success {
+            Ok(())
+        } else {
+            Err(output.rejected())
+        }
+    }
+
     /// Cancel an in-flight ask owned by this waiter.
     ///
     /// # Errors
@@ -1758,6 +1788,16 @@ pub trait HostRepository {
         &self,
         ask_id: &str,
     ) -> Result<Option<crate::outbox::OutboundAttempt>, Self::Error>;
+
+    /// Undispatched, unabandoned outbound attempts owned by this bot (D47).
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the attempts cannot be read.
+    fn pending_outbound_attempts(
+        &self,
+        bot_id: &BotId,
+    ) -> Result<Vec<crate::outbox::OutboundAttempt>, Self::Error>;
 
     /// Record the accepted outbound event id for a retry-safe republish.
     ///

@@ -805,7 +805,6 @@ deletes do not cancel that wake.
 Host-initiated wakes do not relay progress in v1. D42 requires progress to
 reply to a triggering relay event, and a cross-channel watch has no such event
 in the declaring channel. The final remains a top-level stamped post.
-
 ## D47. Host-initiated posts are dropped at the ceiling and in quiet hours
 
 Status: accepted
@@ -839,6 +838,36 @@ The ledger is SQLite `host_initiated_posts`, keyed by outbound attempt
 id, recorded with INSERT OR IGNORE on relay-accepted publish so
 redelivery does not double-count. Counts are per bot per channel in
 the last 86400 seconds. Enforcement is only at the publish path, and
-only on a first publish: a retry of an already-prepared event is not
-re-gated, because D43 redelivers that same event and a timed-out send
-may already be on the relay.
+    only on a first publish: a retry of an already-prepared event is not
+    re-gated, because D43 redelivers that same event and a timed-out send
+    may already be on the relay.
+
+## D48. Undispatched outbound is drained on the host tick
+
+Status: accepted
+
+A retryable publish failure does not ACK, which is right: Kelpie only
+re-offers an un-ACKed delivery on reconnect. A connection that stays up
+is the normal state, so the host MUST drain undispatched
+`outbound_attempts` on the existing subscription-refresh tick.
+
+The drain resends the same prepared event id so D43 dedup covers overlap
+with a later reconnect. It does not ACK. After a successful drain send,
+`outbound_event_id` is set; a later re-offer ACKs without sending twice.
+After the retry bound the row is abandoned with an operator notice. An
+open ask turn becomes `failed` so the queue can resume. Tells, scheduled
+firings, and watch-wake finals share this path because they all persist
+an attempt keyed by message id.
+
+## D49. Occupant tells escape the routing marker, and refusals reach the occupant
+
+Status: accepted
+
+`parse_occupant_tell` treats a backslash immediately before `<botserver`
+or `</botserver>` as prose, not a tag boundary. Published text unescapes
+exactly those two sequences. A second real tag still refuses.
+
+A tell the host will not publish still ACKs (the occupant is done with
+that message) and MUST `kelpie tell` the occupant with the message id,
+the reason, and the escape. The operator notice stays. HTML-escaping is
+not an escape: the transport decodes it before the host parses.

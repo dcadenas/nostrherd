@@ -116,6 +116,10 @@ final (D42).
 A tell body MAY contain one `<botserver to="slug-or-uuid">…</botserver>`
 tag. Inner text is the published body. Text outside the tag MUST NOT be
 posted. No tag, or a tag with no `to`, posts to that occupant's channel.
+A backslash immediately before `<botserver` or `</botserver>` is an
+escape: that occurrence is prose, not a tag boundary. Published text
+MUST unescape those two sequences. A tell the host refuses MUST still
+ACK, and the occupant MUST be told that it did not publish.
 
 The occupant self-renews. The host MUST NOT arm occupant renew with
 `--sender-id` of waiter `botserver`, so this inbox only sees channel
@@ -159,7 +163,11 @@ issue a Buzz delete (kind 9005) on that post, best-effort. The final
 leaves it up. Progress failures MUST NOT fail the turn.
 
 The host persists a durable outbound attempt before publish. Retry of
-an accepted send uses that same outbound event id (D28).
+an accepted send uses that same outbound event id (D28). A retryable
+publish failure MUST be resent on the host tick without waiting for a
+Kelpie reconnect, reusing the prepared event id (D48). After a bounded
+number of retries the attempt is abandoned, the operator is noticed,
+and an open turn MUST become `failed` so queued work can resume.
 
 The host MUST add a NIP-25 kind-7 `⏳` on the triggering EventId when
 a turn becomes queued or open, and MUST remove it (NIP-09 kind 5 of
