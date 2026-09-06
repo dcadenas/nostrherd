@@ -838,4 +838,7 @@ the D42 cap. Reactions and deletes are untouched.
 The ledger is SQLite `host_initiated_posts`, keyed by outbound attempt
 id, recorded with INSERT OR IGNORE on relay-accepted publish so
 redelivery does not double-count. Counts are per bot per channel in
-the last 86400 seconds. Enforcement is only at the publish path.
+the last 86400 seconds. Enforcement is only at the publish path, and
+only on a first publish: a retry of an already-prepared event is not
+re-gated, because D43 redelivers that same event and a timed-out send
+may already be on the relay.

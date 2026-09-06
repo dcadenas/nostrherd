@@ -73,6 +73,7 @@ impl PublishRestraint {
     /// # Panics
     ///
     /// Never in practice: `u32::MAX` passes the `ceiling >= 1` check.
+    #[cfg(test)]
     #[must_use]
     pub fn unrestrained() -> Self {
         Self::new(
@@ -780,16 +781,18 @@ where
         ));
         return Ok(InboxAction::Ack);
     }
-    let verdict = restraint_verdict(repository, restraint, bot_id, &destination.channel_id)
-        .map_err(OutboxError::Repository)?;
-    if verdict != RestraintVerdict::Allow {
-        notice(&suppressed_notice(
-            &verdict,
-            bot_id,
-            &destination.channel_id,
-            message_id,
-        ));
-        return Ok(InboxAction::Ack);
+    if attempt.prepared_event_id.is_none() {
+        let verdict = restraint_verdict(repository, restraint, bot_id, &destination.channel_id)
+            .map_err(OutboxError::Repository)?;
+        if verdict != RestraintVerdict::Allow {
+            notice(&suppressed_notice(
+                &verdict,
+                bot_id,
+                &destination.channel_id,
+                message_id,
+            ));
+            return Ok(InboxAction::Ack);
+        }
     }
     let mut to_publish = attempt.clone();
     to_publish.body = stamp_outbound(&attempt.body, &outbound_prefix_for(bot_id));
@@ -1087,10 +1090,12 @@ where
         }
         return Ok(InboxAction::Ack);
     }
-    if turn.ask_body.is_some() {
+    if turn.ask_body.is_some() && attempt.prepared_event_id.is_none() {
         // Host-initiated wake (D45, D46): the final is unprompted, so the
-        // D47 restraint gates it here, at the only publish chokepoint. A
-        // suppressed wake final ends the turn without publishing.
+        // D47 restraint gates a first publish here. A prepared event is
+        // already on the wire (D43); re-gating a retry would drop a post
+        // the relay may already have. A suppressed first publish ends
+        // the turn without sending.
         let verdict = restraint_verdict(repository, restraint, &turn.bot_id, &turn.channel_id)
             .map_err(OutboxError::Repository)?;
         if verdict != RestraintVerdict::Allow {
@@ -2261,6 +2266,82 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn prepared_tell_retry_is_not_re_gated_by_quiet_hours() {
+        let (mut repository, publisher) = open_repo();
+        repository
+            .save_outbound_attempt(&OutboundAttempt {
+                ask_id: "tell-retry".to_owned(),
+                body: "already sent".to_owned(),
+                channel_id: CHANNEL.to_owned(),
+                reply_to_event_id: None,
+                thread_root_event_id: None,
+                mention: String::new(),
+                outbound_event_id: None,
+                prepared_event_id: Some("e".repeat(64)),
+                prepared_created_at: Some(1_700_000_000),
+                dispatched: true,
+            })
+            .unwrap();
+        let mut notices = Vec::new();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut |notice| notices.push(notice.to_owned()),
+            &restrained(1, Some("23:00-07:00"), 1_700_000_000, 23 * 60),
+            &occupant_tell("tell-retry", "already sent", Some("bot-foobar"), None),
+        )
+        .expect("retry");
+        assert_eq!(action, InboxAction::Ack);
+        assert_eq!(
+            publisher.sends.lock().expect("sends").as_slice(),
+            ["e".repeat(64).as_str()]
+        );
+        assert!(notices.iter().all(|notice| !notice.contains("quiet hours")));
+    }
+
+    #[test]
+    fn prepared_wake_retry_is_not_re_gated_by_quiet_hours() {
+        let (mut repository, publisher) = open_repo();
+        repository.execute_batch_for_test(
+            "UPDATE turns SET publish_reply_to_event_id = NULL,
+                 ask_body = '## Watch event';",
+        );
+        repository
+            .save_outbound_attempt(&OutboundAttempt {
+                ask_id: "ask-1".to_owned(),
+                body: "watched author posted".to_owned(),
+                channel_id: CHANNEL.to_owned(),
+                reply_to_event_id: None,
+                thread_root_event_id: None,
+                mention: String::new(),
+                outbound_event_id: None,
+                prepared_event_id: Some("e".repeat(64)),
+                prepared_created_at: Some(1_700_000_000),
+                dispatched: true,
+            })
+            .unwrap();
+        let mut notices = Vec::new();
+        let action = handle_delivery(
+            &mut repository,
+            &publisher,
+            &mut |notice| notices.push(notice.to_owned()),
+            &restrained(1, Some("23:00-07:00"), 1_700_000_000, 23 * 60),
+            &delivery("final", "ask-1", "watched author posted"),
+        )
+        .expect("retry");
+        assert_eq!(action, InboxAction::Ack);
+        assert_eq!(
+            publisher.sends.lock().expect("sends").as_slice(),
+            ["e".repeat(64).as_str()]
+        );
+        assert_eq!(
+            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+            TurnState::Posted
+        );
+        assert!(notices.iter().all(|notice| !notice.contains("quiet hours")));
     }
 
     #[test]
