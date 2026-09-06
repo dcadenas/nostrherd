@@ -1159,6 +1159,25 @@ mod tests {
             unreachable!()
         }
 
+        fn count_host_initiated_posts(
+            &self,
+            _bot_id: &BotId,
+            _channel_id: &str,
+            _since_unix: i64,
+        ) -> Result<u32, Self::Error> {
+            Ok(0)
+        }
+
+        fn note_host_initiated_post(
+            &mut self,
+            _attempt_key: &str,
+            _bot_id: &BotId,
+            _channel_id: &str,
+            _published_at: i64,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         fn progress_post(
             &self,
             _ask_id: &str,

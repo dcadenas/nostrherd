@@ -4,9 +4,12 @@
 
 pub mod buzz;
 pub mod progress;
+pub mod restraint;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+use restraint::HostRestraint;
 
 /// Stable configured bot slug, e.g. `bot`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -82,10 +85,14 @@ pub struct Bot {
     inbound_trigger: String,
     outbound_prefix: String,
     occupant_kind: String,
+    restraint: HostRestraint,
 }
 
 impl Bot {
     /// Construct a bot with inbound token `{id}:` and stamp `[{id}]:`.
+    ///
+    /// Restraint starts at [`HostRestraint::default`]; chain
+    /// [`Bot::with_restraint`] to override it.
     #[must_use]
     pub fn new(id: BotId, corpus_path: PathBuf, occupant_kind: impl Into<String>) -> Option<Self> {
         let occupant_kind = occupant_kind.into();
@@ -100,7 +107,21 @@ impl Bot {
             inbound_trigger,
             outbound_prefix,
             occupant_kind,
+            restraint: HostRestraint::default(),
         })
+    }
+
+    /// Replace this bot's host-initiated post restraint (D47).
+    #[must_use]
+    pub fn with_restraint(mut self, restraint: HostRestraint) -> Self {
+        self.restraint = restraint;
+        self
+    }
+
+    /// Restraint applied to this bot's host-initiated posts (D47).
+    #[must_use]
+    pub fn restraint(&self) -> &HostRestraint {
+        &self.restraint
     }
 
     #[must_use]

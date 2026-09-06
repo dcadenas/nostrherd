@@ -8,6 +8,7 @@ description = "Host occupant and per-bot actors"
 
 [dependencies]
 botserver-domain = { path = "../domain" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 nostr-sdk = "0.45"

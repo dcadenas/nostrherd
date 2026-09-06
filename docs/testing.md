@@ -30,6 +30,16 @@ kelpie final, ACK-after-decide, crash-safe retry of the same outbound
 event, best-effort `⏳` add/remove on the trigger, and occupant-tell
 routing (D38). That is not a live relay proof.
 
+`crates/domain/src/restraint.rs` proves the D47 policy: quiet-hours
+parse and half-open windows (including midnight wrap), ceiling
+evaluation, and quiet hours taking precedence. `outbox.rs` proves the
+publish chokepoint: a host tell beyond the ceiling or inside quiet
+hours is dropped with one operator notice, several tells share one
+per-channel ceiling, a trigger answer publishes regardless, and a
+suppressed wake final fails the turn without publishing. SQLite proves
+the ledger is per bot per channel, idempotent under redelivery, and
+rolling. No live-relay proof: no new event shapes.
+
 `crates/domain/src/progress.rs` proves the D42 policy on its own: the
 1024-byte cap on a char boundary with a trailing `…`, the 20 s hold from
 the turn's open time, the 30 s edit interval, and the 20-edit cap.
