@@ -805,6 +805,7 @@ deletes do not cancel that wake.
 Host-initiated wakes do not relay progress in v1. D42 requires progress to
 reply to a triggering relay event, and a cross-channel watch has no such event
 in the declaring channel. The final remains a top-level stamped post.
+
 ## D47. Host-initiated posts are dropped at the ceiling and in quiet hours
 
 Status: accepted
@@ -837,10 +838,10 @@ the D42 cap. Reactions and deletes are untouched.
 The ledger is SQLite `host_initiated_posts`, keyed by outbound attempt
 id, recorded with INSERT OR IGNORE on relay-accepted publish so
 redelivery does not double-count. Counts are per bot per channel in
-the last 86400 seconds. Enforcement is only at the publish path, and
-    only on a first publish: a retry of an already-prepared event is not
-    re-gated, because D43 redelivers that same event and a timed-out send
-    may already be on the relay.
+    the last 86400 seconds. Enforcement is only at the publish path, and
+only on a first publish: a retry of an already-prepared event is not
+re-gated, because D43 redelivers that same event and a timed-out send
+may already be on the relay.
 
 ## D48. Undispatched outbound is drained on the host tick
 

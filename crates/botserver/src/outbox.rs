@@ -848,6 +848,7 @@ where
                 &destination.channel_id,
                 message_id,
             ));
+            stop_tell_retries(repository, &attempt).map_err(OutboxError::Repository)?;
             return Ok(InboxAction::Ack);
         }
     }
@@ -1428,6 +1429,14 @@ where
         SendOutcome::Accepted(event_id) => {
             let _ = repository
                 .mark_outbound_accepted(&attempt.ask_id, &event_id)
+                .map_err(OutboxError::Repository)?;
+            repository
+                .note_host_initiated_post(
+                    &attempt.ask_id,
+                    bot_id,
+                    &attempt.channel_id,
+                    crate::unix_now().unwrap_or_default(),
+                )
                 .map_err(OutboxError::Repository)?;
             Ok(InboxAction::Ack)
         }
@@ -2429,6 +2438,15 @@ mod tests {
                 .unwrap(),
             0
         );
+        let stored = repository
+            .outbound_attempt("tell-quiet")
+            .unwrap()
+            .expect("row");
+        assert!(stored.abandoned_at.is_some());
+        assert!(repository
+            .pending_outbound_attempts(&bot_id())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -2708,6 +2726,12 @@ mod tests {
         let sends = publisher.sends.lock().expect("sends");
         assert_eq!(sends.len(), 2);
         assert!(sends.iter().all(|event_id| event_id == &prepared));
+        assert_eq!(
+            repository
+                .count_host_initiated_posts(&bot_id(), CHANNEL, 0)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
