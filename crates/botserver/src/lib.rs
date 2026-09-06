@@ -743,6 +743,36 @@ impl HostWaiter<'_> {
         }
     }
 
+    /// Tell a session occupant. Best-effort occupant feedback uses this
+    /// so a refused tell is visible to the bot, not only the operator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot resolve the alias or rejects
+    /// the tell.
+    pub fn tell_occupant(&self, alias: &str, body: &str) -> Result<(), KelpieError> {
+        let recipient = self.resolve_recipient(alias)?;
+        let output = self.client.invoke(
+            &[
+                "--json",
+                "tell",
+                "--recipient-id",
+                &recipient.logical_agent_id,
+                "--recipient-incarnation",
+                &recipient.incarnation_id,
+                "--stdin",
+                "--sender-id",
+                self.identity.logical_agent_id(),
+            ],
+            body.as_bytes(),
+        )?;
+        if output.success {
+            Ok(())
+        } else {
+            Err(output.rejected())
+        }
+    }
+
     /// Cancel an in-flight ask owned by this waiter.
     ///
     /// # Errors
@@ -1285,6 +1315,42 @@ mod tests {
     }
 
     #[test]
+    fn tell_occupant_uses_exact_ids_and_passes_body_on_stdin() {
+        let body = "your tell tell-bad did not publish";
+        let runner = Arc::new(FakeRunner::new([
+            registered_waiter(),
+            recipient(),
+            success(&serde_json::json!({
+                "message_id": "tell-id",
+                "operation_id": "tell-operation",
+                "recipient": "occupant-agent",
+                "delivery_outcome": "accepted"
+            })),
+        ]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        let waiter = client.register_waiter().expect("adopt waiter");
+        waiter
+            .tell_occupant("bot-foobar", body)
+            .expect("tell occupant");
+        let calls = runner.calls.lock().expect("calls lock");
+        assert_eq!(
+            calls[2].0,
+            vec![
+                "--json",
+                "tell",
+                "--recipient-id",
+                "occupant-agent",
+                "--recipient-incarnation",
+                "occupant-incarnation",
+                "--stdin",
+                "--sender-id",
+                "waiter-agent",
+            ]
+        );
+        assert_eq!(calls[2].1, body.as_bytes());
+    }
+
+    #[test]
     fn unknown_ask_keeps_the_id_needed_for_reconciliation() {
         let runner = Arc::new(FakeRunner::new([
             registered_waiter(),
@@ -1758,6 +1824,16 @@ pub trait HostRepository {
         &self,
         ask_id: &str,
     ) -> Result<Option<crate::outbox::OutboundAttempt>, Self::Error>;
+
+    /// Undispatched, unabandoned outbound attempts owned by this bot (D47).
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the attempts cannot be read.
+    fn pending_outbound_attempts(
+        &self,
+        bot_id: &BotId,
+    ) -> Result<Vec<crate::outbox::OutboundAttempt>, Self::Error>;
 
     /// Record the accepted outbound event id for a retry-safe republish.
     ///

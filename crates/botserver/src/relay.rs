@@ -1151,6 +1151,13 @@ mod tests {
             unreachable!()
         }
 
+        fn pending_outbound_attempts(
+            &self,
+            _bot_id: &BotId,
+        ) -> Result<Vec<crate::outbox::OutboundAttempt>, Self::Error> {
+            unreachable!()
+        }
+
         fn mark_outbound_accepted(
             &mut self,
             _ask_id: &str,

@@ -81,6 +81,32 @@ fn column_exists(connection: &Connection, table: &str, column: &str) -> rusqlite
     )
 }
 
+fn backfill_outbound_bot_id(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "UPDATE outbound_attempts
+         SET bot_id = (
+             SELECT sessions.bot_id
+             FROM turns
+             JOIN sessions ON sessions.id = turns.session_id
+             WHERE turns.ask_id = outbound_attempts.ask_id
+         )
+         WHERE bot_id IS NULL;
+         UPDATE outbound_attempts
+         SET bot_id = (
+             SELECT s.bot_id
+             FROM sessions s
+             WHERE s.channel_id = outbound_attempts.channel_id
+               AND NOT EXISTS (
+                   SELECT 1 FROM sessions other
+                   WHERE other.channel_id = s.channel_id
+                     AND other.bot_id != s.bot_id
+               )
+             LIMIT 1
+         )
+         WHERE bot_id IS NULL;",
+    )
+}
+
 fn migrate_turn_wake_columns(connection: &Connection) -> rusqlite::Result<()> {
     if !column_exists(connection, "turns", "ask_body")? {
         connection.execute("ALTER TABLE turns ADD COLUMN ask_body TEXT", [])?;
@@ -143,6 +169,23 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
         connection,
         "ALTER TABLE progress_posts ADD COLUMN delete_pending INTEGER NOT NULL DEFAULT 0",
     )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE outbound_attempts ADD COLUMN bot_id TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE outbound_attempts ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE outbound_attempts ADD COLUMN last_retry_at INTEGER",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE outbound_attempts ADD COLUMN abandoned_at INTEGER",
+    )?;
+    backfill_outbound_bot_id(connection)?;
     connection.execute_batch(
         "DROP INDEX IF EXISTS progress_posts_pending_flush;
          CREATE INDEX progress_posts_pending_flush
@@ -377,12 +420,16 @@ impl SqliteRepository {
                    outbound_event_id TEXT CHECK(
                        outbound_event_id IS NULL OR length(outbound_event_id) = 64
                    ),
-                   prepared_event_id TEXT CHECK(
-                       prepared_event_id IS NULL OR length(prepared_event_id) = 64
-                   ),
-                   prepared_created_at INTEGER,
-                   dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1))
-               ) STRICT;
+                    prepared_event_id TEXT CHECK(
+                        prepared_event_id IS NULL OR length(prepared_event_id) = 64
+                    ),
+                    prepared_created_at INTEGER,
+                    dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1)),
+                    bot_id TEXT,
+                    retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+                    last_retry_at INTEGER,
+                    abandoned_at INTEGER
+                ) STRICT;
 
               CREATE TABLE IF NOT EXISTS watches (
                   watch_id TEXT PRIMARY KEY NOT NULL CHECK(length(watch_id) = 64),
@@ -1166,8 +1213,8 @@ impl HostRepository for SqliteRepository {
             "INSERT INTO outbound_attempts(
                  ask_id, body, channel_id, reply_to_event_id, thread_root_event_id,
                  mention, outbound_event_id, prepared_event_id, prepared_created_at,
-                 dispatched
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 dispatched, bot_id, retry_count, last_retry_at, abandoned_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(ask_id) DO UPDATE SET
                  body = excluded.body,
                  channel_id = excluded.channel_id,
@@ -1189,7 +1236,14 @@ impl HostRepository for SqliteRepository {
                      outbound_attempts.prepared_created_at,
                      excluded.prepared_created_at
                  ),
-                 dispatched = excluded.dispatched",
+                 dispatched = excluded.dispatched,
+                 bot_id = COALESCE(excluded.bot_id, outbound_attempts.bot_id),
+                 retry_count = excluded.retry_count,
+                 last_retry_at = excluded.last_retry_at,
+                 abandoned_at = COALESCE(
+                     outbound_attempts.abandoned_at,
+                     excluded.abandoned_at
+                 )",
             params![
                 attempt.ask_id,
                 attempt.body,
@@ -1200,7 +1254,11 @@ impl HostRepository for SqliteRepository {
                 attempt.outbound_event_id,
                 attempt.prepared_event_id,
                 attempt.prepared_created_at,
-                i64::from(attempt.dispatched)
+                i64::from(attempt.dispatched),
+                attempt.bot_id.as_ref().map(BotId::as_str),
+                attempt.retry_count,
+                attempt.last_retry_at,
+                attempt.abandoned_at
             ],
         )?;
         Ok(())
@@ -1211,34 +1269,30 @@ impl HostRepository for SqliteRepository {
             .query_row(
                 "SELECT ask_id, body, channel_id, reply_to_event_id, thread_root_event_id,
                         mention, outbound_event_id, prepared_event_id, prepared_created_at,
-                        dispatched
+                        dispatched, bot_id, retry_count, last_retry_at, abandoned_at
                  FROM outbound_attempts WHERE ask_id = ?1",
                 [ask_id],
-                |row| {
-                    let reply_to: Option<String> = row.get(3)?;
-                    let thread_root: Option<String> = row.get(4)?;
-                    let dispatched: i64 = row.get(9)?;
-                    Ok(OutboundAttempt {
-                        ask_id: row.get(0)?,
-                        body: row.get(1)?,
-                        channel_id: row.get(2)?,
-                        reply_to_event_id: reply_to
-                            .as_deref()
-                            .map(|value| parse_event_id(value, 3))
-                            .transpose()?,
-                        thread_root_event_id: thread_root
-                            .as_deref()
-                            .map(|value| parse_event_id(value, 4))
-                            .transpose()?,
-                        mention: row.get(5)?,
-                        outbound_event_id: row.get(6)?,
-                        prepared_event_id: row.get(7)?,
-                        prepared_created_at: row.get(8)?,
-                        dispatched: dispatched != 0,
-                    })
-                },
+                read_outbound_attempt,
             )
             .optional()
+    }
+
+    fn pending_outbound_attempts(
+        &self,
+        bot_id: &BotId,
+    ) -> Result<Vec<OutboundAttempt>, Self::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT ask_id, body, channel_id, reply_to_event_id, thread_root_event_id,
+                    mention, outbound_event_id, prepared_event_id, prepared_created_at,
+                    dispatched, bot_id, retry_count, last_retry_at, abandoned_at
+             FROM outbound_attempts
+             WHERE bot_id = ?1
+               AND outbound_event_id IS NULL
+               AND abandoned_at IS NULL
+             ORDER BY ask_id",
+        )?;
+        let rows = statement.query_map([bot_id.as_str()], read_outbound_attempt)?;
+        rows.collect()
     }
 
     fn mark_outbound_accepted(
@@ -1505,6 +1559,38 @@ fn insert_queued_turn(connection: &Connection, turn: &NewTurn) -> rusqlite::Resu
 fn wake_event_id(watch_id: &str, source_event_id: &EventId) -> EventId {
     let digest = Sha256::digest(format!("watch:{watch_id}:{}", source_event_id.as_str()));
     EventId::parse_hex(&format!("{digest:x}")).expect("sha256 is 32 bytes")
+}
+
+fn read_outbound_attempt(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboundAttempt> {
+    let reply_to: Option<String> = row.get(3)?;
+    let thread_root: Option<String> = row.get(4)?;
+    let dispatched: i64 = row.get(9)?;
+    let bot_id: Option<String> = row.get(10)?;
+    Ok(OutboundAttempt {
+        ask_id: row.get(0)?,
+        body: row.get(1)?,
+        channel_id: row.get(2)?,
+        reply_to_event_id: reply_to
+            .as_deref()
+            .map(|value| parse_event_id(value, 3))
+            .transpose()?,
+        thread_root_event_id: thread_root
+            .as_deref()
+            .map(|value| parse_event_id(value, 4))
+            .transpose()?,
+        mention: row.get(5)?,
+        outbound_event_id: row.get(6)?,
+        prepared_event_id: row.get(7)?,
+        prepared_created_at: row.get(8)?,
+        dispatched: dispatched != 0,
+        bot_id: bot_id
+            .as_deref()
+            .map(|value| parse_bot_id(value, 10))
+            .transpose()?,
+        retry_count: row.get(11)?,
+        last_retry_at: row.get(12)?,
+        abandoned_at: row.get(13)?,
+    })
 }
 
 fn parse_bot_id(value: &str, column: usize) -> rusqlite::Result<BotId> {
@@ -2197,6 +2283,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(notnull, 0);
+    }
+
+    #[test]
+    fn outbound_attempts_gain_retry_columns_without_dropping_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE outbound_attempts (
+                     ask_id TEXT PRIMARY KEY NOT NULL,
+                     body TEXT NOT NULL,
+                     channel_id TEXT NOT NULL,
+                     reply_to_event_id TEXT,
+                     mention TEXT NOT NULL,
+                     outbound_event_id TEXT,
+                     dispatched INTEGER NOT NULL DEFAULT 0
+                 ) STRICT;
+                 INSERT INTO outbound_attempts(
+                     ask_id, body, channel_id, mention, dispatched
+                 ) VALUES (
+                     'ask-keep', 'hello', 'ab12cd34-5678-90ab-cdef-0123456789ab', '', 0
+                 );",
+            )
+            .unwrap();
+        let repository = SqliteRepository::from_connection(connection).expect("migrated");
+        let attempt = repository
+            .outbound_attempt("ask-keep")
+            .unwrap()
+            .expect("kept");
+        assert_eq!(attempt.body, "hello");
+        assert_eq!(attempt.retry_count, 0);
+        assert!(attempt.abandoned_at.is_none());
+        assert!(attempt.bot_id.is_none());
     }
 
     #[test]

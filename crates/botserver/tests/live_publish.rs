@@ -64,16 +64,8 @@ fn tag_values(event: &nostr_sdk::prelude::Event, name: &str) -> Vec<String> {
 
 fn attempt_for(channel: &str, trigger: &EventId, body: &str) -> OutboundAttempt {
     OutboundAttempt {
-        ask_id: format!("live-{}", trigger.as_str()),
-        body: body.to_owned(),
-        channel_id: channel.to_owned(),
         reply_to_event_id: Some(trigger.clone()),
-        thread_root_event_id: None,
-        mention: String::new(),
-        outbound_event_id: None,
-        prepared_event_id: None,
-        prepared_created_at: None,
-        dispatched: false,
+        ..OutboundAttempt::new(format!("live-{}", trigger.as_str()), body, channel)
     }
 }
 
@@ -319,4 +311,156 @@ async fn live_refresh_replaces_channel_and_active_turn_filters() {
     );
 
     client.disconnect().await;
+}
+
+fn proof_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").expect("HOME")).join("tmp-botserver-proof")
+}
+
+fn port_open() -> bool {
+    std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:13001".parse().expect("addr"),
+        Duration::from_millis(200),
+    )
+    .is_ok()
+}
+
+fn stop_throwaway_relay() {
+    let pid = std::fs::read_to_string(proof_dir().join("relay.pid")).expect("relay pid");
+    let status = std::process::Command::new("kill")
+        .args(["-KILL", pid.trim()])
+        .status()
+        .expect("kill");
+    assert!(status.success(), "kill throwaway relay");
+    let _ = std::process::Command::new("fuser")
+        .args(["-k", "-KILL", "13001/tcp"])
+        .status();
+    std::fs::remove_file(proof_dir().join("relay.pid")).ok();
+    for _ in 0..50 {
+        if !port_open() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("throwaway relay still listening after kill");
+}
+
+fn start_throwaway_relay() {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let status = std::process::Command::new(repo.join("tools/local-relay"))
+        .arg("up")
+        .current_dir(&repo)
+        .status()
+        .expect("local-relay up");
+    assert!(status.success(), "restart throwaway relay");
+}
+
+/// Genuine publish timeout: the throwaway relay is killed mid-send, then
+/// the tick drain resends the same prepared id once the relay is back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live proof; run against tools/local-relay (see docs/testing.md)"]
+async fn live_retry_after_a_real_relay_drop() {
+    use botserver::outbox::{retry_undispatched, NoopInFlightReaction, PublishRestraint};
+    use botserver::sqlite::SqliteRepository;
+    use botserver::HostRepository;
+    use botserver_domain::restraint::HostRestraint;
+    use botserver_domain::BotId;
+    use rusqlite::Connection;
+
+    let relay_url = relay_url();
+    let keys = operator_keys();
+    let channel = std::env::var("BOTSERVER_LIVE_CHANNEL").expect("BOTSERVER_LIVE_CHANNEL");
+    let client = connect(keys.clone(), &relay_url).await;
+    let publisher = BuzzPublisher::new(client.clone(), keys.clone(), relay_url.clone());
+    let mut repository =
+        SqliteRepository::from_connection(Connection::open_in_memory().expect("sqlite"))
+            .expect("repository");
+    let bot_id = BotId::new("bot").expect("bot");
+    let trigger_id = publisher
+        .send_buzz(&buzz::channel_message(
+            &channel,
+            "live retry trigger",
+            &[],
+            None,
+        ))
+        .await
+        .expect("trigger post");
+    let trigger = EventId::parse_hex(&trigger_id).expect("trigger id");
+    let stamped = stamp_outbound("live retry after drop", "[bot]:");
+    let attempt = OutboundAttempt {
+        bot_id: Some(bot_id.clone()),
+        ..attempt_for(&channel, &trigger, &stamped)
+    };
+    repository.save_outbound_attempt(&attempt).expect("save");
+
+    stop_throwaway_relay();
+    let pending = repository
+        .outbound_attempt(&attempt.ask_id)
+        .unwrap()
+        .expect("pending");
+    let restraint = PublishRestraint::new(
+        HostRestraint::new(u32::MAX, None).expect("ceiling"),
+        0,
+        12 * 60,
+    );
+    let first = retry_undispatched(
+        &mut repository,
+        &publisher,
+        &mut |_| {},
+        &restraint,
+        &NoopInFlightReaction,
+        &pending,
+        &bot_id,
+        1,
+    );
+    assert!(
+        matches!(first, Err(botserver::outbox::OutboxError::Publish(_))),
+        "killed relay must be a retryable publish failure, got {first:?}"
+    );
+    let stranded = repository
+        .outbound_attempt(&attempt.ask_id)
+        .unwrap()
+        .expect("stranded");
+    let prepared = stranded.prepared_event_id.clone().expect("prepared");
+    assert!(stranded.outbound_event_id.is_none());
+
+    start_throwaway_relay();
+    client.disconnect().await;
+    let client = connect(keys.clone(), &relay_url).await;
+    let publisher = BuzzPublisher::new(client.clone(), keys, relay_url);
+    let mut notices = Vec::new();
+    let retried = retry_undispatched(
+        &mut repository,
+        &publisher,
+        &mut |notice| notices.push(notice.to_owned()),
+        &restraint,
+        &NoopInFlightReaction,
+        &stranded,
+        &bot_id,
+        100,
+    )
+    .expect("drain retry");
+    assert_eq!(
+        retried,
+        botserver::outbox::InboxAction::Ack,
+        "notices={notices:?}"
+    );
+    let accepted = repository
+        .outbound_attempt(&attempt.ask_id)
+        .unwrap()
+        .expect("accepted");
+    assert_eq!(
+        accepted.prepared_event_id.as_deref(),
+        Some(prepared.as_str())
+    );
+    assert_eq!(
+        accepted.outbound_event_id.as_deref(),
+        Some(prepared.as_str())
+    );
+    let event = fetch_one(&client, &prepared)
+        .await
+        .expect("one event on the relay");
+    assert_eq!(event.content, stamped);
+    client.disconnect().await;
+    println!("live retry-after-drop proof complete prepared={prepared}");
 }

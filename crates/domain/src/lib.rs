@@ -487,8 +487,14 @@ pub struct OccupantTell {
 
 /// Parse a nested `<botserver>` routing tag from an occupant tell body.
 ///
-/// No tag posts the whole body. A tag posts only its inner text. More than one
-/// tag, a malformed tag, or empty publishable text is `None`.
+/// No tag posts the whole body. A tag posts only its inner text. More than
+/// one tag, a malformed tag, or empty publishable text is `None`.
+///
+/// A marker preceded by a backslash is prose, not a tag boundary: the
+/// occupant writes `\<botserver` to publish that literal text, and the
+/// published body unescapes exactly that form (and `\</botserver>`). An
+/// open marker inside a tag's inner text is published as-is, but a close
+/// marker still ends the tag, so quoting one also takes the escape.
 ///
 /// # Examples
 ///
@@ -501,21 +507,19 @@ pub struct OccupantTell {
 /// .expect("tag");
 /// assert_eq!(parsed.body, "queue is clear");
 /// assert_eq!(parsed.to.as_deref(), Some("eng"));
+///
+/// let parsed = parse_occupant_tell("the \\<botserver> tag, explained").expect("escaped");
+/// assert_eq!(parsed.body, "the <botserver> tag, explained");
+/// assert_eq!(parsed.to, None);
 /// ```
 #[must_use]
 pub fn parse_occupant_tell(raw: &str) -> Option<OccupantTell> {
     const OPEN: &str = "<botserver";
     const CLOSE: &str = "</botserver>";
-    let Some(open_at) = raw.find(OPEN) else {
-        let body = raw.trim();
-        return (!body.is_empty()).then(|| OccupantTell {
-            body: body.to_owned(),
-            to: None,
-        });
+    let Some(open_at) = find_unescaped_marker(raw, OPEN, 0) else {
+        let body = unescape_routing_markers(raw.trim());
+        return (!body.is_empty()).then_some(OccupantTell { body, to: None });
     };
-    if raw[open_at + OPEN.len()..].contains(OPEN) {
-        return None;
-    }
     let after_name = open_at + OPEN.len();
     let relative_gt = raw[after_name..].find('>')?;
     let attr = raw[after_name..after_name + relative_gt].trim();
@@ -527,15 +531,32 @@ pub fn parse_occupant_tell(raw: &str) -> Option<OccupantTell> {
         (!value.is_empty()).then(|| value.to_owned())
     };
     let inner_at = after_name + relative_gt + 1;
-    let close_at = raw[inner_at..].find(CLOSE)? + inner_at;
-    if raw[close_at + CLOSE.len()..].contains(OPEN) {
+    let close_at = find_unescaped_marker(raw, CLOSE, inner_at)?;
+    if find_unescaped_marker(raw, OPEN, close_at + CLOSE.len()).is_some() {
         return None;
     }
-    let body = raw[inner_at..close_at].trim();
-    (!body.is_empty()).then(|| OccupantTell {
-        body: body.to_owned(),
-        to,
-    })
+    let body = unescape_routing_markers(raw[inner_at..close_at].trim());
+    (!body.is_empty()).then_some(OccupantTell { body, to })
+}
+
+/// Find the next marker occurrence that is not escaped as prose.
+fn find_unescaped_marker(raw: &str, marker: &str, from: usize) -> Option<usize> {
+    let mut search_from = from;
+    while let Some(rest) = raw.get(search_from..) {
+        let found = rest.find(marker)?;
+        let at = search_from + found;
+        if !raw[..at].ends_with('\\') {
+            return Some(at);
+        }
+        search_from = at + marker.len();
+    }
+    None
+}
+
+/// Undo the occupant's marker escapes in text that will be published.
+fn unescape_routing_markers(text: &str) -> String {
+    text.replace("\\<botserver", "<botserver")
+        .replace("\\</botserver>", "</botserver>")
 }
 
 #[cfg(test)]
@@ -957,5 +978,52 @@ mod tests {
             parse_occupant_tell("<botserver to=\"eng\">a</botserver><botserver>b</botserver>")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn occupant_tell_escapes_the_marker_as_prose() {
+        let parsed =
+            parse_occupant_tell("route with the \\<botserver to=\"eng\"> tag").expect("escaped");
+        assert_eq!(parsed.body, "route with the <botserver to=\"eng\"> tag");
+        assert_eq!(parsed.to, None);
+
+        let parsed = parse_occupant_tell("closes too: \\</botserver>").expect("escaped close");
+        assert_eq!(parsed.body, "closes too: </botserver>");
+        assert_eq!(parsed.to, None);
+    }
+
+    #[test]
+    fn occupant_tell_inner_text_may_quote_the_marker() {
+        let parsed = parse_occupant_tell(
+            "<botserver to=\"eng\">use <botserver> tags, closed by \\</botserver>, carefully</botserver>",
+        )
+        .expect("routed quote");
+        assert_eq!(
+            parsed.body,
+            "use <botserver> tags, closed by </botserver>, carefully"
+        );
+        assert_eq!(parsed.to.as_deref(), Some("eng"));
+
+        let parsed = parse_occupant_tell("<botserver>escaped inner \\<botserver></botserver>")
+            .expect("escaped inner");
+        assert_eq!(parsed.body, "escaped inner <botserver>");
+        assert_eq!(parsed.to, None);
+
+        // An unescaped close marker inside the inner text still ends the
+        // tag; the tail after it is scratch, as with any text outside.
+        let parsed =
+            parse_occupant_tell("<botserver to=\"eng\">quote: </botserver> tail</botserver>")
+                .expect("early close");
+        assert_eq!(parsed.body, "quote:");
+        assert_eq!(parsed.to.as_deref(), Some("eng"));
+    }
+
+    #[test]
+    fn occupant_tell_still_refuses_a_second_real_tag_after_an_escaped_one() {
+        assert!(parse_occupant_tell(
+            "\\</botserver> prose <botserver to=\"eng\">a</botserver><botserver>b</botserver>"
+        )
+        .is_none());
+        assert!(parse_occupant_tell("<botserver>a</botserver> then \\<botserver> ok").is_some());
     }
 }

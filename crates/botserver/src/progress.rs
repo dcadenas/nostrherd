@@ -77,17 +77,13 @@ impl ProgressPost {
 
     fn create_attempt(&self, stamped_body: &str) -> OutboundAttempt {
         OutboundAttempt {
-            ask_id: self.ask_id.clone(),
-            body: stamped_body.to_owned(),
-            channel_id: self.channel_id.clone(),
             reply_to_event_id: Some(self.reply_to_event_id.clone()),
             thread_root_event_id: self.thread_root_event_id.clone(),
-            // D42: the progress post carries no mention.
-            mention: String::new(),
             outbound_event_id: self.post_event_id.clone(),
             prepared_event_id: self.prepared_event_id.clone(),
             prepared_created_at: self.prepared_created_at,
             dispatched: self.prepared_event_id.is_some(),
+            ..OutboundAttempt::new(self.ask_id.clone(), stamped_body, self.channel_id.clone())
         }
     }
 }
@@ -1949,16 +1945,12 @@ mod tests {
     /// `retry_outbound` redelivers the prepared event on the tick (D28).
     fn final_attempt_in_retry_window() -> OutboundAttempt {
         OutboundAttempt {
-            ask_id: "ask-1".to_owned(),
-            body: "[bot]: done".to_owned(),
-            channel_id: CHANNEL.to_owned(),
             reply_to_event_id: Some(event_id('a')),
-            thread_root_event_id: None,
             mention: "c".repeat(64),
-            outbound_event_id: None,
             prepared_event_id: Some("e".repeat(64)),
             prepared_created_at: Some(1_700_000_000),
-            dispatched: false,
+            bot_id: Some(BotId::new("bot").expect("bot")),
+            ..OutboundAttempt::new("ask-1", "[bot]: done", CHANNEL)
         }
     }
 

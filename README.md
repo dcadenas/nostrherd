@@ -153,11 +153,6 @@ An occupant never touches the relay and never holds a key.
 
 ## Known gaps
 
-- **A post can be lost silently.** If the relay times out while the
-  host's connection stays up, that post is retried only when the
-  connection next drops.
-- **Text containing the host's own routing tag never publishes**, with
-  no error the agent can see.
 - Digesting many events into one message, and escalating to a human,
   are proposed in `docs/proposals.md` and not built.
 

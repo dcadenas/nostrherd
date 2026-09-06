@@ -512,13 +512,19 @@ where
     {
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
         let restraint = outbox::PublishRestraint::local_now(self.bot.restraint());
-        let action = outbox::handle_delivery_with(
+        let mut occupant_feedback = |session_name: &str, body: &str| {
+            if let Err(error) = waiter.tell_occupant(session_name, body) {
+                eprintln!("operator notice: occupant feedback to {session_name} failed: {error}");
+            }
+        };
+        let action = outbox::handle_delivery_with_feedback(
             &mut self.repository,
             publisher,
             &mut notice,
             &restraint,
             delivery,
             &self.reactions,
+            &mut occupant_feedback,
         )
         .map_err(|error| match error {
             OutboxError::Repository(error) => ActorError::Repository(error),
@@ -570,11 +576,15 @@ where
         Ok(())
     }
 
-    /// Retry unfinished outbound attempts after a dropped inbox delivery.
+    /// Drain undispatched outbound attempts on the host tick (D48).
+    ///
+    /// Tells and ask finals that failed with a retryable transport error
+    /// are resent without waiting for a Kelpie reconnect, reusing the
+    /// prepared event id. One retryable failure does not skip the rest.
     ///
     /// # Errors
     ///
-    /// Returns an error when persistence or publish fails.
+    /// Returns an error when persistence fails.
     pub fn retry_outbound<Pub: OutboundPublisher>(
         &mut self,
         kelpie: &KelpieClient,
@@ -585,58 +595,56 @@ where
         R::Error: fmt::Display,
         Pub::Error: fmt::Display,
     {
-        let sessions = self
+        let now = crate::unix_now().unwrap_or_default();
+        let attempts = self
             .repository
-            .sessions_with_pending_turns()
+            .pending_outbound_attempts(self.bot.id())
             .map_err(ActorError::Repository)?;
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
         let restraint = outbox::PublishRestraint::local_now(self.bot.restraint());
-        for session in sessions {
-            if session.bot_id != *self.bot.id() {
+        let mut posted = false;
+        let mut failed_open = false;
+        for attempt in attempts {
+            if !outbox::outbound_retry_due(&attempt, now) {
                 continue;
             }
-            let turns = self
-                .repository
-                .turns_for_session(&session.bot_id, &session.channel_id)
-                .map_err(ActorError::Repository)?;
-            for turn in turns {
-                if turn.state != TurnState::Open {
-                    continue;
-                }
-                let Some(ask_id) = turn.ask_id.as_deref() else {
-                    continue;
-                };
-                if self
-                    .repository
-                    .outbound_attempt(ask_id)
-                    .map_err(ActorError::Repository)?
-                    .is_none()
-                {
-                    continue;
-                }
-                let action = outbox::complete_outbound_with(
-                    &mut self.repository,
-                    publisher,
-                    &mut notice,
-                    &restraint,
-                    &turn,
-                    None,
-                    &self.reactions,
-                )
-                .map_err(|error| match error {
-                    OutboxError::Repository(error) => ActorError::Repository(error),
-                    OutboxError::Publish(error) => ActorError::Outbox(error.to_string()),
-                })?;
-                if action == InboxAction::Ack
-                    && self
+            match outbox::retry_undispatched(
+                &mut self.repository,
+                publisher,
+                &mut notice,
+                &restraint,
+                &self.reactions,
+                &attempt,
+                self.bot.id(),
+                now,
+            ) {
+                Ok(InboxAction::Ack) => {
+                    if self
                         .repository
-                        .turn_by_ask_id(ask_id)
+                        .turn_by_ask_id(&attempt.ask_id)
                         .map_err(ActorError::Repository)?
-                        .is_some_and(|turn| turn.state == TurnState::Posted)
-                {
-                    self.resume_queued(kelpie, waiter)?;
+                        .is_some_and(|turn| {
+                            turn.state == TurnState::Posted || turn.state == TurnState::Failed
+                        })
+                    {
+                        if self
+                            .repository
+                            .turn_by_ask_id(&attempt.ask_id)
+                            .map_err(ActorError::Repository)?
+                            .is_some_and(|turn| turn.state == TurnState::Posted)
+                        {
+                            posted = true;
+                        } else {
+                            failed_open = true;
+                        }
+                    }
                 }
+                Ok(InboxAction::Hold) | Err(OutboxError::Publish(_)) => {}
+                Err(OutboxError::Repository(error)) => return Err(ActorError::Repository(error)),
             }
+        }
+        if posted || failed_open {
+            self.resume_queued(kelpie, waiter)?;
         }
         Ok(())
     }
