@@ -511,10 +511,12 @@ where
         Pub::Error: fmt::Display,
     {
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        let restraint = outbox::PublishRestraint::local_now(self.bot.restraint());
         let action = outbox::handle_delivery_with(
             &mut self.repository,
             publisher,
             &mut notice,
+            &restraint,
             delivery,
             &self.reactions,
         )
@@ -588,6 +590,7 @@ where
             .sessions_with_pending_turns()
             .map_err(ActorError::Repository)?;
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
+        let restraint = outbox::PublishRestraint::local_now(self.bot.restraint());
         for session in sessions {
             if session.bot_id != *self.bot.id() {
                 continue;
@@ -615,6 +618,7 @@ where
                     &mut self.repository,
                     publisher,
                     &mut notice,
+                    &restraint,
                     &turn,
                     None,
                     &self.reactions,

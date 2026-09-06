@@ -724,7 +724,8 @@ Restraint is the host's and MUST ship with the first recurring
 capability, not after it. An occupant proposes; the host enforces, as
 in D42's edit cap. A per-bot, per-channel ceiling on host-initiated
 posts and a quiet-hours window are enforced at the publish path, so no
-occupant can bypass them by scheduling more aggressively.
+occupant can bypass them by scheduling more aggressively. Drop vs hold,
+whose clock, and where the numbers live are D47.
 
 ## D45. Author watches are host-evaluated; no model runs until a match
 
@@ -804,3 +805,37 @@ deletes do not cancel that wake.
 Host-initiated wakes do not relay progress in v1. D42 requires progress to
 reply to a triggering relay event, and a cross-channel watch has no such event
 in the declaring channel. The final remains a top-level stamped post.
+
+## D47. Host-initiated posts are dropped at the ceiling and in quiet hours
+
+Status: accepted
+
+Amends D44's restraint paragraph. Closes the open points in P2.
+
+A suppressed host-initiated post is dropped, never held or coalesced.
+Holding would make the host a durable queue with its own firing loop,
+which D44 forbids. A repeating tell's next firing carries fresh state;
+a dropped wake is visible because the turn goes Failed. The operator is
+told once per suppressed post on the same eprintln channel as D42
+notices.
+
+Quiet hours run on the host's local clock. The bot posts as the
+operator's pubkey; the window protects the operator's day. Channels and
+DMs carry no timezone.
+
+Numbers live in `bots.toml` per bot. `post_ceiling` is the rolling
+24-hour per-channel maximum (default 24, must be >= 1). `quiet_hours`
+is an optional `HH:MM-HH:MM` window that may cross midnight; unset
+means none. Phrase-managed overrides are not v1.
+
+Quiet hours is evaluated before the ceiling: it is a time gate and
+independent of volume. Scope is the unprompted direction only: occupant
+tells (D38, including Kelpie `--due-in` / `--every` deliveries) and
+host-initiated wake finals (a turn with `ask_body`, D45/D46). Trigger
+finals and progress posts are exempt and never counted; progress keeps
+the D42 cap. Reactions and deletes are untouched.
+
+The ledger is SQLite `host_initiated_posts`, keyed by outbound attempt
+id, recorded with INSERT OR IGNORE on relay-accepted publish so
+redelivery does not double-count. Counts are per bot per channel in
+the last 86400 seconds. Enforcement is only at the publish path.

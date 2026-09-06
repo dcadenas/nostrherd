@@ -1767,6 +1767,34 @@ pub trait HostRepository {
     fn mark_outbound_accepted(&mut self, ask_id: &str, event_id: &str)
         -> Result<bool, Self::Error>;
 
+    /// Count accepted host-initiated posts for one bot and channel since
+    /// a unix timestamp (D47 ceiling window).
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the ledger cannot be read.
+    fn count_host_initiated_posts(
+        &self,
+        bot_id: &BotId,
+        channel_id: &str,
+        since_unix: i64,
+    ) -> Result<u32, Self::Error>;
+
+    /// Idempotently record one accepted host-initiated publish in the
+    /// D47 ledger, keyed by its outbound attempt id, pruning rows older
+    /// than the ceiling window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the ledger cannot be persisted.
+    fn note_host_initiated_post(
+        &mut self,
+        attempt_key: &str,
+        bot_id: &BotId,
+        channel_id: &str,
+        published_at: i64,
+    ) -> Result<(), Self::Error>;
+
     /// Load the progress post row for one ask (D42).
     ///
     /// # Errors

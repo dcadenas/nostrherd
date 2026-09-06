@@ -72,6 +72,8 @@ A bot is one entry in `bots.toml`:
 id = "bot"                      # the trigger: "bot: ..." in a channel
 corpus = "/path/to/corpus-repo" # the agent's working directory
 kind = "opencode"               # which agent CLI Herdr launches
+# post_ceiling = 24             # host-initiated posts per channel per rolling day
+# quiet_hours = "23:00-07:00"   # host local clock; omit for none
 ```
 
 The corpus is an ordinary git repository holding the bot's personality.
@@ -151,9 +153,6 @@ An occupant never touches the relay and never holds a key.
 
 ## Known gaps
 
-- **No rate ceiling and no quiet hours.** A repeating post every five
-  minutes is 288 posts a day, and nothing in the host stops it. Set the
-  interval deliberately.
 - **A post can be lost silently.** If the relay times out while the
   host's connection stays up, that post is retried only when the
   connection next drops.
