@@ -876,6 +876,7 @@ where
             notice(&format!(
                 "not retrying outbound for tell {message_id}: {error}"
             ));
+            stop_tell_retries(repository, &to_publish).map_err(OutboxError::Repository)?;
             Ok(InboxAction::Ack)
         }
         SendOutcome::Retry(error) => Err(OutboxError::Publish(error)),
@@ -1355,6 +1356,9 @@ where
     P: OutboundPublisher,
     I: InFlightReaction,
 {
+    if attempt.abandoned_at.is_some() || attempt.outbound_event_id.is_some() {
+        return Ok(InboxAction::Ack);
+    }
     if attempt.retry_count >= OUTBOUND_RETRY_CAP
         || (attempt.dispatched && attempt.prepared_event_id.is_none())
     {
@@ -1437,10 +1441,20 @@ where
                 "not retrying outbound for tell {}: {error}",
                 attempt.ask_id
             ));
+            stop_tell_retries(repository, &to_publish).map_err(OutboxError::Repository)?;
             Ok(InboxAction::Ack)
         }
         SendOutcome::Retry(error) => Err(OutboxError::Publish(error)),
     }
+}
+
+fn stop_tell_retries<R: HostRepository>(
+    repository: &mut R,
+    attempt: &OutboundAttempt,
+) -> Result<(), R::Error> {
+    let mut stopped = attempt.clone();
+    stopped.abandoned_at = Some(crate::unix_now().unwrap_or_default());
+    repository.save_outbound_attempt(&stopped)
 }
 
 /// Drop pending progress (D42), record `posted`, and clear the marker (D35).
@@ -1491,7 +1505,9 @@ impl InFlightReaction for RecordingInFlightReaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{event_id, fake_event_id, open_repo, open_repo_for, CHANNEL};
+    use crate::test_support::{
+        event_id, fake_event_id, open_repo, open_repo_for, FakePublisher, CHANNEL,
+    };
     use botserver_domain::restraint::QuietHours;
     use botserver_domain::BotId;
 
@@ -2706,6 +2722,51 @@ mod tests {
         let sends = publisher.sends.lock().expect("sends");
         assert_eq!(sends.len(), 2);
         assert!(sends.iter().all(|event_id| event_id == &prepared));
+    }
+
+    #[test]
+    fn occupant_tell_rejected_is_not_drained() {
+        let (mut repository, _publisher) = open_repo();
+        let mut notices = Vec::new();
+        let action = handle_delivery(
+            &mut repository,
+            &NonRetryPublisher,
+            &mut |notice| notices.push(notice.to_owned()),
+            &occupant_tell("tell-reject", "queue is clear", Some("bot-foobar"), None),
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        let bot_id = BotId::new("bot").expect("bot");
+        let stored = repository
+            .outbound_attempt("tell-reject")
+            .unwrap()
+            .expect("row");
+        assert!(stored.abandoned_at.is_some());
+        assert!(stored.outbound_event_id.is_none());
+        assert!(repository
+            .pending_outbound_attempts(&bot_id)
+            .unwrap()
+            .is_empty());
+        retry_undispatched(
+            &mut repository,
+            &FakePublisher::default(),
+            &mut |notice| notices.push(notice.to_owned()),
+            &NoopInFlightReaction,
+            &stored,
+            &bot_id,
+            stored.abandoned_at.unwrap_or(1) + OUTBOUND_RETRY_INTERVAL_SECS,
+        )
+        .expect("drain");
+        assert!(
+            repository
+                .outbound_attempt("tell-reject")
+                .unwrap()
+                .expect("row")
+                .outbound_event_id
+                .is_none(),
+            "a rejected tell must not be sent again"
+        );
+        assert!(notices.iter().any(|notice| notice.contains("not retrying")));
     }
 
     #[test]

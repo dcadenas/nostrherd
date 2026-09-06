@@ -1315,6 +1315,42 @@ mod tests {
     }
 
     #[test]
+    fn tell_occupant_uses_exact_ids_and_passes_body_on_stdin() {
+        let body = "your tell tell-bad did not publish";
+        let runner = Arc::new(FakeRunner::new([
+            registered_waiter(),
+            recipient(),
+            success(&serde_json::json!({
+                "message_id": "tell-id",
+                "operation_id": "tell-operation",
+                "recipient": "occupant-agent",
+                "delivery_outcome": "accepted"
+            })),
+        ]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        let waiter = client.register_waiter().expect("adopt waiter");
+        waiter
+            .tell_occupant("bot-foobar", body)
+            .expect("tell occupant");
+        let calls = runner.calls.lock().expect("calls lock");
+        assert_eq!(
+            calls[2].0,
+            vec![
+                "--json",
+                "tell",
+                "--recipient-id",
+                "occupant-agent",
+                "--recipient-incarnation",
+                "occupant-incarnation",
+                "--stdin",
+                "--sender-id",
+                "waiter-agent",
+            ]
+        );
+        assert_eq!(calls[2].1, body.as_bytes());
+    }
+
+    #[test]
     fn unknown_ask_keeps_the_id_needed_for_reconciliation() {
         let runner = Arc::new(FakeRunner::new([
             registered_waiter(),
