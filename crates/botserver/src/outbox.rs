@@ -1341,6 +1341,7 @@ where
 /// # Errors
 ///
 /// Returns an error when persistence or a retryable publish fails.
+#[allow(clippy::too_many_arguments)]
 pub fn retry_undispatched<R, P, I>(
     repository: &mut R,
     publisher: &P,
@@ -1393,13 +1394,7 @@ where
             return Ok(InboxAction::Ack);
         }
         return complete_outbound_with(
-            repository,
-            publisher,
-            notice,
-            restraint,
-            &turn,
-            None,
-            reactions,
+            repository, publisher, notice, restraint, &turn, None, reactions,
         );
     }
     republish_tell(repository, publisher, notice, &paced, bot_id)
@@ -2544,16 +2539,11 @@ mod tests {
         let (mut repository, publisher) = open_repo();
         repository
             .save_outbound_attempt(&OutboundAttempt {
-                ask_id: "tell-retry".to_owned(),
-                body: "already sent".to_owned(),
-                channel_id: CHANNEL.to_owned(),
-                reply_to_event_id: None,
-                thread_root_event_id: None,
-                mention: String::new(),
-                outbound_event_id: None,
                 prepared_event_id: Some("e".repeat(64)),
                 prepared_created_at: Some(1_700_000_000),
                 dispatched: true,
+                bot_id: Some(BotId::new("bot").expect("bot")),
+                ..OutboundAttempt::new("tell-retry", "already sent", CHANNEL)
             })
             .unwrap();
         let mut notices = Vec::new();
@@ -2582,16 +2572,11 @@ mod tests {
         );
         repository
             .save_outbound_attempt(&OutboundAttempt {
-                ask_id: "ask-1".to_owned(),
-                body: "watched author posted".to_owned(),
-                channel_id: CHANNEL.to_owned(),
-                reply_to_event_id: None,
-                thread_root_event_id: None,
-                mention: String::new(),
-                outbound_event_id: None,
                 prepared_event_id: Some("e".repeat(64)),
                 prepared_created_at: Some(1_700_000_000),
                 dispatched: true,
+                bot_id: Some(BotId::new("bot").expect("bot")),
+                ..OutboundAttempt::new("ask-1", "watched author posted", CHANNEL)
             })
             .unwrap();
         let mut notices = Vec::new();
@@ -2682,6 +2667,7 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
+            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-retry", "queue is clear", Some("bot-foobar"), None),
         )
         .expect_err("retryable");
@@ -2732,6 +2718,7 @@ mod tests {
             &mut repository,
             &NonRetryPublisher,
             &mut |notice| notices.push(notice.to_owned()),
+            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-reject", "queue is clear", Some("bot-foobar"), None),
         )
         .expect("handle");
@@ -2751,6 +2738,7 @@ mod tests {
             &mut repository,
             &FakePublisher::default(),
             &mut |notice| notices.push(notice.to_owned()),
+            &PublishRestraint::unrestrained(),
             &NoopInFlightReaction,
             &stored,
             &bot_id,
@@ -2812,6 +2800,7 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
+            &PublishRestraint::unrestrained(),
             &occupant_tell(
                 "tell-escape",
                 "route with the \\<botserver to=\"eng\"> tag",
@@ -2867,6 +2856,7 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
+            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-dead", "queue is clear", Some("bot-foobar"), None),
         )
         .expect("handle");
