@@ -14,8 +14,7 @@ use botserver_domain::restraint::{
     evaluate_restraint, HostRestraint, RestraintVerdict, POST_CEILING_WINDOW_SECS,
 };
 use botserver_domain::{
-    outbound_prefix_for, parse_occupant_tell, stamp_outbound, BotId, EventId, OccupantTell,
-    TurnState,
+    outbound_prefix_for, parse_occupant_tell, stamp_outbound, BotId, EventId, TurnState,
 };
 use chrono::Timelike;
 use nostr_sdk::prelude::{
@@ -658,13 +657,7 @@ fn decide(delivery: &InboxDelivery, turn: Option<&TurnRecord>) -> Decision {
 }
 
 fn unpublishable_tell_feedback(message_id: &str) -> String {
-    format!(
-        "your tell {message_id} did not publish: the body had no publishable text (empty, unclosed, or more than one routing tag). To quote the tag as prose, write \\<botserver and \\</botserver>."
-    )
-}
-
-fn unroutable_tell_feedback(message_id: &str) -> String {
-    format!("your tell {message_id} did not publish: the destination did not route.")
+    format!("your tell {message_id} did not publish: the body was empty.")
 }
 
 fn handle_occupant_tell<R, P>(
@@ -683,7 +676,7 @@ where
     else {
         return Ok(InboxAction::Ack);
     };
-    let Some(parsed) = parse_occupant_tell(delivery.body()) else {
+    let Some(body) = parse_occupant_tell(delivery.body()) else {
         notice(&format!(
             "occupant tell {} from {} had no publishable body",
             delivery.message_id(),
@@ -695,27 +688,14 @@ where
         );
         return Ok(InboxAction::Ack);
     };
-    let Some(destination) =
-        route_tell(repository, &session, &parsed).map_err(OutboxError::Repository)?
-    else {
-        notice(&format!(
-            "occupant tell {} from {} did not route",
-            delivery.message_id(),
-            session.session_name
-        ));
-        occupant_feedback(
-            &session.session_name,
-            &unroutable_tell_feedback(delivery.message_id()),
-        );
-        return Ok(InboxAction::Ack);
-    };
+    let destination = session.clone();
     publish_initiated(
         repository,
         publisher,
         notice,
         restraint,
         delivery.message_id(),
-        &parsed.body,
+        &body,
         &destination,
         &session.bot_id,
     )
@@ -745,51 +725,6 @@ fn occupant_session<R: HostRepository>(
         (None, Some(_), None, Some(bound)) => Some(bound),
         _ => None,
     })
-}
-
-fn route_tell<R: HostRepository>(
-    repository: &R,
-    session: &SessionRecord,
-    parsed: &OccupantTell,
-) -> Result<Option<SessionRecord>, R::Error> {
-    let Some(to) = parsed.to.as_deref() else {
-        return Ok(Some(session.clone()));
-    };
-    let mut matches = Vec::new();
-    push_unique(&mut matches, repository.session(&session.bot_id, to)?);
-    push_unique(
-        &mut matches,
-        named_for_bot(repository, &session.bot_id, to)?,
-    );
-    let prefixed = format!("{}-{to}", session.bot_id.as_str());
-    if prefixed != to {
-        push_unique(
-            &mut matches,
-            named_for_bot(repository, &session.bot_id, &prefixed)?,
-        );
-    }
-    Ok((matches.len() == 1).then(|| matches.remove(0)))
-}
-
-fn named_for_bot<R: HostRepository>(
-    repository: &R,
-    bot_id: &BotId,
-    name: &str,
-) -> Result<Option<SessionRecord>, R::Error> {
-    Ok(repository
-        .session_by_name(name)?
-        .filter(|session| session.bot_id == *bot_id))
-}
-
-fn push_unique(matches: &mut Vec<SessionRecord>, session: Option<SessionRecord>) {
-    if let Some(session) = session {
-        if !matches
-            .iter()
-            .any(|existing| existing.channel_id == session.channel_id)
-        {
-            matches.push(session);
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2027,63 +1962,6 @@ mod tests {
     }
 
     #[test]
-    fn occupant_tell_tag_routes_and_drops_scratch() {
-        let (mut repository, publisher) = open_repo();
-        let eng = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        repository
-            .save_session(&SessionRecord {
-                bot_id: BotId::new("bot").expect("bot"),
-                channel_id: eng.to_owned(),
-                session_name: "bot-eng".to_owned(),
-                occupant_logical_id: Some("eng-occupant".to_owned()),
-                renew_id: None,
-                ask_context_event_id: None,
-                ask_context_created_at: None,
-            })
-            .unwrap();
-        let body = "scratch the human should not see\n\n<botserver to=\"eng\">\nqueue is clear except divine-mobile#8013\n</botserver>\n";
-        handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &PublishRestraint::unrestrained(),
-            &occupant_tell("tell-2", body, Some("bot-foobar"), None),
-        )
-        .expect("handle");
-        assert_eq!(
-            publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: queue is clear except divine-mobile#8013".to_owned()]
-        );
-        let attempt = repository.outbound_attempt("tell-2").unwrap().unwrap();
-        assert_eq!(attempt.channel_id, eng);
-        assert!(attempt.reply_to_event_id.is_none());
-    }
-
-    #[test]
-    fn unknown_tell_destination_does_not_post() {
-        let (mut repository, publisher) = open_repo();
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &PublishRestraint::unrestrained(),
-            &occupant_tell(
-                "tell-3",
-                "<botserver to=\"missing\">nope</botserver>",
-                Some("bot-foobar"),
-                None,
-            ),
-        )
-        .expect("handle");
-        assert_eq!(action, InboxAction::Ack);
-        assert!(publisher.calls.lock().expect("calls").is_empty());
-        assert_eq!(
-            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
-            TurnState::Open
-        );
-    }
-
-    #[test]
     fn unknown_named_sender_tell_does_not_post() {
         let (mut repository, publisher) = open_repo();
         let action = handle_delivery(
@@ -2115,29 +1993,6 @@ mod tests {
         .expect("handle");
         assert_eq!(action, InboxAction::Ack);
         assert!(publisher.calls.lock().expect("calls").is_empty());
-    }
-
-    #[test]
-    fn known_occupant_unroutable_tell_notices() {
-        let (mut repository, publisher) = open_repo();
-        let mut notices = Vec::new();
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut |notice| notices.push(notice.to_owned()),
-            &PublishRestraint::unrestrained(),
-            &occupant_tell(
-                "tell-7",
-                "<botserver to=\"missing\">nope</botserver>",
-                Some("bot-foobar"),
-                None,
-            ),
-        )
-        .expect("handle");
-        assert_eq!(action, InboxAction::Ack);
-        assert!(publisher.calls.lock().expect("calls").is_empty());
-        assert_eq!(notices.len(), 1);
-        assert!(notices[0].contains("did not route"));
     }
 
     #[test]
@@ -2486,12 +2341,7 @@ mod tests {
             &publisher,
             &mut notices(),
             &restraint,
-            &occupant_tell(
-                "tell-eng",
-                "<botserver to=\"eng\">eng</botserver>",
-                Some("bot-foobar"),
-                None,
-            ),
+            &occupant_tell("tell-eng", "eng", Some("bot-eng"), None),
         )
         .expect("eng");
         assert_eq!(
@@ -2818,28 +2668,6 @@ mod tests {
     }
 
     #[test]
-    fn escaped_routing_marker_in_a_tell_publishes() {
-        let (mut repository, publisher) = open_repo();
-        handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &PublishRestraint::unrestrained(),
-            &occupant_tell(
-                "tell-escape",
-                "route with the \\<botserver to=\"eng\"> tag",
-                Some("bot-foobar"),
-                None,
-            ),
-        )
-        .expect("handle");
-        assert_eq!(
-            publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: route with the <botserver to=\"eng\"> tag".to_owned()]
-        );
-    }
-
-    #[test]
     fn unpublishable_tell_feeds_back_to_the_occupant() {
         let (mut repository, publisher) = open_repo();
         let mut feedback = Vec::new();
@@ -2848,12 +2676,7 @@ mod tests {
             &publisher,
             &mut notices(),
             &PublishRestraint::unrestrained(),
-            &occupant_tell(
-                "tell-bad",
-                "<botserver to=\"eng\">a</botserver><botserver>b</botserver>",
-                Some("bot-foobar"),
-                None,
-            ),
+            &occupant_tell("tell-bad", "   ", Some("bot-foobar"), None),
             &NoopInFlightReaction,
             &mut |name, body| feedback.push((name.to_owned(), body.to_owned())),
         )
@@ -2863,7 +2686,7 @@ mod tests {
         assert_eq!(feedback.len(), 1);
         assert_eq!(feedback[0].0, "bot-foobar");
         assert!(feedback[0].1.contains("tell-bad"));
-        assert!(feedback[0].1.contains("\\<botserver"));
+        assert!(feedback[0].1.contains("empty"));
     }
 
     #[test]

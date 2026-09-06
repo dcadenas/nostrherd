@@ -872,3 +872,27 @@ A tell the host will not publish still ACKs (the occupant is done with
 that message) and MUST `kelpie tell` the occupant with the message id,
 the reason, and the escape. The operator notice stays. HTML-escaping is
 not an escape: the transport decodes it before the host parses.
+
+## D50. A tell body is prose; the routing tag is retired
+
+Status: accepted
+
+Amends D38 and retires D49's escape. `parse_occupant_tell` publishes
+the whole trimmed body and reads no markup. A tell reaches that
+occupant's channel and no other.
+
+Reason: the tag never routed a message. No corpus documented it, the
+`bot-conduct` guidance never mentioned it, and no occupant was ever
+told it existed, so its entire effect in production was one silently
+dropped post when ordinary prose happened to contain the marker. The
+escape added in D49 fixed that failure by adding a second rule to a
+feature with no users.
+
+Cross-channel posting stays a real want and comes back with its first
+real caller, when the syntax can be chosen against a case instead of
+guessed. Until then a bot speaks where it lives, which is what every
+tell has done so far.
+
+The refusal path from D49 stays: a tell the host will not publish still
+ACKs and still tells the occupant why. The only refusal left is an
+empty body.

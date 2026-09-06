@@ -95,8 +95,7 @@ untrusted indexed channel delta
 
 Tells MUST NOT be used for triggered channel work: they create no
 obligation or reminder. A tell from a known occupant is a bot-initiated
-post (D38), parsed by the host for an optional nested
-`<botserver to="…">` routing tag.
+post (D38).
 
 `from=botserver` is the waiter public name, not a pane and not a relay
 pubkey (D2).
@@ -113,13 +112,10 @@ nsec. Cancel MUST NOT be used for a successful answer. It MAY send
 unstamped, from `--stdin` or `--file`. Progress never replaces the
 final (D42).
 
-A tell body MAY contain one `<botserver to="slug-or-uuid">…</botserver>`
-tag. Inner text is the published body. Text outside the tag MUST NOT be
-posted. No tag, or a tag with no `to`, posts to that occupant's channel.
-A backslash immediately before `<botserver` or `</botserver>` is an
-escape: that occurrence is prose, not a tag boundary. Published text
-MUST unescape those two sequences. A tell the host refuses MUST still
-ACK, and the occupant MUST be told that it did not publish.
+A tell body publishes whole, trimmed, to that occupant's channel. The
+host reads no markup in it and MUST publish the text as written. An
+empty body publishes nothing. A tell the host refuses MUST still ACK,
+and the occupant MUST be told that it did not publish.
 
 The occupant self-renews. The host MUST NOT arm occupant renew with
 `--sender-id` of waiter `botserver`, so this inbox only sees channel
@@ -258,10 +254,9 @@ subset.
     (D35).
 12. **Desktop.** Buzz desktop is still Daniel. The host does not mark
     him typing or rewrite his presence.
-13. **Bot-initiated line.** Occupant `kelpie tell botserver` with no
-    inner tag posts one stamped kind 9 in that session's channel, not
-    as a reply to a `{id}:` event. A nested `<botserver to="eng">`
-    routes to that known place. Scratch outside the tag is not posted.
+13. **Bot-initiated line.** Occupant `kelpie tell botserver` posts one
+    stamped kind 9 in that session's channel, not as a reply to a
+    `{id}:` event.
 14. **Author watch.** A `{id}: watch <pubkey>` trigger creates a bounded
     watch. No occupant is polled. The first matching author message records a
     fire and opens a `## Watch event` Turn on the declaring channel session.
