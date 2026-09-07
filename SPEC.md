@@ -106,11 +106,18 @@ The occupant is an ordinary Kelpie peer of waiter `botserver`. Snapshot
 and renew stay. It MUST answer a trigger ask with `kelpie reply --final`
 and unstamped prose. The final body MUST come from `--stdin` or
 `--file`, never from a shell-expanded argument. It MUST NOT stamp
-`[{id}]:`, MUST NOT call the relay, and MUST NOT receive the operator
-nsec. Cancel MUST NOT be used for a successful answer. It MAY send
+`[{id}]:` on that path, and MUST NOT receive the operator nsec. Cancel
+MUST NOT be used for a successful answer. It MAY send
 `kelpie reply <ask-id> --progress` with the full current status,
 unstamped, from `--stdin` or `--file`. Progress never replaces the
 final (D42).
+
+An occupant whose corpus grants relay access MAY publish to the relay
+itself, out of band. On that path it MUST stamp `[{bot-id}]:` as the
+first token of the body, and it MUST NOT answer a trigger ask or send
+progress. Those go through Kelpie so the host can close the Turn. The
+host cannot detect a violation, so this is a contract MUST an occupant
+keeps, not one the host enforces (D51).
 
 A tell body publishes whole, trimmed, to that occupant's channel. The
 host reads no markup in it and MUST publish the text as written. An

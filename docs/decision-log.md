@@ -896,3 +896,49 @@ tell has done so far.
 The refusal path from D49 stays: a tell the host will not publish still
 ACKs and still tells the occupant why. The only refusal left is an
 empty body.
+
+## D51. The correlated path is Kelpie's; a self-published post never answers
+
+Status: accepted
+
+Amends D31, which made the host the only Nostr publisher. That was a
+custody rule wearing a protocol rule's clothes. An occupant with a
+shell on the operator's machine can already reach the operator's key
+through the same wrapper the host uses, so the blanket ban never
+bounded a hostile occupant, only an accidental one. What it did bound
+was every ordinary use a bot might have for the relay: a reaction, a
+profile read, a non-chat kind, history past the snapshot window.
+
+An occupant whose corpus grants relay access MAY publish directly. Key
+custody is unchanged in substance: use through a wrapper, never the
+value, never printed, logged, or committed.
+
+Two rules make the parallel path safe, and neither is enforceable by
+the host.
+
+A self-published body MUST begin `[{bot-id}]:`. A trigger matches only
+when the first token is exactly `{bot-id}:`, so the stamp is what keeps
+a bot from reading its own post back as a request. Without it a post
+that merely starts with the trigger token loops.
+
+A self-published post MUST NOT answer a trigger ask or carry progress.
+The host holds the Turn keyed to the trigger EventId. An out-of-band
+answer leaves that Turn open: the `⏳` never clears, the reminder
+fires, and the next question queues behind a Turn that will never
+close. The correlated path exists to reuse Kelpie's correlation,
+reminders and recovery, which is the reason the host is in the middle
+at all.
+
+Restraint (D47) does not reach the parallel path. A ceiling and quiet
+hours are enforced where the host publishes, so an occupant that
+publishes for itself is unlimited into the same identity and the same
+channels. This is accepted for now rather than solved: the parallel
+path is expected to carry occasional, unprompted, low-volume posts,
+and the first sign of volume is the trigger to revisit it.
+
+No `cooee compose` command and no signer proxy. Both were considered
+and both invent a convention before a caller needs one, which is what
+the retired routing tag (D50) cost once already. The formatting
+contract is small enough to state: kind 9, the channel `h` tag, and
+the stamp.
+
