@@ -5,7 +5,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use botserver_domain::{Bot, BotId, EventId, SessionName};
+use cooee_domain::{Bot, BotId, EventId, SessionName};
 
 use crate::ask_body::{render_ask_body, AskContextCursor};
 use crate::inbox::InboxDelivery;
@@ -799,10 +799,10 @@ where
         waiter: &HostWaiter<'_>,
         event_id: &EventId,
         target_event_id: &EventId,
-        replacement: Option<&botserver_domain::TriggerMatch>,
+        replacement: Option<&cooee_domain::TriggerMatch>,
     ) -> Result<TriggerOutcome, ActorError<R::Error>> {
         let Some(request) = replacement
-            .map(botserver_domain::TriggerMatch::request)
+            .map(cooee_domain::TriggerMatch::request)
             .filter(|request| !request.is_empty())
         else {
             return self.abandon_unclaimed(
@@ -947,7 +947,7 @@ where
             .latest_body_for_event(event_id)
             .map_err(ActorError::Repository)?
             .and_then(|content| {
-                botserver_domain::TriggerMatch::from_body(&content, self.bot.inbound_trigger())
+                cooee_domain::TriggerMatch::from_body(&content, self.bot.inbound_trigger())
             })
             .map(|trigger| trigger.request().to_owned())
             .filter(|content| !content.is_empty()))
@@ -1488,7 +1488,7 @@ mod tests {
     fn adopt() -> CommandOutput {
         success(&serde_json::json!({
             "logical_agent_id": "waiter-agent",
-            "public_name": "botserver",
+            "public_name": "cooee",
             "delivery_transport": "socket_inbox"
         }))
     }
@@ -1602,7 +1602,7 @@ mod tests {
     fn temp_corpus() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "botserver-actor-{}-{}",
+            "cooee-actor-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1612,7 +1612,7 @@ mod tests {
 
     fn bot() -> Bot {
         Bot::new(
-            botserver_domain::BotId::new("bot").expect("id"),
+            cooee_domain::BotId::new("bot").expect("id"),
             temp_corpus(),
             "opencode",
         )
@@ -1933,12 +1933,12 @@ mod tests {
         let snapshot = actor
             .bot()
             .corpus_path()
-            .join(".botserver/places/bot-foobar.md");
+            .join(".cooee/places/bot-foobar.md");
         assert!(snapshot.exists());
         assert!(
             std::fs::read_to_string(actor.bot().corpus_path().join("startup.md"))
                 .expect("startup")
-                .contains(".botserver/places/<your public Kelpie name>.md")
+                .contains(".cooee/places/<your public Kelpie name>.md")
         );
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls[1].0[1], "start");
@@ -1948,7 +1948,7 @@ mod tests {
             .any(|pair| pair == ["--sender-id", "waiter-agent"]));
         assert_eq!(
             calls[1].1,
-            occupant_bootstrap(".botserver/places/bot-foobar.md").as_bytes()
+            occupant_bootstrap(".cooee/places/bot-foobar.md").as_bytes()
         );
         assert_eq!(calls[2].0[1], "renew");
         assert!(!calls[2].0.iter().any(|argument| argument == "--sender-id"));
@@ -1965,7 +1965,7 @@ mod tests {
         assert_eq!(ask_request(&calls[4].1), trigger.nostr_body);
         assert!(ask_has_context(&calls[4].1));
         assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
-        assert_eq!(WAITER_NAME, "botserver");
+        assert_eq!(WAITER_NAME, "cooee");
     }
 
     #[test]
@@ -2774,11 +2774,11 @@ mod tests {
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
         let action = crate::relay::IngestAction::TurnCandidate {
-            bot_id: botserver_domain::BotId::new("bot").expect("id"),
+            bot_id: cooee_domain::BotId::new("bot").expect("id"),
             event_id: trigger.event_id.clone(),
             channel_id: trigger.channel_id.clone(),
             reply_to_event_id: trigger.reply_to_event_id.clone(),
-            trigger: botserver_domain::TriggerMatch::parse(
+            trigger: cooee_domain::TriggerMatch::parse(
                 "operator",
                 "someone-else",
                 ["operator"],
@@ -2804,11 +2804,11 @@ mod tests {
         let bot = bot();
         let trigger = work('a', "@daniel bot: hello", Some('c'));
         let action = crate::relay::IngestAction::TurnCandidate {
-            bot_id: botserver_domain::BotId::new("bot").expect("id"),
+            bot_id: cooee_domain::BotId::new("bot").expect("id"),
             event_id: trigger.event_id.clone(),
             channel_id: trigger.channel_id.clone(),
             reply_to_event_id: trigger.reply_to_event_id.clone(),
-            trigger: botserver_domain::TriggerMatch::parse(
+            trigger: cooee_domain::TriggerMatch::parse(
                 "operator",
                 "someone-else",
                 ["operator"],
@@ -2849,11 +2849,11 @@ mod tests {
         let event = event_id('a');
         let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
         let action = crate::relay::IngestAction::TurnCandidate {
-            bot_id: botserver_domain::BotId::new("bot").expect("id"),
+            bot_id: cooee_domain::BotId::new("bot").expect("id"),
             event_id: event.clone(),
             channel_id: channel.to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse(
+            trigger: cooee_domain::TriggerMatch::parse(
                 "operator",
                 "someone-else",
                 ["operator"],
@@ -2882,11 +2882,11 @@ mod tests {
         let bot = bot();
         let event = event_id('a');
         let action = crate::relay::IngestAction::TurnCandidate {
-            bot_id: botserver_domain::BotId::new("bot").expect("id"),
+            bot_id: cooee_domain::BotId::new("bot").expect("id"),
             event_id: event.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse(
+            trigger: cooee_domain::TriggerMatch::parse(
                 "operator",
                 "someone-else",
                 ["operator"],
@@ -2913,11 +2913,11 @@ mod tests {
         let waiter = kelpie.register_waiter().expect("waiter");
         let event = event_id('a');
         let action = crate::relay::IngestAction::TurnCandidate {
-            bot_id: botserver_domain::BotId::new("bot").expect("id"),
+            bot_id: cooee_domain::BotId::new("bot").expect("id"),
             event_id: event.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse(
+            trigger: cooee_domain::TriggerMatch::parse(
                 "operator",
                 "someone-else",
                 ["operator"],
@@ -3049,7 +3049,7 @@ mod tests {
             actor
                 .bot()
                 .corpus_path()
-                .join(".botserver/places/bot-foobar.md"),
+                .join(".cooee/places/bot-foobar.md"),
         )
         .expect("snapshot");
         assert!(snapshot.contains("channel hello"));
@@ -3143,7 +3143,7 @@ mod tests {
             .expect("first");
         let edit_id = event_id('e');
         let replacement =
-            botserver_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
+            cooee_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
 
         assert_eq!(
             actor
@@ -3259,10 +3259,7 @@ mod tests {
                     &crate::relay::IngestAction::Edit {
                         event_id: event_id('e'),
                         target_event_id: trigger.event_id.clone(),
-                        replacement: botserver_domain::TriggerMatch::from_body(
-                            "bot: stale",
-                            "bot:"
-                        ),
+                        replacement: cooee_domain::TriggerMatch::from_body("bot: stale", "bot:"),
                     },
                     &trigger.channel_display,
                 )
@@ -3310,10 +3307,7 @@ mod tests {
                     &crate::relay::IngestAction::Edit {
                         event_id: event_id('e'),
                         target_event_id: second.event_id.clone(),
-                        replacement: botserver_domain::TriggerMatch::from_body(
-                            "bot: later",
-                            "bot:"
-                        ),
+                        replacement: cooee_domain::TriggerMatch::from_body("bot: later", "bot:"),
                     },
                     &second.channel_display,
                 )
@@ -3372,10 +3366,7 @@ mod tests {
                     &crate::relay::IngestAction::Edit {
                         event_id: event_id('e'),
                         target_event_id: first.event_id.clone(),
-                        replacement: botserver_domain::TriggerMatch::from_body(
-                            "bot: latest",
-                            "bot:",
-                        ),
+                        replacement: cooee_domain::TriggerMatch::from_body("bot: latest", "bot:",),
                     },
                     &first.channel_display,
                 )
@@ -3560,7 +3551,7 @@ mod tests {
             .handle_trigger(&kelpie, &waiter, &trigger)
             .expect("first");
         let replacement =
-            botserver_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
+            cooee_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
         actor
             .handle_ingest(
                 &kelpie,
@@ -3632,7 +3623,7 @@ mod tests {
             .handle_trigger(&kelpie, &waiter, &trigger)
             .expect("first");
         let replacement =
-            botserver_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
+            cooee_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("edit");
         actor
             .handle_ingest(
                 &kelpie,
@@ -3704,8 +3695,8 @@ mod tests {
                 &occupant_progress("ask-1", "working on it"),
             )
             .expect("progress recorded");
-        let now = crate::unix_now().expect("now")
-            + botserver_domain::progress::PROGRESS_INITIAL_HOLD_SECS;
+        let now =
+            crate::unix_now().expect("now") + cooee_domain::progress::PROGRESS_INITIAL_HOLD_SECS;
         actor.flush_progress(&publisher, now).expect("flush");
         let post = actor
             .repository
@@ -3786,7 +3777,7 @@ mod tests {
         let post_id = "e".repeat(64);
         open_turn_with_progress_post(&mut actor, &kelpie, &waiter, &trigger, &post_id);
         let replacement =
-            botserver_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("trigger");
+            cooee_domain::TriggerMatch::from_body("bot: latest", "bot:").expect("trigger");
         actor
             .handle_ingest(
                 &kelpie,
@@ -3860,7 +3851,7 @@ mod tests {
             actor
                 .bot()
                 .corpus_path()
-                .join(".botserver/places/bot-foobar.md"),
+                .join(".cooee/places/bot-foobar.md"),
         )
         .expect("snapshot");
         assert!(snapshot.contains("human line stays"));

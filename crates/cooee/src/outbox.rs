@@ -9,14 +9,14 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use botserver_domain::buzz::{self, BuzzEvent};
-use botserver_domain::restraint::{
+use chrono::Timelike;
+use cooee_domain::buzz::{self, BuzzEvent};
+use cooee_domain::restraint::{
     evaluate_restraint, HostRestraint, RestraintVerdict, POST_CEILING_WINDOW_SECS,
 };
-use botserver_domain::{
+use cooee_domain::{
     outbound_prefix_for, parse_occupant_tell, stamp_outbound, BotId, EventId, TurnState,
 };
-use chrono::Timelike;
 use nostr_sdk::prelude::{
     Client, Event, EventBuilder, Filter, FinalizeEvent, Keys, Kind, SingleLetterTag, Tag, Timestamp,
 };
@@ -1447,8 +1447,8 @@ mod tests {
     use crate::test_support::{
         event_id, fake_event_id, open_repo, open_repo_for, FakePublisher, CHANNEL,
     };
-    use botserver_domain::restraint::QuietHours;
-    use botserver_domain::BotId;
+    use cooee_domain::restraint::QuietHours;
+    use cooee_domain::BotId;
 
     struct NonRetryPublisher;
 

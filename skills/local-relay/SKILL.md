@@ -2,7 +2,7 @@
 name: local-relay
 description: >
   Run the throwaway Buzz relay and envchain namespaces for live
-  botserver tests. Use when an issue needs a real relay, occupant
+  cooee tests. Use when an issue needs a real relay, occupant
   kelpie reply, or @operator bot: triggers. Never use personal or
   sidecar keys.
 ---
@@ -40,10 +40,10 @@ From the repo root:
 `up` starts postgres/redis, the relay on `ws://127.0.0.1:13001`, and
 ensures two envchain namespaces:
 
-- `botserver-proof` — operator (the identity the bot posts as)
-- `botserver-proof-peer` — a second user who can `@` the operator
+- `cooee-proof` — operator (the identity the bot posts as)
+- `cooee-proof-peer` — a second user who can `@` the operator
 
-Keys live under `~/tmp-botserver-proof/` (mode 600). The script creates
+Keys live under `~/tmp-cooee-proof/` (mode 600). The script creates
 them if missing. `envchain --list` shows **names only**.
 
 ## Operator-facing smoke
@@ -64,7 +64,7 @@ and does not invoke a send crate.
 ```
 
 That posts `@<operator> bot: hello from peer` with a `p` tag. Use this
-to exercise ingest once `botserver` is running. Occupant answers use
+to exercise ingest once `cooee` is running. Occupant answers use
 `kelpie reply --final`; the host stamps `[{id}]:`. Issue 34 live proof
 is recorded in `docs/testing.md`.
 
@@ -73,12 +73,12 @@ is recorded in `docs/testing.md`.
 Wrap the **binary**, never put the nsec in pane-env or in flags:
 
 ```bash
-envchain botserver-proof botserver --config … --database …
+envchain cooee-proof cooee --config … --database …
 ```
 
-`botserver` registers a pane-less waiter named `botserver`. Do not start
+`cooee` registers a pane-less waiter named `cooee`. Do not start
 a Herdr agent with that name as the host. Occupant panes still use
-Herdr. If a leftover Ready alias `botserver` blocks `waiter.register`,
+Herdr. If a leftover Ready alias `cooee` blocks `waiter.register`,
 retire that incarnation.
 
 `envchain NAMESPACE CMD` injects Buzz vars into CMD. The binaries only

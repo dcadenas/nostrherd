@@ -15,6 +15,6 @@ For long work, send progress first: `kelpie reply <ask-id> --progress
 --stdin` with the full current status; it resets the reply reminder.
 Always finish with `--final`.
 
-<!-- botserver-place-snapshots -->
-Read `.botserver/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.
-<!-- /botserver-place-snapshots -->
+<!-- cooee-place-snapshots -->
+Read `.cooee/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.
+<!-- /cooee-place-snapshots -->

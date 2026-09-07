@@ -1,6 +1,6 @@
 # SPEC.md
 
-Normative contract for `botserver`. The host publishes; the occupant
+Normative contract for `cooee`. The host publishes; the occupant
 only `kelpie reply`.
 If this file and another document disagree, this file wins unless the
 other document is a later accepted decision in `docs/decision-log.md`.
@@ -25,11 +25,11 @@ selected by convention, posting with a visible bot stamp.
    git repo (home, `AGENTS.md`, `startup.md`, skill).
 4. Route a trigger to a session occupant named from bot + place
    (channel, DM, …). Start or reuse via Kelpie.
-5. Inject a Kelpie **ask** whose waiter is `botserver`. Body is the
+5. Inject a Kelpie **ask** whose waiter is `cooee`. Body is the
    trigger remainder, then a marked Context section of unread
-   channel events. `from=` MUST be `botserver`, never a relay pubkey.
+   channel events. `from=` MUST be `cooee`, never a relay pubkey.
 6. Occupant answers a trigger with `kelpie reply --final` and unstamped
-    prose. It MAY `kelpie tell botserver` for a bot-initiated channel
+    prose. It MAY `kelpie tell cooee` for a bot-initiated channel
     post (D38). It MAY report progress with `kelpie reply --progress`;
     the host relays that as one edited stamped post (D42). The host is
     the only Nostr publisher: it stamps `[{bot-id}]:`, posts from
@@ -49,7 +49,7 @@ selected by convention, posting with a visible bot stamp.
 ## System overview
 
 ```text
-relay  ->  botserver (reconnecting inbox client, waiter)
+relay  ->  cooee (reconnecting inbox client, waiter)
              per-bot actor
                sqlite  (processed events, sessions, turns)
                corpus repo path
@@ -84,7 +84,7 @@ Asks MUST render as Kelpie does today: unquoted attributes, `msg=` and
 `reply-to=` both the ask id.
 
 ```text
-<kelpie from=botserver msg=<ask-id> reply-to=<ask-id>>
+<kelpie from=cooee msg=<ask-id> reply-to=<ask-id>>
 request remainder
 
 ## Context
@@ -97,12 +97,12 @@ Tells MUST NOT be used for triggered channel work: they create no
 obligation or reminder. A tell from a known occupant is a bot-initiated
 post (D38).
 
-`from=botserver` is the waiter public name, not a pane and not a relay
+`from=cooee` is the waiter public name, not a pane and not a relay
 pubkey (D2).
 
 ## Occupant reply
 
-The occupant is an ordinary Kelpie peer of waiter `botserver`. Snapshot
+The occupant is an ordinary Kelpie peer of waiter `cooee`. Snapshot
 and renew stay. It MUST answer a trigger ask with `kelpie reply --final`
 and unstamped prose. The final body MUST come from `--stdin` or
 `--file`, never from a shell-expanded argument. It MUST NOT stamp
@@ -125,7 +125,7 @@ empty body publishes nothing. A tell the host refuses MUST still ACK,
 and the occupant MUST be told that it did not publish.
 
 The occupant self-renews. The host MUST NOT arm occupant renew with
-`--sender-id` of waiter `botserver`, so this inbox only sees channel
+`--sender-id` of waiter `cooee`, so this inbox only sees channel
 asks the host created (D32).
 
 ## Host publish
@@ -210,7 +210,7 @@ MUST NOT enqueue a second wake.
 ## Secrets
 
 Operator keys enter the host process via an outer wrapper
-(`envchain NAMESPACE botserver …`). Occupants MUST NOT receive the
+(`envchain NAMESPACE cooee …`). Occupants MUST NOT receive the
 nsec. The host MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` when
 set. Binaries MUST NOT take `--envchain` and MUST NOT exec `envchain`.
 Keys MUST NOT appear in process titles, sqlite, logs, or standing
@@ -261,7 +261,7 @@ subset.
     (D35).
 12. **Desktop.** Buzz desktop is still Daniel. The host does not mark
     him typing or rewrite his presence.
-13. **Bot-initiated line.** Occupant `kelpie tell botserver` posts one
+13. **Bot-initiated line.** Occupant `kelpie tell cooee` posts one
     stamped kind 9 in that session's channel, not as a reply to a
     `{id}:` event.
 14. **Author watch.** A `{id}: watch <pubkey>` trigger creates a bounded

@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use botserver_domain::{BotId, EventId};
+use cooee_domain::{BotId, EventId};
 use nostr_sdk::prelude::FinalizeEvent;
 use rusqlite::Connection;
 

@@ -5,14 +5,14 @@
 //!
 //! ```bash
 //! ./tools/local-relay up
-//! env -u BUZZ_AUTH_TAG envchain botserver-proof \
+//! env -u BUZZ_AUTH_TAG envchain cooee-proof \
 //!   cargo test --test live_publish -- --ignored --nocapture
 //! ```
 
 use std::time::Duration;
 
-use botserver::outbox::{BuzzPublisher, OutboundAttempt, OutboundPublisher};
-use botserver_domain::{buzz, stamp_outbound, EventId};
+use cooee::outbox::{BuzzPublisher, OutboundAttempt, OutboundPublisher};
+use cooee_domain::{buzz, stamp_outbound, EventId};
 use futures::StreamExt;
 use nostr_sdk::prelude::{
     Client, ClientNotification, Filter, Keys, SignerAuthenticator, SubscriptionId, Timestamp,
@@ -72,12 +72,12 @@ fn attempt_for(channel: &str, trigger: &EventId, body: &str) -> OutboundAttempt 
 async fn assert_refresh_filters(client: &Client, channel: &str, trigger: &EventId) {
     let subscriptions = client.subscriptions().await;
     let channel_filter = subscriptions
-        .get(&SubscriptionId::new("botserver-channels"))
+        .get(&SubscriptionId::new("cooee-channels"))
         .and_then(|relays| relays.values().next())
         .and_then(|filters| filters.first())
         .expect("channel subscription");
     let mutation_filter = subscriptions
-        .get(&SubscriptionId::new("botserver-mutations"))
+        .get(&SubscriptionId::new("cooee-mutations"))
         .and_then(|relays| relays.values().next())
         .and_then(|filters| filters.first())
         .expect("mutation subscription");
@@ -184,16 +184,13 @@ async fn live_publishes_each_kind_and_dedups_a_redelivery() {
     // Kind 7 reaction and its kind-5 removal. The host marks the
     // trigger, which still exists (the reply above was deleted, and a
     // deleted event cannot take a reaction).
-    let reaction = buzz::reaction(&trigger, botserver::outbox::IN_FLIGHT_REACTION);
+    let reaction = buzz::reaction(&trigger, cooee::outbox::IN_FLIGHT_REACTION);
     let reaction_id = publisher.send_buzz(&reaction).await.expect("reaction");
     let reaction_event = fetch_one(&client, &reaction_id)
         .await
         .expect("kind 7 on the relay");
     assert_eq!(reaction_event.kind.as_u16(), buzz::REACTION_KIND);
-    assert_eq!(
-        reaction_event.content,
-        botserver::outbox::IN_FLIGHT_REACTION
-    );
+    assert_eq!(reaction_event.content, cooee::outbox::IN_FLIGHT_REACTION);
     assert_eq!(
         tag_values(&reaction_event, "e"),
         vec![trigger.as_str().to_owned()]
@@ -227,7 +224,7 @@ async fn live_refresh_replaces_channel_and_active_turn_filters() {
     );
     let client = connect(keys.clone(), &relay_url).await;
     let publisher = BuzzPublisher::new(client.clone(), keys, relay_url);
-    let subscriber = botserver::relay::RelaySubscriber::new(client.clone());
+    let subscriber = cooee::relay::RelaySubscriber::new(client.clone());
     let mut notifications = subscriber.notifications();
 
     subscriber
@@ -289,7 +286,7 @@ async fn live_refresh_replaces_channel_and_active_turn_filters() {
                 ..
             } = notification
             {
-                channel_received |= subscription_id == SubscriptionId::new("botserver-channels")
+                channel_received |= subscription_id == SubscriptionId::new("cooee-channels")
                     && event.id.to_hex() == channel_event;
             }
         }
@@ -314,7 +311,7 @@ async fn live_refresh_replaces_channel_and_active_turn_filters() {
 }
 
 fn proof_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").expect("HOME")).join("tmp-botserver-proof")
+    std::path::PathBuf::from(std::env::var("HOME").expect("HOME")).join("tmp-cooee-proof")
 }
 
 fn port_open() -> bool {
@@ -360,11 +357,11 @@ fn start_throwaway_relay() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live proof; run against tools/local-relay (see docs/testing.md)"]
 async fn live_retry_after_a_real_relay_drop() {
-    use botserver::outbox::{retry_undispatched, NoopInFlightReaction, PublishRestraint};
-    use botserver::sqlite::SqliteRepository;
-    use botserver::HostRepository;
-    use botserver_domain::restraint::HostRestraint;
-    use botserver_domain::BotId;
+    use cooee::outbox::{retry_undispatched, NoopInFlightReaction, PublishRestraint};
+    use cooee::sqlite::SqliteRepository;
+    use cooee::HostRepository;
+    use cooee_domain::restraint::HostRestraint;
+    use cooee_domain::BotId;
     use rusqlite::Connection;
 
     let relay_url = relay_url();
@@ -414,7 +411,7 @@ async fn live_retry_after_a_real_relay_drop() {
         1,
     );
     assert!(
-        matches!(first, Err(botserver::outbox::OutboxError::Publish(_))),
+        matches!(first, Err(cooee::outbox::OutboxError::Publish(_))),
         "killed relay must be a retryable publish failure, got {first:?}"
     );
     let stranded = repository
@@ -442,7 +439,7 @@ async fn live_retry_after_a_real_relay_drop() {
     .expect("drain retry");
     assert_eq!(
         retried,
-        botserver::outbox::InboxAction::Ack,
+        cooee::outbox::InboxAction::Ack,
         "notices={notices:?}"
     );
     let accepted = repository

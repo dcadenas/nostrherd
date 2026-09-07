@@ -8,25 +8,23 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use clap::Parser;
 #[cfg(test)]
-use botserver::actor::persist_ingest;
+use cooee::actor::persist_ingest;
 #[cfg(test)]
-use botserver::actor::TriggerOutcome;
-use botserver::actor::{ActorError, BotActor};
-use botserver::config::{BotRegistry, ConfigError};
-use botserver::herdr::{HerdrError, HerdrPaneAllocator};
-use botserver::inbox::{default_socket, spawn_inbox, HostInbox, InboxDelivery};
-use botserver::outbox::{BuzzPublisher, InFlightReaction, InboxAction};
-use botserver::progress::{BackgroundProgressRelay, ProgressRelay};
-use botserver::relay::{
-    IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
-};
-use botserver::sqlite::SqliteRepository;
-use botserver::{
+use cooee::actor::TriggerOutcome;
+use cooee::actor::{ActorError, BotActor};
+use cooee::config::{BotRegistry, ConfigError};
+use cooee::herdr::{HerdrError, HerdrPaneAllocator};
+use cooee::inbox::{default_socket, spawn_inbox, HostInbox, InboxDelivery};
+use cooee::outbox::{BuzzPublisher, InFlightReaction, InboxAction};
+use cooee::progress::{BackgroundProgressRelay, ProgressRelay};
+use cooee::relay::{IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber};
+use cooee::sqlite::SqliteRepository;
+use cooee::{
     unix_now, HostRepository, HostWaiter, KelpieClient, KelpieError, WAITER_IDEMPOTENCY_KEY,
 };
-use botserver_domain::{Bot, BotId, EventId};
-use clap::Parser;
+use cooee_domain::{Bot, BotId, EventId};
 use futures::StreamExt;
 use nostr_sdk::prelude::{Client, ClientNotification, Event, Keys, SignerAuthenticator, Timestamp};
 
@@ -43,7 +41,7 @@ struct Args {
     #[arg(long)]
     config: PathBuf,
 
-    /// Path to the host SQLite database.
+    /// Path to the host `SQLite` database.
     #[arg(long)]
     database: PathBuf,
 
@@ -222,7 +220,7 @@ fn mint_waiter_key(database: &Path) -> Result<String, HostError> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let key = format!("botserver-host-waiter-{millis}");
+    let key = format!("cooee-host-waiter-{millis}");
     fs::write(waiter_key_path(database), format!("{key}\n")).map_err(HostError::WaiterKey)?;
     Ok(key)
 }
@@ -545,7 +543,7 @@ async fn poll_relay(
                 poll.last_watched_author_pubkeys
                     .clone_from(&scope.watched_author_pubkeys);
                 if !poll.announced {
-                    eprintln!("botserver connected");
+                    eprintln!("cooee connected");
                     poll.announced = true;
                 }
             }
@@ -819,8 +817,8 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use botserver::HostRepository;
     use clap::{CommandFactory, Parser};
+    use cooee::HostRepository;
     use nostr_sdk::prelude::ToBech32;
 
     use super::*;
@@ -835,7 +833,7 @@ mod tests {
             .as_nanos();
         let sequence = NEXT_TEMP_PATH.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "botserver-main-{label}-{}-{timestamp}-{sequence}",
+            "cooee-main-{label}-{}-{timestamp}-{sequence}",
             std::process::id()
         ))
     }
@@ -989,11 +987,11 @@ mod tests {
         let inbound = format!("{bot_id}:");
         IngestAction::TurnCandidate {
             bot_id: BotId::new(bot_id).expect("id"),
-            event_id: botserver_domain::EventId::parse_hex(&event_char.to_string().repeat(64))
+            event_id: cooee_domain::EventId::parse_hex(&event_char.to_string().repeat(64))
                 .expect("event"),
             channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse(
+            trigger: cooee_domain::TriggerMatch::parse(
                 "operator",
                 "someone-else",
                 ["operator"],
@@ -1021,7 +1019,7 @@ mod tests {
             .turns_for_session(registry.bots()[0].id(), channel)
             .expect("turns");
         assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].state, botserver::TurnState::Queued);
+        assert_eq!(turns[0].state, cooee::TurnState::Queued);
         assert_eq!(turns[0].ask_id, None);
     }
 
@@ -1087,9 +1085,9 @@ mod tests {
             &trigger_action("pr", 'e', "pr: hello"),
         )
         .expect("pr");
-        let target = botserver_domain::EventId::parse_hex(&"e".repeat(64)).expect("target");
+        let target = cooee_domain::EventId::parse_hex(&"e".repeat(64)).expect("target");
         let edit = IngestAction::Edit {
-            event_id: botserver_domain::EventId::parse_hex(&"f".repeat(64)).expect("edit"),
+            event_id: cooee_domain::EventId::parse_hex(&"f".repeat(64)).expect("edit"),
             target_event_id: target,
             replacement: None,
         };
@@ -1142,13 +1140,13 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let (registry, mut repository) = load_host(&config, &database).expect("load");
-        let event_id = botserver_domain::EventId::parse_hex(&"d".repeat(64)).expect("event");
+        let event_id = cooee_domain::EventId::parse_hex(&"d".repeat(64)).expect("event");
         let action = IngestAction::TurnCandidate {
             bot_id: BotId::new("bot").expect("id"),
             event_id: event_id.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
-            trigger: botserver_domain::TriggerMatch::parse(
+            trigger: cooee_domain::TriggerMatch::parse(
                 "operator",
                 "someone-else",
                 ["operator"],
@@ -1174,10 +1172,10 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let (registry, mut repository) = load_host(&config, &database).expect("load");
-        let event_id = botserver_domain::EventId::parse_hex(&"b".repeat(64)).expect("event");
+        let event_id = cooee_domain::EventId::parse_hex(&"b".repeat(64)).expect("event");
         let action = IngestAction::Delete {
             event_id: event_id.clone(),
-            target_event_id: botserver_domain::EventId::parse_hex(&"c".repeat(64)).expect("target"),
+            target_event_id: cooee_domain::EventId::parse_hex(&"c".repeat(64)).expect("target"),
         };
 
         assert_eq!(
@@ -1199,7 +1197,7 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--config",
             config.to_str().expect("utf8"),
             "--database",
@@ -1212,9 +1210,7 @@ mod tests {
         assert_eq!(registry.bots().len(), 1);
         assert_eq!(registry.bots()[0].id().as_str(), "bot");
         assert!(!repository
-            .event_processed(
-                &botserver_domain::EventId::parse_hex(&"a".repeat(64)).expect("event id")
-            )
+            .event_processed(&cooee_domain::EventId::parse_hex(&"a".repeat(64)).expect("event id"))
             .expect("schema"));
     }
 
@@ -1223,7 +1219,7 @@ mod tests {
         let config = temp_path("missing").with_extension("toml");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--config",
             config.to_str().expect("utf8"),
             "--database",
@@ -1240,7 +1236,7 @@ mod tests {
         fs::write(&config, "not = toml [[").expect("write");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--config",
             config.to_str().expect("utf8"),
             "--database",
@@ -1252,15 +1248,15 @@ mod tests {
     }
 
     #[test]
-    fn botserver_parser_rejects_envchain() {
+    fn cooee_parser_rejects_envchain() {
         assert!(Args::try_parse_from([
-            "botserver",
+            "cooee",
             "--config",
             "bots.toml",
             "--database",
             "host.sqlite",
             "--envchain",
-            "botserver",
+            "cooee",
         ])
         .is_err());
         assert!(!Args::command()
@@ -1320,7 +1316,7 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--config",
             config.to_str().expect("utf8"),
             "--database",
@@ -1339,7 +1335,7 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--config",
             config.to_str().expect("utf8"),
             "--database",
@@ -1358,7 +1354,7 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--config",
             config.to_str().expect("utf8"),
             "--database",
@@ -1379,7 +1375,7 @@ mod tests {
         fs::write(&config, "bots = []").expect("write");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--config",
             config.to_str().expect("utf8"),
             "--database",
@@ -1397,7 +1393,7 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--check",
             "--config",
             config.to_str().expect("utf8"),
@@ -1417,7 +1413,7 @@ mod tests {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
-            "botserver",
+            "cooee",
             "--config",
             config.to_str().expect("utf8"),
             "--database",

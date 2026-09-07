@@ -13,17 +13,17 @@ pub const PLACE_SNAPSHOT_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 /// Future slack matching Buzz's accepted clock drift (D24).
 pub const PLACE_SNAPSHOT_FUTURE_SLACK_SECS: i64 = 900;
 
-const STARTUP_BEGIN: &str = "<!-- botserver-place-snapshots -->";
-const STARTUP_END: &str = "<!-- /botserver-place-snapshots -->";
-const STARTUP_BLOCK: &str = "<!-- botserver-place-snapshots -->
-Read `.botserver/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.
-<!-- /botserver-place-snapshots -->
+const STARTUP_BEGIN: &str = "<!-- cooee-place-snapshots -->";
+const STARTUP_END: &str = "<!-- /cooee-place-snapshots -->";
+const STARTUP_BLOCK: &str = "<!-- cooee-place-snapshots -->
+Read `.cooee/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.
+<!-- /cooee-place-snapshots -->
 ";
 
 /// Relative corpus path of one session's snapshot file.
 #[must_use]
 pub fn place_snapshot_relpath(session_name: &str) -> Option<String> {
-    snapshot_file_stem(session_name).map(|name| format!(".botserver/places/{name}.md"))
+    snapshot_file_stem(session_name).map(|name| format!(".cooee/places/{name}.md"))
 }
 
 /// One indexed event as a snapshot or ask-context line.
@@ -152,7 +152,7 @@ fn upsert_startup_block(existing: &str) -> String {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use botserver_domain::EventId;
+    use cooee_domain::EventId;
 
     use super::*;
     use crate::IndexedRelayEvent;
@@ -177,7 +177,7 @@ mod tests {
     fn temp_corpus() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "botserver-snapshot-{}-{}",
+            "cooee-snapshot-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -230,13 +230,13 @@ mod tests {
         let corpus = temp_corpus();
         let path =
             refresh_place_snapshot(&corpus, "bot-foobar", "# Channel snapshot\n").expect("write");
-        assert_eq!(path, corpus.join(".botserver/places/bot-foobar.md"));
+        assert_eq!(path, corpus.join(".cooee/places/bot-foobar.md"));
         assert_eq!(
             fs::read_to_string(&path).expect("snapshot"),
             "# Channel snapshot\n"
         );
         let startup = fs::read_to_string(corpus.join("startup.md")).expect("startup");
-        assert!(startup.contains(".botserver/places/<your public Kelpie name>.md"));
+        assert!(startup.contains(".cooee/places/<your public Kelpie name>.md"));
         assert!(startup.contains(STARTUP_BEGIN));
     }
 

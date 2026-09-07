@@ -6,4 +6,4 @@
 *.log
 .DS_Store
 /var/
-corpus/**/.botserver/
+corpus/**/.cooee/

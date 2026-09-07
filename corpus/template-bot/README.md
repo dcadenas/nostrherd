@@ -1,6 +1,6 @@
 # template-bot
 
-Starting point for a new bot under botserver. Copy this directory (or
+Starting point for a new bot under cooee. Copy this directory (or
 point `corpus` at your own repo shaped like it) and write your bot's
 personality in `AGENTS.md`. That is the only file you must write.
 

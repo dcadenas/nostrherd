@@ -11,10 +11,10 @@ use serde_json::Value;
 mod test_support;
 
 /// Public Kelpie name of the host socket waiter (D2).
-pub const WAITER_NAME: &str = "botserver";
+pub const WAITER_NAME: &str = "cooee";
 
 /// Stable `waiter.register` idempotency key so process restarts reuse the waiter.
-pub const WAITER_IDEMPOTENCY_KEY: &str = "botserver-host-waiter";
+pub const WAITER_IDEMPOTENCY_KEY: &str = "cooee-host-waiter";
 
 /// A newly started session occupant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub struct OccupantLaunch {
 }
 
 /// Short trusted body used only to finish `kelpie start --tell`.
-pub const OCCUPANT_BOOTSTRAP: &str = "Wait for Kelpie asks from botserver.";
+pub const OCCUPANT_BOOTSTRAP: &str = "Wait for Kelpie asks from cooee.";
 
 /// Wall-clock renew interval for a session occupant (D27).
 pub const OCCUPANT_RENEW_EVERY: &str = "45m";
@@ -976,18 +976,18 @@ mod tests {
     fn registered_waiter() -> CommandOutput {
         success(&serde_json::json!({
             "logical_agent_id": "waiter-agent",
-            "public_name": "botserver",
+            "public_name": "cooee",
             "delivery_transport": "socket_inbox"
         }))
     }
 
     #[test]
-    fn names_socket_waiter_botserver() {
-        assert_eq!(WAITER_NAME, "botserver");
+    fn names_socket_waiter_cooee() {
+        assert_eq!(WAITER_NAME, "cooee");
     }
 
     #[test]
-    fn registers_pane_less_socket_waiter_botserver() {
+    fn registers_pane_less_socket_waiter_cooee() {
         let runner = Arc::new(FakeRunner::new([registered_waiter()]));
         let client = KelpieClient::with_runner(Arc::clone(&runner));
 
@@ -1002,7 +1002,7 @@ mod tests {
                     "--json".to_owned(),
                     "waiter-register".to_owned(),
                     "--name".to_owned(),
-                    "botserver".to_owned(),
+                    "cooee".to_owned(),
                     "--parentless".to_owned(),
                     "--idempotency-key".to_owned(),
                     WAITER_IDEMPOTENCY_KEY.to_owned(),
@@ -1023,7 +1023,7 @@ mod tests {
                 "--json",
                 "waiter-register",
                 "--name",
-                "botserver",
+                "cooee",
                 "--parentless",
                 "--idempotency-key",
                 WAITER_IDEMPOTENCY_KEY,
@@ -1036,11 +1036,11 @@ mod tests {
         let runner = Arc::new(FakeRunner::new([registered_waiter()]));
         let client = KelpieClient::with_runner(Arc::clone(&runner));
         client
-            .register_waiter_with_key("botserver-host-waiter-next")
+            .register_waiter_with_key("cooee-host-waiter-next")
             .expect("register");
         assert_eq!(
             runner.calls.lock().expect("calls lock")[0].0[6],
-            "botserver-host-waiter-next"
+            "cooee-host-waiter-next"
         );
     }
 
@@ -1048,7 +1048,7 @@ mod tests {
     fn register_waiter_rejects_a_herdr_prompt_waiter() {
         let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
             "logical_agent_id": "waiter-agent",
-            "public_name": "botserver",
+            "public_name": "cooee",
             "delivery_transport": "herdr_prompt"
         }))]));
         let client = KelpieClient::with_runner(runner);
@@ -1191,7 +1191,7 @@ mod tests {
             "every_ms": 2_700_000
         }))]));
         let client = KelpieClient::with_runner(Arc::clone(&runner));
-        let snapshot = ".botserver/places/bot-foobar.md";
+        let snapshot = ".cooee/places/bot-foobar.md";
 
         let renew_id = client
             .arm_occupant_renew("occupant-agent", "occupant-incarnation", snapshot)
@@ -1450,9 +1450,9 @@ pub mod watch;
 #[cfg(test)]
 mod spec_flows;
 
-use botserver_domain::{BotId, EventId};
+use cooee_domain::{BotId, EventId};
 
-pub use botserver_domain::{TurnState, TurnTransition};
+pub use cooee_domain::{TurnState, TurnTransition};
 
 /// Immutable relay event cached for channel snapshots.
 ///
@@ -1472,11 +1472,11 @@ pub struct IndexedRelayEvent {
 
 pub(crate) fn thread_root_for<R: HostRepository>(
     repository: &R,
-    event_id: &botserver_domain::EventId,
-) -> Result<Option<botserver_domain::EventId>, R::Error> {
+    event_id: &cooee_domain::EventId,
+) -> Result<Option<cooee_domain::EventId>, R::Error> {
     Ok(repository.indexed_event(event_id)?.and_then(|event| {
         let tags = serde_json::from_str::<Vec<Vec<String>>>(&event.tags_json).unwrap_or_default();
-        botserver_domain::buzz::reply_thread_root(event_id, &tags)
+        cooee_domain::buzz::reply_thread_root(event_id, &tags)
     }))
 }
 

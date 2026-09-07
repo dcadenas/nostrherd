@@ -14,12 +14,12 @@ per bot, and not one shared god-object.
 
 Status: accepted
 
-The host waiter is one pane-less socket LogicalAgent named `botserver`,
+The host waiter is one pane-less socket LogicalAgent named `cooee`,
 created with `waiter.register` (idempotent). It receives on a
 reconnecting `inbox.claim` and resolves with `inbox.ack`. There is no
-fake pane occupant. Occupant envelopes still use `from=botserver`, never
+fake pane occupant. Occupant envelopes still use `from=cooee`, never
 a relay pubkey and never `operator`. `--from operator` is sender
-attribution only; the waiting agent stays `botserver`. Session occupants
+attribution only; the waiting agent stays `cooee`. Session occupants
 are `bot-<place>` (or `<botid>-<place>`). Receipts multiplex on ask id
 in SQLite.
 
@@ -37,14 +37,14 @@ Status: retracted
 
 Retracted as the occupant publish path. Occupants MUST answer with
 `kelpie reply --final` and unstamped prose. The host is the only Nostr
-publisher (D31). The `botcli` crate is removed (`dcadenas/botserver#35`).
+publisher (D31). The `botcli` crate is removed (`dcadenas/cooee#35`).
 
 ## D5. Kelpie ask, not tell, for triggered work
 
 Status: accepted
 
 Triggered Nostr work is an ask so pending, reminders, and amnesia work.
-The waiter is `botserver`. The occupant completes with `kelpie reply
+The waiter is `cooee`. The occupant completes with `kelpie reply
 --final`, never cancel. The host then publishes and `inbox.ack`.
 
 The ask body is the trigger remainder, then a marked `## Context`
@@ -194,7 +194,7 @@ host-edited progress post per ask (D42), never as a series of posts.
 
 Status: accepted
 
-Closes the presence half of Q4. `botserver` MUST NOT publish presence
+Closes the presence half of Q4. `cooee` MUST NOT publish presence
 or typing as the operator. Buzz desktop remains the human session.
 Unread badges on the desktop are later (rest of Q4).
 
@@ -249,7 +249,7 @@ deps) and the baseline SHA. A comment alone is not enough.
 Status: retracted
 
 Retracted as the occupant publish path. Occupants MUST NOT use a send
-tool to post. The `botcli` crate is removed (`dcadenas/botserver#35`).
+tool to post. The `botcli` crate is removed (`dcadenas/cooee#35`).
 Host publish is D31.
 
 ## D23. Live tests use the throwaway local relay
@@ -257,8 +257,8 @@ Host publish is D31.
 Status: accepted
 
 Issues that need a real relay MUST use `skills/local-relay` and
-`tools/local-relay`. Throwaway envchain namespaces `botserver-proof`
-(operator) and `botserver-proof-peer` (peer). Never `nostr-personal`
+`tools/local-relay`. Throwaway envchain namespaces `cooee-proof`
+(operator) and `cooee-proof-peer` (peer). Never `nostr-personal`
 or `buzz-acp`.
 
 ## D23. Ingest enforces Buzz mutation contracts
@@ -300,7 +300,7 @@ Status: accepted
 
 A new channel occupant is created with `kelpie start --tell` and a short
 trusted bootstrap body. The triggering Nostr text is always a `kelpie
-ask` owned by waiter `botserver` (D5), including on the first trigger.
+ask` owned by waiter `cooee` (D5), including on the first trigger.
 Start and ask keep separate receipts so an accepted runtime does not
 imply the trigger obligation exists.
 
@@ -321,14 +321,14 @@ Status: accepted
 
 Closes the unspecified window and interval in D6/D19 for v1. The host
 writes one file per channel session at
-`<corpus>/.botserver/places/<session-name>.md` from indexed events with
+`<corpus>/.cooee/places/<session-name>.md` from indexed events with
 that channel UUID only, in the window `[now - 7 days, now + 900s]` (the
 upper slack is Buzz's accepted clock drift from D24). Corpus
-`startup.md` points at `.botserver/places/<your public Kelpie name>.md`.
+`startup.md` points at `.cooee/places/<your public Kelpie name>.md`.
 Occupant start and each new Turn refresh that file. The occupant
 self-renews (`kelpie renew --every 45m --on-timeout abort` on its own
 incarnation). The host MUST NOT arm occupant renew with `--sender-id`
-of waiter `botserver` (D32). Prepare writes `progress.md`. Resume reads
+of waiter `cooee` (D32). Prepare writes `progress.md`. Resume reads
 `startup.md` and the snapshot. D19's MUST is the file contents, not
 occupant filesystem isolation: occupants share the corpus cwd (D7).
 Token-count renew remains later (Q6).
@@ -366,20 +366,20 @@ The host MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` from the
 environment when present. Binaries MUST NOT take `--envchain` and MUST
 NOT exec `envchain` themselves. Occupants MUST NOT receive the nsec.
 
-Wrap the host: `envchain botserver-proof botserver …` (live tests) or
-`envchain botserver botserver …` (operator). The namespace name is not
+Wrap the host: `envchain cooee-proof cooee …` (live tests) or
+`envchain cooee cooee …` (operator). The namespace name is not
 a secret. The nsec MUST NOT be standing pane-env.
 
 Supersedes the `--envchain` flag shipped in #6.
 
-## D30. Operator personal envchain namespace is `botserver`
+## D30. Operator personal envchain namespace is `cooee`
 
 Status: accepted
 
-Personal host wrap uses envchain namespace `botserver` with
+Personal host wrap uses envchain namespace `cooee` with
 `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL`. Occupants do not wrap a
 publish binary. That namespace is distinct from throwaway
-`botserver-proof` / `botserver-proof-peer` (D23 live-test relay). Do
+`cooee-proof` / `cooee-proof-peer` (D23 live-test relay). Do
 not point `BUZZ_RELAY_URL` at a production relay.
 
 ## D31. Host publishes; occupant only kelpie final
@@ -387,7 +387,7 @@ not point `BUZZ_RELAY_URL` at a production relay.
 Status: accepted
 
 Retracts D4/D22 as the occupant path. The occupant is an ordinary
-Kelpie peer of waiter `botserver`. It answers with `kelpie reply
+Kelpie peer of waiter `cooee`. It answers with `kelpie reply
 --final` and unstamped prose.
 
 The host is the only Nostr publisher. It stamps `[{bot-id}]:`, posts
@@ -418,7 +418,7 @@ Status: accepted
 
 Amends D27. Snapshot files stay. The occupant arms its own wall-clock
 renew. The host MUST NOT arm occupant renew with `--sender-id` of
-waiter `botserver`, so this inbox only sees channel asks the host
+waiter `cooee`, so this inbox only sees channel asks the host
 created. The host may still schedule the policy on the occupant's
 incarnation. `renew_id` remains the stored policy id.
 
@@ -500,7 +500,7 @@ When both are present they MUST agree. Disagreeing or missing identity
 is unknown: ACK, do not post. The host reads those fields from
 `inbox.delivery` when Kelpie includes them. Absent fields fail closed.
 
-Hang point is that occupant's channel. Nested `<botserver to="…">` in
+Hang point is that occupant's channel. Nested `<cooee to="…">` in
 the tell body is host routing, not a Kelpie flag. Inner text is the
 body; prose outside the tag is scratch. No tag, or a tag with no `to`,
 posts to this session's channel. `to` is an exact channel UUID or an
@@ -550,19 +550,19 @@ The host waiter is pane-less (D2): its transport is the claimed socket
 inbox, not a Herdr pane prompt. The two repos align as follows.
 `kelpie reply` resolves the durable obligation and routes by the
 waiter's `delivery_transport` (`socket_inbox`); it works today and is
-the only correlated reporting path. `kelpie tell botserver` needs
+the only correlated reporting path. `kelpie tell cooee` needs
 alias resolution to dispatch on transport; until Kelpie ships
 socket-waiter alias delivery for unsolicited tells, D38's interface is
 blocked, not broken: the host side (register-once, reconnecting claim,
 fail-closed sender identity) is complete and unchanged. `ask` to a
-socket waiter is a Kelpie product decision; botserver MUST NOT build
+socket waiter is a Kelpie product decision; cooee MUST NOT build
 on it.
 
 Confirmed during the 2026-09-03 kelpied restart: waiter identity
 survives the daemon and the host reclaims its inbox within seconds
 without re-registering; no host restart is needed. Diagnostics bugs
 named to Kelpie: lazy-adoption errors that mask an active waiter-owned
-alias ("socket waiter … already holds public name botserver", then
+alias ("socket waiter … already holds public name cooee", then
 "no Ready binding and matches 0 unbound live agents"), and `name-info`
 reporting an actively-claimed waiter not-live.
 
@@ -648,7 +648,7 @@ whose prepared id was absent are ended during migration and are never resent.
 Status: accepted
 
 Aligned 2026-09-03 between the operator's investigation session and
-botserver-agent. The host stops shelling out to the `buzz` CLI for
+cooee-agent. The host stops shelling out to the `buzz` CLI for
 writes (`buzz messages send|edit|delete`, `buzz reactions
 add|remove`) and publishes through the nostr-sdk client it already
 holds. A small Buzz-specific module in the domain crate owns the
@@ -705,10 +705,10 @@ one of them published nothing for ninety-two minutes. One timer with
 two consumers is the smaller surface.
 
 An occupant arms its own schedule. Fixed text is a repeating
-`kelpie tell botserver`, which D38's publish path already posts
+`kelpie tell cooee`, which D38's publish path already posts
 stamped, with no `--reply-to` and no marker. A fresh status each time
 is a repeating tell the occupant sends to itself, after which it tells
-`botserver` with the result. Neither needs host code.
+`cooee` with the result. Neither needs host code.
 
 A schedule fires only while its target is addressable. Kelpie fails
 closed and MUST NOT start, revive, or restart an agent to deliver one,
@@ -864,8 +864,8 @@ an attempt keyed by message id.
 
 Status: accepted
 
-`parse_occupant_tell` treats a backslash immediately before `<botserver`
-or `</botserver>` as prose, not a tag boundary. Published text unescapes
+`parse_occupant_tell` treats a backslash immediately before `<cooee`
+or `</cooee>` as prose, not a tag boundary. Published text unescapes
 exactly those two sequences. A second real tag still refuses.
 
 A tell the host will not publish still ACKs (the occupant is done with

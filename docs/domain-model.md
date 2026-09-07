@@ -3,7 +3,7 @@
 Bounded context: **personal Nostr bot host**.
 
 No types here talk to SQLite, Kelpie, or the relay. Those adapters live
-in `botserver`.
+in `cooee`.
 
 ## Aggregates
 

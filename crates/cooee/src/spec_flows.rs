@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use botserver_domain::{Bot, BotId, EventId};
+use cooee_domain::{Bot, BotId, EventId};
 use nostr_sdk::prelude::{Client, Event, EventBuilder, FinalizeEvent, Keys, Kind, Tag};
 use serde_json::Value;
 
@@ -89,7 +89,7 @@ fn success(result: &Value) -> CommandOutput {
 fn adopt() -> CommandOutput {
     success(&serde_json::json!({
         "logical_agent_id": "waiter-agent",
-        "public_name": "botserver",
+        "public_name": "cooee",
         "delivery_transport": "socket_inbox"
     }))
 }
@@ -159,7 +159,7 @@ fn failure(class: &str, message: &str) -> CommandOutput {
 fn temp_path(label: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "botserver-spec-{label}-{}-{}",
+        "cooee-spec-{label}-{}-{}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
@@ -931,7 +931,7 @@ fn flow_11_one_ask_while_the_occupant_works() {
 /// second post that leaves it up. The host never invents progress.
 #[test]
 fn flow_11_progress_is_one_edited_post_then_a_final() {
-    use botserver_domain::progress::{PROGRESS_EDIT_INTERVAL_SECS, PROGRESS_INITIAL_HOLD_SECS};
+    use cooee_domain::progress::{PROGRESS_EDIT_INTERVAL_SECS, PROGRESS_INITIAL_HOLD_SECS};
 
     let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
     let relay = Arc::new(crate::progress::RecordingProgressRelay::default());

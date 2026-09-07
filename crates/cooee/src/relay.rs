@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use botserver_domain::{
+use cooee_domain::{
     place_display as usable_place_display, BotId, EventId, TriggerMatch, INBOUND_TRIGGER,
 };
 use futures::Stream;
@@ -52,7 +52,7 @@ pub enum IngestAction {
 pub enum IngestError<E> {
     /// A relay event carried an invalid event id.
     InvalidEventId(String),
-    /// A relay timestamp does not fit SQLite's signed integer range.
+    /// A relay timestamp does not fit `SQLite`'s signed integer range.
     InvalidCreatedAt(u64),
     /// Event tags could not be serialized for the snapshot index.
     InvalidTags(serde_json::Error),
@@ -478,20 +478,17 @@ impl RelaySubscriber {
         watched_author_pubkeys: &[String],
         since: Timestamp,
     ) -> Result<(), RelaySubscribeError> {
-        self.subscribe_filter("botserver-messages", message_filter(operator_pubkey, since))
+        self.subscribe_filter("cooee-messages", message_filter(operator_pubkey, since))
             .await?;
         if let Some(filter) = operator_authored_filter(operator_pubkey, since) {
-            self.subscribe_filter("botserver-authored", filter).await?;
+            self.subscribe_filter("cooee-authored", filter).await?;
         }
-        self.update_filter("botserver-channels", channel_filter(channel_ids, since))
+        self.update_filter("cooee-channels", channel_filter(channel_ids, since))
+            .await?;
+        self.update_filter("cooee-mutations", mutation_filter(active_event_ids, since))
             .await?;
         self.update_filter(
-            "botserver-mutations",
-            mutation_filter(active_event_ids, since),
-        )
-        .await?;
-        self.update_filter(
-            "botserver-watched-authors",
+            "cooee-watched-authors",
             author_filter(watched_author_pubkeys, since),
         )
         .await?;
@@ -844,7 +841,7 @@ fn parse_place_metadata(tags: &[Vec<String>]) -> PlaceMetadata {
 }
 
 fn wants_peer_display(channel_name: &str) -> bool {
-    channel_name.trim().is_empty() || botserver_domain::is_generic_dm_title(channel_name)
+    channel_name.trim().is_empty() || cooee_domain::is_generic_dm_title(channel_name)
 }
 
 fn other_participant<'a>(operator_pubkey: &str, participants: &'a [String]) -> Option<&'a str> {
@@ -881,7 +878,7 @@ fn parse_profile_display(content: &str) -> Option<String> {
 mod tests {
     use std::collections::HashSet;
 
-    use botserver_domain::BotId;
+    use cooee_domain::BotId;
     use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Keys, LocalRelay, Tag};
 
     use super::*;
@@ -1734,15 +1731,15 @@ mod tests {
                 .expect("registered filter")
         };
         assert_eq!(
-            filter_json("botserver-channels")["#h"],
+            filter_json("cooee-channels")["#h"],
             serde_json::json!(["channel-b"])
         );
         assert_eq!(
-            filter_json("botserver-mutations")["#e"],
+            filter_json("cooee-mutations")["#e"],
             serde_json::json!([second.as_str()])
         );
         assert_eq!(
-            filter_json("botserver-watched-authors")["authors"],
+            filter_json("cooee-watched-authors")["authors"],
             serde_json::json!([second_author])
         );
 

@@ -1,6 +1,6 @@
 //! Domain types for the personal Nostr bot host.
 //!
-//! No I/O. SQLite, Kelpie, Herdr, and the relay live in adapters.
+//! No I/O. `SQLite`, Kelpie, Herdr, and the relay live in adapters.
 
 pub mod buzz;
 pub mod progress;
@@ -214,7 +214,7 @@ pub fn is_generic_dm_title(display: &str) -> bool {
 /// # Examples
 ///
 /// ```
-/// use botserver_domain::place_display;
+/// use cooee_domain::place_display;
 ///
 /// assert_eq!(place_display("#eng", None), "#eng");
 /// assert_eq!(place_display("DM", Some("Sebastian")), "Sebastian");
@@ -484,7 +484,7 @@ impl TurnTransition {
 /// # Examples
 ///
 /// ```
-/// use botserver_domain::parse_occupant_tell;
+/// use cooee_domain::parse_occupant_tell;
 ///
 /// assert_eq!(parse_occupant_tell("  queue is clear  "), Some("queue is clear".to_owned()));
 /// assert_eq!(parse_occupant_tell("   "), None);
@@ -889,7 +889,7 @@ mod tests {
 
     #[test]
     fn occupant_tell_publishes_any_text_including_angle_brackets() {
-        let raw = "the <botserver to=\"eng\"> tag, explained";
+        let raw = "the <cooee to=\"eng\"> tag, explained";
         assert_eq!(parse_occupant_tell(raw), Some(raw.to_owned()));
     }
 

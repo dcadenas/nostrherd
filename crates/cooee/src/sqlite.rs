@@ -1,10 +1,10 @@
-//! SQLite host-state adapter.
+//! `SQLite` host-state adapter.
 
 use std::path::Path;
 use std::time::Duration;
 
-use botserver_domain::restraint::POST_CEILING_WINDOW_SECS;
-use botserver_domain::{BotId, EventId, TurnTransition};
+use cooee_domain::restraint::POST_CEILING_WINDOW_SECS;
+use cooee_domain::{BotId, EventId, TurnTransition};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
@@ -310,7 +310,7 @@ impl SqliteRepository {
     ///
     /// # Errors
     ///
-    /// Returns an error when SQLite cannot open or initialize the database.
+    /// Returns an error when `SQLite` cannot open or initialize the database.
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         Self::from_connection(Connection::open(path)?)
     }
@@ -319,7 +319,7 @@ impl SqliteRepository {
     ///
     /// # Errors
     ///
-    /// Returns an error when SQLite cannot configure or initialize the database.
+    /// Returns an error when `SQLite` cannot configure or initialize the database.
     #[allow(clippy::too_many_lines)]
     pub fn from_connection(connection: Connection) -> rusqlite::Result<Self> {
         connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;

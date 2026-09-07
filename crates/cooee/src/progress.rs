@@ -10,11 +10,11 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-use botserver_domain::progress::{
+use cooee_domain::progress::{
     cap_progress_body, next_progress_step, ProgressClock, ProgressStep, PROGRESS_EDIT_CAP,
     PROGRESS_EDIT_INTERVAL_SECS,
 };
-use botserver_domain::{outbound_prefix_for, stamp_outbound, BotId, EventId, TurnState};
+use cooee_domain::{outbound_prefix_for, stamp_outbound, BotId, EventId, TurnState};
 
 use crate::outbox::{
     record_and_send, OutboundAttempt, OutboundPublisher, PublishError, SendOutcome,
@@ -911,7 +911,7 @@ impl ProgressRelay for RecordingProgressRelay {
 mod tests {
     use std::sync::Mutex;
 
-    use botserver_domain::progress::{
+    use cooee_domain::progress::{
         PROGRESS_BODY_MAX_BYTES, PROGRESS_EDIT_INTERVAL_SECS, PROGRESS_INITIAL_HOLD_SECS,
     };
 

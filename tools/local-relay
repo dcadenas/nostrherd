@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Throwaway Buzz relay + envchain namespaces for live botserver tests.
+# Throwaway Buzz relay + envchain namespaces for live cooee tests.
 # Never prints secret values.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PROOF="${BOTSERVER_PROOF_DIR:-$HOME/tmp-botserver-proof}"
+PROOF="${COOEE_PROOF_DIR:-$HOME/tmp-cooee-proof}"
 COMPOSE="$PROOF/docker-compose.yml"
 RELAY_BIN="${BUZZ_RELAY_BIN:-$HOME/code/buzz/target/release/buzz-relay}"
-NS_OP=botserver-proof
-NS_PEER=botserver-proof-peer
+NS_OP=cooee-proof
+NS_PEER=cooee-proof-peer
 BIND=127.0.0.1:13001
 HEALTH=18081
 
@@ -22,7 +22,7 @@ mkdir -p "$PROOF"
 
 ensure_compose() {
   cat > "$COMPOSE" << 'YML'
-name: botserver-proof
+name: cooee-proof
 services:
   postgres:
     image: postgres:17-alpine
@@ -85,8 +85,8 @@ ensure_envchain() {
 wait_healthy() {
   local i
   for i in $(seq 1 40); do
-    pg=$(docker inspect --format '{{.State.Health.Status}}' botserver-proof-postgres-1 2>/dev/null || echo missing)
-    rd=$(docker inspect --format '{{.State.Health.Status}}' botserver-proof-redis-1 2>/dev/null || echo missing)
+    pg=$(docker inspect --format '{{.State.Health.Status}}' cooee-proof-postgres-1 2>/dev/null || echo missing)
+    rd=$(docker inspect --format '{{.State.Health.Status}}' cooee-proof-redis-1 2>/dev/null || echo missing)
     if [ "$pg" = healthy ] && [ "$rd" = healthy ]; then
       return 0
     fi
@@ -138,7 +138,7 @@ ensure_channel() {
     return 0
   fi
   local json
-  json=$(env -u BUZZ_AUTH_TAG envchain "$NS_OP" buzz channels create --name botserver-local --type stream --visibility open)
+  json=$(env -u BUZZ_AUTH_TAG envchain "$NS_OP" buzz channels create --name cooee-local --type stream --visibility open)
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("channel_id") or d.get("id") or "")' "$json" > "$PROOF/channel.id"
   if [ ! -s "$PROOF/channel.id" ]; then
     echo "local-relay: failed to create channel" >&2

@@ -1,6 +1,6 @@
 //! Author-watch commands and persisted watch values.
 
-use botserver_domain::{BotId, EventId};
+use cooee_domain::{BotId, EventId};
 
 /// Default cooldown between fires of one watch.
 pub const DEFAULT_WATCH_COOLDOWN_SECS: i64 = 30 * 60;

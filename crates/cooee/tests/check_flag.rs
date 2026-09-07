@@ -13,7 +13,7 @@ fn temp_path(label: &str) -> PathBuf {
         .as_nanos();
     let sequence = NEXT_TEMP_PATH.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "botserver-check-{label}-{}-{timestamp}-{sequence}",
+        "cooee-check-{label}-{}-{timestamp}-{sequence}",
         std::process::id()
     ))
 }
@@ -33,7 +33,7 @@ fn check_exits_zero_after_loading_config_and_database() {
     .expect("write config");
     let database = temp_path("host").with_extension("sqlite");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_botserver"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cooee"))
         .args([
             "--config",
             config.to_str().expect("utf8"),
@@ -42,7 +42,7 @@ fn check_exits_zero_after_loading_config_and_database() {
             "--check",
         ])
         .output()
-        .expect("run botserver");
+        .expect("run cooee");
 
     assert!(
         output.status.success(),
@@ -57,7 +57,7 @@ fn check_exits_nonzero_when_config_is_missing() {
     let config = temp_path("missing").with_extension("toml");
     let database = temp_path("host").with_extension("sqlite");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_botserver"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cooee"))
         .args([
             "--config",
             config.to_str().expect("utf8"),
@@ -66,7 +66,7 @@ fn check_exits_nonzero_when_config_is_missing() {
             "--check",
         ])
         .output()
-        .expect("run botserver");
+        .expect("run cooee");
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("failed to read bot config"));
