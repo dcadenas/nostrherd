@@ -134,11 +134,12 @@ impl Bot {
 pub struct SessionName(String);
 
 impl SessionName {
-    /// Derive a unique name from a bot and Buzz channel.
+    /// Derive a unique name from a bot and an opaque channel ID.
     ///
     /// The readable `bot-foobar` form is preferred. If `is_taken` reports that
-    /// candidate is bound to another channel, the channel UUID is added as a
-    /// stable suffix. Every candidate passed to `is_taken` is at most 32 bytes.
+    /// candidate is bound to another channel, a stable ID suffix is added.
+    /// UUIDs retain their hex compaction; other IDs use 64-bit FNV-1a.
+    /// Every candidate passed to `is_taken` is at most 32 bytes.
     #[must_use]
     pub fn from_bot_and_channel(
         bot: &BotId,
@@ -147,12 +148,20 @@ impl SessionName {
         mut is_taken: impl FnMut(&str) -> bool,
     ) -> Option<Self> {
         let display_slug = slugify(channel_display);
-        let compact_id = compact_uuid(channel_id)?;
         let base = session_candidate(bot.as_str(), &display_slug, None)?;
         if !is_taken(&base) {
             return Some(Self(base));
         }
 
+        let compact_id = compact_uuid(channel_id).unwrap_or_else(|| {
+            // FNV-1a's fixed offset basis and prime keep persisted names stable.
+            let digest = channel_id
+                .bytes()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+                });
+            format!("{digest:016x}")
+        });
         let maximum_suffix_len = 32_usize.checked_sub(bot.as_str().len() + 1)?;
         let maximum_suffix_len = compact_id.len().min(maximum_suffix_len);
         let mut suffix_len = 8.min(maximum_suffix_len);
@@ -568,11 +577,100 @@ mod tests {
     }
 
     #[test]
-    fn session_name_rejects_a_non_uuid_channel_id() {
+    fn session_name_accepts_opaque_ids_without_a_suffix_unless_taken() {
         let bot = BotId::new("bot").expect("bot");
-        assert!(
-            SessionName::from_bot_and_channel(&bot, "not-a-uuid", "foobar", |_| false).is_none()
-        );
+        for id in ["not-a-uuid", "", "group/with spaces", "非UUID"] {
+            let mut candidates = Vec::new();
+            let name = SessionName::from_bot_and_channel(&bot, id, "Foobar", |candidate| {
+                candidates.push(candidate.to_owned());
+                false
+            })
+            .expect("name");
+            assert_eq!(name.as_str(), "bot-foobar");
+            assert_eq!(candidates, ["bot-foobar"]);
+        }
+    }
+
+    #[test]
+    fn opaque_ids_disambiguate_identical_display_slugs() {
+        let bot = BotId::new("bot").expect("bot");
+        let mut taken = std::collections::HashSet::new();
+        for (id, display, expected) in [
+            ("other", "#Eng", "bot-eng"),
+            ("hello", "ENG!", "bot-eng-a430d846"),
+            ("", "eng", "bot-eng-cbf29ce4"),
+        ] {
+            let name = SessionName::from_bot_and_channel(&bot, id, display, |candidate| {
+                taken.contains(candidate)
+            })
+            .expect("name");
+            assert_eq!(name.as_str(), expected);
+            assert!(taken.insert(name.as_str().to_owned()));
+        }
+    }
+
+    #[test]
+    fn opaque_id_suffix_lengthens_until_available_or_exhausted() {
+        let bot = BotId::new("bot").expect("bot");
+        let expected = [
+            "bot-eng",
+            "bot-eng-a430d846",
+            "bot-eng-a430d84680aa",
+            "bot-eng-a430d84680aabd0b",
+        ];
+        for available in 0..=expected.len() {
+            let mut candidates = Vec::new();
+            let result = SessionName::from_bot_and_channel(&bot, "hello", "eng", |candidate| {
+                candidates.push(candidate.to_owned());
+                candidates.len() <= available
+            });
+            assert_eq!(
+                result.as_ref().map(SessionName::as_str),
+                expected.get(available).copied()
+            );
+            assert_eq!(candidates, expected[..(available + 1).min(expected.len())]);
+        }
+    }
+
+    #[test]
+    fn all_session_candidates_obey_herdr_grammar_and_length() {
+        for bot_len in 1..=33 {
+            let bot = BotId::new(&"a".repeat(bot_len)).expect("bot");
+            for id in [
+                "hello",
+                "",
+                "非UUID",
+                "AB12CD34-5678-90AB-CDEF-0123456789AB",
+            ] {
+                for display in [
+                    "",
+                    "!!!",
+                    "9 !!!",
+                    "A channel display name that is much too long",
+                ] {
+                    let mut candidates = Vec::new();
+                    assert!(
+                        SessionName::from_bot_and_channel(&bot, id, display, |candidate| {
+                            assert!(candidate.len() <= 32);
+                            assert!(candidate.as_bytes()[0].is_ascii_lowercase());
+                            assert!(candidate.bytes().all(|byte| byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'-' | b'_')));
+                            candidates.push(candidate.to_owned());
+                            true
+                        })
+                        .is_none()
+                    );
+                    assert_eq!(candidates.is_empty(), bot_len > 30);
+                }
+            }
+        }
+        let bot = BotId::new(&"a".repeat(28)).expect("bot");
+        let name = SessionName::from_bot_and_channel(&bot, "hello", "eng", |candidate| {
+            candidate.ends_with("eng")
+        })
+        .expect("shortened suffix");
+        assert_eq!(name.as_str(), format!("{}-a43", bot.as_str()));
     }
 
     #[test]

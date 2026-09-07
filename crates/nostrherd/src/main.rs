@@ -1138,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn unnameable_channel_is_acknowledged_without_a_turn() {
+    fn non_uuid_channel_dispatch_queues_a_turn() {
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let (registry, mut repository) = load_host(&config, &database).expect("load");
@@ -1160,13 +1160,14 @@ mod tests {
 
         assert_eq!(
             dispatch_ingest(registry.bots(), &mut repository, &action).expect("dispatch"),
-            TriggerOutcome::Declined
+            TriggerOutcome::Queued
         );
         assert!(repository.event_processed(&event_id).expect("processed"));
-        assert!(repository
+        let turns = repository
             .turns_for_session(registry.bots()[0].id(), "not-a-uuid")
-            .expect("turns")
-            .is_empty());
+            .expect("turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state, nostrherd::TurnState::Queued);
     }
 
     #[test]

@@ -75,8 +75,8 @@ A host-initiated Turn opens only after a durable source records a fire. It
 MUST carry a typed section instead of a user request and otherwise queues,
 asks, stamps, and publishes through the same Turn pipeline (D45, D46).
 
-Session grain is one occupant per Buzz channel UUID, including DMs
-(D10). Thread ids are reply coordinates on the turn, not extra sessions.
+Session grain is one occupant per opaque channel ID, including DMs
+(D10, D54). Thread ids are reply coordinates on the turn, not extra sessions.
 
 ## Kelpie envelope (receiver)
 

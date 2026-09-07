@@ -984,3 +984,19 @@ the variable it could not read.
 `BUZZ_AUTH_TAG` in the test recipes belongs to the `buzz` CLI those
 recipes drive, not to this host, and keeps its name.
 
+## D54. Channel IDs are opaque; only display collisions need a suffix
+
+Status: accepted
+
+Amends D10's UUID assumption (issue 80). A channel ID is an arbitrary
+string, stored and compared unchanged. A new session first tries the
+readable bot-plus-display name; only a collision derives an ID suffix.
+
+On that path, UUID-shaped IDs retain the existing lowercase hex
+compaction so occupant bindings and place-history names do not change.
+Other IDs use inline 64-bit FNV-1a over their UTF-8 bytes, formatted as
+16 lowercase hex digits including leading zeros. The existing candidate
+loop starts with up to eight digits, lengthens by four when taken, and
+caps the suffix at the available room within Herdr's 32-character limit.
+This is a display-name tiebreak, not a collision-resistant identity.
+Stored session names remain unchanged. The domain gains no dependency.
