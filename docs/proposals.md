@@ -147,21 +147,11 @@ Design for that remaining part:
 - Listing and cancelling from the channel work by asking the occupant,
   which can run `kelpie schedules` and `kelpie schedule-cancel` itself.
 
-Restraint is the part that genuinely belongs to the host, and it must
-ship with the first recurring capability rather than after it. An
-occupant is a language model and will occasionally decide to post far
-more than a person wants. The 20-edit cap in D42 is the precedent: the
-host enforces, the occupant proposes. v1 restraint: a per-bot,
-per-channel rate ceiling on host-initiated posts, and a quiet-hours
-window during which such posts are held or dropped with one operator
-notice. Both are enforced at the publish path, so no occupant can
-bypass them by scheduling more aggressively.
-
-Open points for a decision: the rate ceiling and quiet-hours defaults;
-whether a held post is dropped or published at the end of quiet hours;
-and whether control phrases are recognised by the host at all or left
-entirely to occupant interpretation, which is simpler but gives the
-host no way to enforce a cancel the occupant ignores.
+Restraint was tried in the host and removed (D52). A ceiling and a
+quiet-hours window shipped at the publish path, then came out again
+once occupants gained relay access of their own (D51): a limit the
+parallel path walks around is not a limit, and how often a bot should
+speak is the bot's judgement, written in its corpus.
 
 ## P3. Corpus contract block and shared conduct skill
 

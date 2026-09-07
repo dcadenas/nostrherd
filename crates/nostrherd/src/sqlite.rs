@@ -3,7 +3,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use nostrherd_domain::restraint::POST_CEILING_WINDOW_SECS;
 use nostrherd_domain::{BotId, EventId, TurnTransition};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -461,15 +460,6 @@ impl SqliteRepository {
                    PRIMARY KEY(watch_id, source_event_id)
                ) STRICT;
 
-               CREATE TABLE IF NOT EXISTS host_initiated_posts (
-                   attempt_key TEXT PRIMARY KEY NOT NULL,
-                   bot_id TEXT NOT NULL,
-                   channel_id TEXT NOT NULL,
-                   published_at INTEGER NOT NULL
-               ) STRICT;
-
-               CREATE INDEX IF NOT EXISTS host_initiated_posts_window
-                   ON host_initiated_posts(bot_id, channel_id, published_at);
 
                CREATE INDEX IF NOT EXISTS watch_authors_active
                    ON watch_authors(author_pubkey, watch_id);",
@@ -1307,44 +1297,6 @@ impl HostRepository for SqliteRepository {
             params![event_id, ask_id],
         )?;
         Ok(changed == 1)
-    }
-
-    fn count_host_initiated_posts(
-        &self,
-        bot_id: &BotId,
-        channel_id: &str,
-        since_unix: i64,
-    ) -> Result<u32, Self::Error> {
-        let count: i64 = self.connection.query_row(
-            "SELECT count(*) FROM host_initiated_posts
-             WHERE bot_id = ?1 AND channel_id = ?2 AND published_at > ?3",
-            params![bot_id.as_str(), channel_id, since_unix],
-            |row| row.get(0),
-        )?;
-        Ok(u32::try_from(count).unwrap_or(u32::MAX))
-    }
-
-    fn note_host_initiated_post(
-        &mut self,
-        attempt_key: &str,
-        bot_id: &BotId,
-        channel_id: &str,
-        published_at: i64,
-    ) -> Result<(), Self::Error> {
-        let prune_before = published_at
-            .checked_sub(POST_CEILING_WINDOW_SECS)
-            .unwrap_or(i64::MIN);
-        self.connection.execute(
-            "INSERT OR IGNORE INTO host_initiated_posts
-                 (attempt_key, bot_id, channel_id, published_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![attempt_key, bot_id.as_str(), channel_id, published_at],
-        )?;
-        self.connection.execute(
-            "DELETE FROM host_initiated_posts WHERE published_at <= ?1",
-            params![prune_before],
-        )?;
-        Ok(())
     }
 
     fn progress_post(&self, ask_id: &str) -> Result<Option<ProgressPost>, Self::Error> {
@@ -2451,61 +2403,6 @@ mod tests {
         assert_eq!(
             repository.watched_author_pubkeys(1_000).unwrap(),
             std::slice::from_ref(&author)
-        );
-    }
-
-    #[test]
-    fn host_initiated_post_ledger_is_per_channel_idempotent_and_rolling() {
-        let mut repository =
-            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
-                .expect("repository");
-        let bot = BotId::new("bot").expect("bot");
-        let other = BotId::new("pr").expect("pr");
-        let home = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        let eng = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
-        let now = 2_000_000_000;
-        repository
-            .note_host_initiated_post("tell-1", &bot, home, now)
-            .unwrap();
-        repository
-            .note_host_initiated_post("tell-1", &bot, home, now)
-            .unwrap();
-        repository
-            .note_host_initiated_post("tell-2", &bot, eng, now)
-            .unwrap();
-        repository
-            .note_host_initiated_post("tell-3", &other, home, now)
-            .unwrap();
-        repository
-            .note_host_initiated_post("old", &bot, home, now - POST_CEILING_WINDOW_SECS)
-            .unwrap();
-        let since = now - POST_CEILING_WINDOW_SECS;
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot, home, since)
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot, eng, since)
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&other, home, since)
-                .unwrap(),
-            1
-        );
-        repository
-            .note_host_initiated_post("fresh", &bot, home, now)
-            .unwrap();
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot, home, i64::MIN)
-                .unwrap(),
-            2
         );
     }
 

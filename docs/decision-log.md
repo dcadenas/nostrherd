@@ -720,12 +720,8 @@ The host stores nothing about schedules. `inbox.delivery` carries no
 schedule provenance, so a host mapping would be a second source of
 truth that cannot be reconciled against Kelpie's.
 
-Restraint is the host's and MUST ship with the first recurring
-capability, not after it. An occupant proposes; the host enforces, as
-in D42's edit cap. A per-bot, per-channel ceiling on host-initiated
-posts and a quiet-hours window are enforced at the publish path, so no
-occupant can bypass them by scheduling more aggressively. Drop vs hold,
-whose clock, and where the numbers live are D47.
+Restraint is not the host's. How often a bot speaks is its own
+judgement, written in its corpus (D52).
 
 ## D45. Author watches are host-evaluated; no model runs until a match
 
@@ -808,7 +804,7 @@ in the declaring channel. The final remains a top-level stamped post.
 
 ## D47. Host-initiated posts are dropped at the ceiling and in quiet hours
 
-Status: accepted
+Status: retracted by D52
 
 Amends D44's restraint paragraph. Closes the open points in P2.
 
@@ -929,16 +925,44 @@ close. The correlated path exists to reuse Kelpie's correlation,
 reminders and recovery, which is the reason the host is in the middle
 at all.
 
-Restraint (D47) does not reach the parallel path. A ceiling and quiet
-hours are enforced where the host publishes, so an occupant that
-publishes for itself is unlimited into the same identity and the same
-channels. This is accepted for now rather than solved: the parallel
-path is expected to carry occasional, unprompted, low-volume posts,
-and the first sign of volume is the trigger to revisit it.
+Restraint reached only the host's own publish path, never the parallel
+one, which is what led to removing it from the host altogether (D52).
 
 No `nostrherd compose` command and no signer proxy. Both were considered
 and both invent a convention before a caller needs one, which is what
 the retired routing tag (D50) cost once already. The formatting
 contract is small enough to state: kind 9, the channel `h` tag, and
 the stamp.
+
+## D52. Restraint leaves the host; how often a bot speaks is its own judgement
+
+Status: accepted
+
+Retracts D47 and the restraint paragraph of D44. The per-bot,
+per-channel ceiling on host-initiated posts, the quiet-hours window,
+the `post_ceiling` and `quiet_hours` config, and the
+`host_initiated_posts` ledger are removed. `crates/domain/restraint.rs`
+is deleted.
+
+D44 argued restraint had to ship with the first recurring capability
+because an occupant is a language model that will sometimes decide to
+post more than a person wants, with D42's edit cap as the precedent.
+That reasoning held while the host was the only publisher. D51 ended
+that: an occupant whose corpus grants relay access publishes for
+itself, and a ceiling enforced only where the host publishes is one an
+agent steps around without noticing it existed. A limit that binds one
+path out of two is worse than none, because it reads as a guarantee.
+
+D42's cap is not the same case and stays. It bounds edits to a single
+post the host owns and is republishing, which no occupant can do for
+itself.
+
+How often a bot should speak, and when it should stay quiet, is
+judgement about that bot rather than a property of the protocol. It
+belongs in the corpus, next to its personality and its scope, where an
+author can say it in a sentence and change it without a release.
+
+The host keeps no counters and no clock. Nothing in `bots.toml`
+configures speech. An existing database keeps its now-unused
+`host_initiated_posts` table; nothing reads or writes it.
 

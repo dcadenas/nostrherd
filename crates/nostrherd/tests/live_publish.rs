@@ -360,10 +360,9 @@ fn start_throwaway_relay() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live proof; run against tools/local-relay (see docs/testing.md)"]
 async fn live_retry_after_a_real_relay_drop() {
-    use nostrherd::outbox::{retry_undispatched, NoopInFlightReaction, PublishRestraint};
+    use nostrherd::outbox::{retry_undispatched, NoopInFlightReaction};
     use nostrherd::sqlite::SqliteRepository;
     use nostrherd::HostRepository;
-    use nostrherd_domain::restraint::HostRestraint;
     use nostrherd_domain::BotId;
     use rusqlite::Connection;
 
@@ -398,16 +397,10 @@ async fn live_retry_after_a_real_relay_drop() {
         .outbound_attempt(&attempt.ask_id)
         .unwrap()
         .expect("pending");
-    let restraint = PublishRestraint::new(
-        HostRestraint::new(u32::MAX, None).expect("ceiling"),
-        0,
-        12 * 60,
-    );
     let first = retry_undispatched(
         &mut repository,
         &publisher,
         &mut |_| {},
-        &restraint,
         &NoopInFlightReaction,
         &pending,
         &bot_id,
@@ -433,7 +426,6 @@ async fn live_retry_after_a_real_relay_drop() {
         &mut repository,
         &publisher,
         &mut |notice| notices.push(notice.to_owned()),
-        &restraint,
         &NoopInFlightReaction,
         &stranded,
         &bot_id,

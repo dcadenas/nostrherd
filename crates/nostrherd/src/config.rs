@@ -5,7 +5,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use nostrherd_domain::restraint::{HostRestraint, QuietHours};
 use nostrherd_domain::{Bot, BotId};
 use serde::Deserialize;
 
@@ -25,10 +24,6 @@ struct FileBot {
     id: String,
     corpus: PathBuf,
     kind: String,
-    /// Host-initiated posts per channel per rolling 24 h (D47).
-    post_ceiling: Option<u32>,
-    /// `HH:MM-HH:MM` quiet window on the host's local clock (D47).
-    quiet_hours: Option<String>,
 }
 
 /// Failure while reading bot configuration.
@@ -40,10 +35,6 @@ pub enum ConfigError {
     Parse(toml::de::Error),
     /// A bot record violated domain constraints.
     InvalidBot { id: String },
-    /// A bot's post ceiling was below one.
-    InvalidCeiling { id: String, ceiling: u32 },
-    /// A bot's quiet-hours window was not `HH:MM-HH:MM`.
-    InvalidQuietHours { id: String, window: String },
     /// Two bots shared the same id.
     DuplicateBot { id: String },
 }
@@ -54,12 +45,6 @@ impl fmt::Display for ConfigError {
             Self::Io(error) => write!(formatter, "failed to read bot config: {error}"),
             Self::Parse(error) => write!(formatter, "invalid bot config: {error}"),
             Self::InvalidBot { id } => write!(formatter, "invalid bot record: {id}"),
-            Self::InvalidCeiling { id, ceiling } => {
-                write!(formatter, "invalid post_ceiling {ceiling} for bot: {id}")
-            }
-            Self::InvalidQuietHours { id, window } => {
-                write!(formatter, "invalid quiet_hours {window:?} for bot: {id}")
-            }
             Self::DuplicateBot { id } => write!(formatter, "duplicate bot id: {id}"),
         }
     }
@@ -70,10 +55,7 @@ impl std::error::Error for ConfigError {
         match self {
             Self::Io(error) => Some(error),
             Self::Parse(error) => Some(error),
-            Self::InvalidBot { .. }
-            | Self::InvalidCeiling { .. }
-            | Self::InvalidQuietHours { .. }
-            | Self::DuplicateBot { .. } => None,
+            Self::InvalidBot { .. } | Self::DuplicateBot { .. } => None,
         }
     }
 }
@@ -101,27 +83,8 @@ impl BotRegistry {
             let id = record.id.clone();
             let bot_id =
                 BotId::new(&record.id).ok_or_else(|| ConfigError::InvalidBot { id: id.clone() })?;
-            let quiet_hours =
-                match record.quiet_hours.as_deref() {
-                    None => None,
-                    Some(raw) => Some(QuietHours::parse(raw).ok_or_else(|| {
-                        ConfigError::InvalidQuietHours {
-                            id: id.clone(),
-                            window: raw.to_owned(),
-                        }
-                    })?),
-                };
-            let ceiling = record
-                .post_ceiling
-                .unwrap_or(nostrherd_domain::restraint::DEFAULT_POST_CEILING_24H);
-            let restraint =
-                HostRestraint::new(ceiling, quiet_hours).ok_or(ConfigError::InvalidCeiling {
-                    id: id.clone(),
-                    ceiling,
-                })?;
             let bot = Bot::new(bot_id, record.corpus, record.kind)
-                .ok_or(ConfigError::InvalidBot { id: id.clone() })?
-                .with_restraint(restraint);
+                .ok_or(ConfigError::InvalidBot { id: id.clone() })?;
             if bots.iter().any(|existing: &Bot| existing.id() == bot.id()) {
                 return Err(ConfigError::DuplicateBot { id });
             }
@@ -204,66 +167,5 @@ mod tests {
         )
         .expect_err("duplicate");
         assert!(error.to_string().contains("duplicate bot id: bot"));
-    }
-
-    #[test]
-    fn restraint_defaults_and_overrides_load_per_bot() {
-        let registry = BotRegistry::from_toml(
-            r#"
-            [[bots]]
-            id = "bot"
-            corpus = "/corpus/bot"
-            kind = "opencode"
-            post_ceiling = 3
-            quiet_hours = "23:00-07:00"
-            [[bots]]
-            id = "pr"
-            corpus = "/corpus/pr"
-            kind = "opencode"
-            "#,
-        )
-        .expect("registry");
-        let bot = &registry.bots()[0];
-        assert_eq!(bot.restraint().ceiling_24h(), 3);
-        assert_eq!(
-            bot.restraint().quiet_hours(),
-            QuietHours::parse("23:00-07:00").as_ref()
-        );
-        let pr = &registry.bots()[1];
-        assert_eq!(
-            pr.restraint().ceiling_24h(),
-            nostrherd_domain::restraint::DEFAULT_POST_CEILING_24H
-        );
-        assert!(pr.restraint().quiet_hours().is_none());
-    }
-
-    #[test]
-    fn registry_rejects_a_ceiling_below_one() {
-        let error = BotRegistry::from_toml(
-            r#"
-            [[bots]]
-            id = "bot"
-            corpus = "/corpus/bot"
-            kind = "opencode"
-            post_ceiling = 0
-            "#,
-        )
-        .expect_err("ceiling");
-        assert!(error.to_string().contains("invalid post_ceiling 0"));
-    }
-
-    #[test]
-    fn registry_rejects_a_malformed_quiet_window() {
-        let error = BotRegistry::from_toml(
-            r#"
-            [[bots]]
-            id = "bot"
-            corpus = "/corpus/bot"
-            kind = "opencode"
-            quiet_hours = "until morning"
-            "#,
-        )
-        .expect_err("quiet hours");
-        assert!(error.to_string().contains("invalid quiet_hours"));
     }
 }

@@ -511,7 +511,6 @@ where
         Pub::Error: fmt::Display,
     {
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
-        let restraint = outbox::PublishRestraint::local_now(self.bot.restraint());
         let mut occupant_feedback = |session_name: &str, body: &str| {
             if let Err(error) = waiter.tell_occupant(session_name, body) {
                 eprintln!("operator notice: occupant feedback to {session_name} failed: {error}");
@@ -521,7 +520,6 @@ where
             &mut self.repository,
             publisher,
             &mut notice,
-            &restraint,
             delivery,
             &self.reactions,
             &mut occupant_feedback,
@@ -601,7 +599,6 @@ where
             .pending_outbound_attempts(self.bot.id())
             .map_err(ActorError::Repository)?;
         let mut notice = |text: &str| eprintln!("operator notice: {text}");
-        let restraint = outbox::PublishRestraint::local_now(self.bot.restraint());
         let mut posted = false;
         let mut failed_open = false;
         for attempt in attempts {
@@ -612,7 +609,6 @@ where
                 &mut self.repository,
                 publisher,
                 &mut notice,
-                &restraint,
                 &self.reactions,
                 &attempt,
                 self.bot.id(),

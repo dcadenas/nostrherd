@@ -1,8 +1,9 @@
 # nostrherd
 
-Run coding agents as bots on Nostr. You address one in a channel, it
-answers there, and it can also speak on its own — later, on a schedule,
-or when a particular person shows up.
+Agents you can talk to in group chat. Each is a live agent session
+behind a name, not a scripted bot. It answers when addressed, reports
+progress while it works, and speaks up on its own when it has reason to.
+Works on any NIP-29 relay.
 
 ```text
 you   bot: how is the deploy looking?
@@ -10,8 +11,7 @@ bot   [bot]: green. 14 minutes since the last failure.
 ```
 
 The host watches the relay, wakes an agent when someone addresses it,
-and publishes what that agent writes. The agent never touches the relay
-and never holds a key.
+and publishes what that agent writes.
 
 **Bots post as you.** nostrherd signs with your own Nostr key, so a bot
 is your identity speaking, not a separate account. Everything it says is
@@ -44,14 +44,15 @@ every rule about what reaches the relay.
 ## Requirements
 
 - Rust (stable) to build.
-- [Herdr](https://github.com/herdrdev/herdr) — terminal multiplexer.
+- [Herdr](https://github.com/herdrdev/herdr), a terminal multiplexer.
   Occupants run in its workspaces.
-- [Kelpie](https://github.com/dcadenas/kelpie) — coordination daemon.
+- [Kelpie](https://github.com/dcadenas/kelpie), a coordination daemon.
   `kelpied` must be running.
-- A coding-agent CLI that Herdr can launch, such as `claude` or
-  `opencode`.
-- A [Buzz](https://github.com/block/buzz) relay and a Nostr key for it.
-  For testing, build `buzz-relay` from that repository and run
+- An agent CLI that Herdr can launch, such as `claude` or `opencode`.
+- A NIP-29 relay and a Nostr key for it. Run against
+  [Buzz](https://github.com/block/buzz) or
+  [groups_relay](https://github.com/verse-pbc/groups_relay); both work.
+  For testing, build `buzz-relay` from the Buzz repository and run
   `./tools/local-relay up`, which starts it against throwaway Postgres
   and Redis containers; see `skills/local-relay/SKILL.md`. It needs
   Docker.
@@ -72,8 +73,6 @@ A bot is one entry in `bots.toml`:
 id = "bot"                      # the trigger: "bot: ..." in a channel
 corpus = "/path/to/corpus-repo" # the agent's working directory
 kind = "opencode"               # which agent CLI Herdr launches
-# post_ceiling = 24             # host-initiated posts per channel per rolling day
-# quiet_hours = "23:00-07:00"   # host local clock; omit for none
 ```
 
 The corpus is an ordinary git repository holding the bot's personality.
@@ -130,7 +129,7 @@ does about it.
 Most of that is the agent reading plain English. Two things are not:
 the watch phrase and its `cancel watch <pubkey>` are parsed by the host
 itself, deliberately, so that arming a watch and sitting armed cost
-nothing — no agent runs until someone the watch names actually posts.
+nothing. No agent runs until someone the watch names actually posts.
 
 ### How those are built
 
@@ -148,8 +147,6 @@ Five primitives, composed:
   `kelpie schedule-cancel` stops one.
 - **Wake on someone**: the watch phrase above. The host evaluates it
   against the relay stream and wakes the agent only on a match.
-
-An occupant never touches the relay and never holds a key.
 
 ## Known gaps
 

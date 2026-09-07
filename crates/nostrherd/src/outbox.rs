@@ -9,14 +9,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Timelike;
 use nostr_sdk::prelude::{
     Client, Event, EventBuilder, Filter, FinalizeEvent, Keys, Kind, SingleLetterTag, Tag, Timestamp,
 };
 use nostrherd_domain::buzz::{self, BuzzEvent};
-use nostrherd_domain::restraint::{
-    evaluate_restraint, HostRestraint, RestraintVerdict, POST_CEILING_WINDOW_SECS,
-};
 use nostrherd_domain::{
     outbound_prefix_for, parse_occupant_tell, stamp_outbound, BotId, EventId, TurnState,
 };
@@ -32,99 +28,6 @@ pub enum InboxAction {
     Ack,
     /// Leave the delivery queued so a later valid final can still arrive.
     Hold,
-}
-
-/// D47 restraint inputs for one publish-path evaluation: the bot's
-/// configured limits plus the clock they are judged against.
-#[derive(Debug, Clone)]
-pub struct PublishRestraint {
-    config: HostRestraint,
-    now_unix: i64,
-    local_minute_of_day: u16,
-}
-
-impl PublishRestraint {
-    /// Restraint inputs for one publish decision.
-    #[must_use]
-    pub fn new(config: HostRestraint, now_unix: i64, local_minute_of_day: u16) -> Self {
-        Self {
-            config,
-            now_unix,
-            local_minute_of_day,
-        }
-    }
-
-    /// The bot's live restraint on the host's local clock.
-    ///
-    /// # Panics
-    ///
-    /// Never in practice: a minute of day is at most `1_439`.
-    #[must_use]
-    pub fn local_now(config: &HostRestraint) -> Self {
-        let now = chrono::Local::now();
-        let minute_of_day =
-            u16::try_from(now.hour() * 60 + now.minute()).expect("minute of day fits");
-        Self::new(config.clone(), now.timestamp(), minute_of_day)
-    }
-
-    /// Inputs under which nothing is ever suppressed.
-    ///
-    /// # Panics
-    ///
-    /// Never in practice: `u32::MAX` passes the `ceiling >= 1` check.
-    #[cfg(test)]
-    #[must_use]
-    pub fn unrestrained() -> Self {
-        Self::new(
-            HostRestraint::new(u32::MAX, None).expect("ceiling is at least one"),
-            0,
-            12 * 60,
-        )
-    }
-}
-
-/// Count this channel's accepted host-initiated posts in the rolling
-/// ceiling window and evaluate D47 against it.
-fn restraint_verdict<R: HostRepository>(
-    repository: &R,
-    restraint: &PublishRestraint,
-    bot_id: &BotId,
-    channel_id: &str,
-) -> Result<RestraintVerdict, R::Error> {
-    let since = restraint
-        .now_unix
-        .checked_sub(POST_CEILING_WINDOW_SECS)
-        .unwrap_or(i64::MIN);
-    let published = repository.count_host_initiated_posts(bot_id, channel_id, since)?;
-    Ok(evaluate_restraint(
-        &restraint.config,
-        restraint.local_minute_of_day,
-        published,
-    ))
-}
-
-/// Notice for one suppressed host-initiated post (D47): dropped, never
-/// held, so the operator learns what did not land.
-fn suppressed_notice(
-    verdict: &RestraintVerdict,
-    bot_id: &BotId,
-    channel_id: &str,
-    key: &str,
-) -> String {
-    match verdict {
-        RestraintVerdict::QuietHours(window) => format!(
-            "suppressed host post from {} to {channel_id} ({key}): quiet hours {window} on the host clock; dropped",
-            bot_id.as_str()
-        ),
-        RestraintVerdict::Ceiling { published, ceiling } => format!(
-            "suppressed host post from {} to {channel_id} ({key}): post ceiling {ceiling} per 24h reached ({published} in window); dropped",
-            bot_id.as_str()
-        ),
-        RestraintVerdict::Allow => format!(
-            "suppressed host post from {} to {channel_id} ({key})",
-            bot_id.as_str()
-        ),
-    }
 }
 
 /// How long a retryable publish failure waits before the tick resends (D48).
@@ -664,7 +567,6 @@ fn handle_occupant_tell<R, P>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    restraint: &PublishRestraint,
     occupant_feedback: &mut impl FnMut(&str, &str),
     delivery: &InboxDelivery,
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
@@ -693,7 +595,6 @@ where
         repository,
         publisher,
         notice,
-        restraint,
         delivery.message_id(),
         &body,
         &destination,
@@ -732,7 +633,6 @@ fn publish_initiated<R, P>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    restraint: &PublishRestraint,
     message_id: &str,
     body: &str,
     destination: &SessionRecord,
@@ -773,20 +673,6 @@ where
         ));
         return Ok(InboxAction::Ack);
     }
-    if attempt.prepared_event_id.is_none() {
-        let verdict = restraint_verdict(repository, restraint, bot_id, &destination.channel_id)
-            .map_err(OutboxError::Repository)?;
-        if verdict != RestraintVerdict::Allow {
-            notice(&suppressed_notice(
-                &verdict,
-                bot_id,
-                &destination.channel_id,
-                message_id,
-            ));
-            stop_tell_retries(repository, &attempt).map_err(OutboxError::Repository)?;
-            return Ok(InboxAction::Ack);
-        }
-    }
     let mut to_publish = attempt.clone();
     to_publish.body = stamp_outbound(&attempt.body, &outbound_prefix_for(bot_id));
     match record_and_send(publisher, &mut to_publish, |attempt| {
@@ -797,14 +683,6 @@ where
         SendOutcome::Accepted(event_id) => {
             let _ = repository
                 .mark_outbound_accepted(message_id, &event_id)
-                .map_err(OutboxError::Repository)?;
-            repository
-                .note_host_initiated_post(
-                    message_id,
-                    bot_id,
-                    &destination.channel_id,
-                    restraint.now_unix,
-                )
                 .map_err(OutboxError::Repository)?;
             Ok(InboxAction::Ack)
         }
@@ -876,7 +754,6 @@ pub fn handle_delivery<R, P>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    restraint: &PublishRestraint,
     delivery: &InboxDelivery,
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
 where
@@ -887,7 +764,6 @@ where
         repository,
         publisher,
         notice,
-        restraint,
         delivery,
         &NoopInFlightReaction,
     )
@@ -903,7 +779,6 @@ pub fn handle_delivery_with<R, P, I>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    restraint: &PublishRestraint,
     delivery: &InboxDelivery,
     reactions: &I,
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
@@ -916,7 +791,6 @@ where
         repository,
         publisher,
         notice,
-        restraint,
         delivery,
         reactions,
         &mut |_, _| {},
@@ -933,7 +807,6 @@ pub fn handle_delivery_with_feedback<R, P, I>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    restraint: &PublishRestraint,
     delivery: &InboxDelivery,
     reactions: &I,
     occupant_feedback: &mut impl FnMut(&str, &str),
@@ -944,14 +817,7 @@ where
     I: InFlightReaction,
 {
     if delivery.kind() == "tell" {
-        return handle_occupant_tell(
-            repository,
-            publisher,
-            notice,
-            restraint,
-            occupant_feedback,
-            delivery,
-        );
+        return handle_occupant_tell(repository, publisher, notice, occupant_feedback, delivery);
     }
     let Some(ask_id) = delivery.reply_to() else {
         return Ok(InboxAction::Ack);
@@ -983,15 +849,9 @@ where
             Ok(InboxAction::Ack)
         }
         Decision::Publish { body } => match turn {
-            Some(turn) => complete_outbound_with(
-                repository,
-                publisher,
-                notice,
-                restraint,
-                &turn,
-                Some(&body),
-                reactions,
-            ),
+            Some(turn) => {
+                complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
+            }
             None => Ok(InboxAction::Hold),
         },
     }
@@ -1006,7 +866,6 @@ pub fn complete_outbound<R, P>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    restraint: &PublishRestraint,
     turn: &TurnRecord,
     body: Option<&str>,
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
@@ -1018,7 +877,6 @@ where
         repository,
         publisher,
         notice,
-        restraint,
         turn,
         body,
         &NoopInFlightReaction,
@@ -1035,7 +893,6 @@ pub fn complete_outbound_with<R, P, I>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    restraint: &PublishRestraint,
     turn: &TurnRecord,
     body: Option<&str>,
     reactions: &I,
@@ -1095,18 +952,6 @@ where
         return fail_turn(repository, reactions, turn, ask_id);
     }
     if attempt.outbound_event_id.is_some() {
-        if turn.ask_body.is_some() {
-            // Accepted earlier: backfill the D47 ledger idempotently, in
-            // case the crash happened between send and the note.
-            repository
-                .note_host_initiated_post(
-                    ask_id,
-                    &turn.bot_id,
-                    &turn.channel_id,
-                    restraint.now_unix,
-                )
-                .map_err(OutboxError::Repository)?;
-        }
         return mark_posted(repository, reactions, turn, ask_id);
     }
     if attempt.dispatched && attempt.prepared_event_id.is_none() {
@@ -1122,30 +967,6 @@ where
             reactions.remove(event_id);
         }
         return Ok(InboxAction::Ack);
-    }
-    if turn.ask_body.is_some() && attempt.prepared_event_id.is_none() {
-        // Host-initiated wake (D45, D46): the final is unprompted, so the
-        // D47 restraint gates a first publish here. A prepared event is
-        // already on the wire (D43); re-gating a retry would drop a post
-        // the relay may already have. A suppressed first publish ends
-        // the turn without sending.
-        let verdict = restraint_verdict(repository, restraint, &turn.bot_id, &turn.channel_id)
-            .map_err(OutboxError::Repository)?;
-        if verdict != RestraintVerdict::Allow {
-            notice(&suppressed_notice(
-                &verdict,
-                &turn.bot_id,
-                &turn.channel_id,
-                ask_id,
-            ));
-            let _ = repository
-                .set_turn_state(ask_id, TurnState::Failed)
-                .map_err(OutboxError::Repository)?;
-            if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
-                reactions.remove(event_id);
-            }
-            return Ok(InboxAction::Ack);
-        }
     }
     let claimed = repository
         .claim_turn_for_publish(ask_id)
@@ -1175,16 +996,6 @@ where
                 notice(&format!(
                     "outbound event id for ask {ask_id} did not replace a prior id"
                 ));
-            }
-            if turn.ask_body.is_some() {
-                repository
-                    .note_host_initiated_post(
-                        ask_id,
-                        &turn.bot_id,
-                        &turn.channel_id,
-                        restraint.now_unix,
-                    )
-                    .map_err(OutboxError::Repository)?;
             }
         }
         SendOutcome::PrepareFailed(error) | SendOutcome::Rejected(error) => {
@@ -1282,7 +1093,6 @@ pub fn retry_undispatched<R, P, I>(
     repository: &mut R,
     publisher: &P,
     notice: &mut impl FnMut(&str),
-    restraint: &PublishRestraint,
     reactions: &I,
     attempt: &OutboundAttempt,
     bot_id: &BotId,
@@ -1329,9 +1139,7 @@ where
                 .map_err(OutboxError::Repository)?;
             return Ok(InboxAction::Ack);
         }
-        return complete_outbound_with(
-            repository, publisher, notice, restraint, &turn, None, reactions,
-        );
+        return complete_outbound_with(repository, publisher, notice, &turn, None, reactions);
     }
     republish_tell(repository, publisher, notice, &paced, bot_id)
 }
@@ -1364,14 +1172,6 @@ where
         SendOutcome::Accepted(event_id) => {
             let _ = repository
                 .mark_outbound_accepted(&attempt.ask_id, &event_id)
-                .map_err(OutboxError::Repository)?;
-            repository
-                .note_host_initiated_post(
-                    &attempt.ask_id,
-                    bot_id,
-                    &attempt.channel_id,
-                    crate::unix_now().unwrap_or_default(),
-                )
                 .map_err(OutboxError::Repository)?;
             Ok(InboxAction::Ack)
         }
@@ -1444,10 +1244,7 @@ impl InFlightReaction for RecordingInFlightReaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        event_id, fake_event_id, open_repo, open_repo_for, FakePublisher, CHANNEL,
-    };
-    use nostrherd_domain::restraint::QuietHours;
+    use crate::test_support::{event_id, fake_event_id, open_repo, open_repo_for, FakePublisher};
     use nostrherd_domain::BotId;
 
     struct NonRetryPublisher;
@@ -1506,24 +1303,6 @@ mod tests {
         |_| {}
     }
 
-    fn restrained(
-        ceiling: u32,
-        quiet_hours: Option<&str>,
-        now_unix: i64,
-        minute_of_day: u16,
-    ) -> PublishRestraint {
-        PublishRestraint::new(
-            HostRestraint::new(ceiling, quiet_hours.and_then(QuietHours::parse))
-                .expect("restraint"),
-            now_unix,
-            minute_of_day,
-        )
-    }
-
-    fn bot_id() -> BotId {
-        BotId::new("bot").expect("bot")
-    }
-
     #[test]
     fn progress_acks_without_publish() {
         let (mut repository, publisher) = open_repo();
@@ -1531,7 +1310,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("progress", "ask-1", "working"),
         )
         .expect("handle");
@@ -1562,7 +1340,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("progress", "ask-1", "almost there"),
         )
         .expect("progress");
@@ -1570,7 +1347,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "done"),
         )
         .expect("final");
@@ -1594,7 +1370,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut |notice| notices.push(notice.to_owned()),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "  \n"),
         )
         .expect("handle");
@@ -1614,7 +1389,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "late"),
         )
         .expect("handle");
@@ -1629,7 +1403,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-unknown", "hello"),
         )
         .expect("handle");
@@ -1644,7 +1417,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
         )
         .expect("handle");
@@ -1683,7 +1455,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "watched author posted"),
         )
         .expect("handle");
@@ -1740,7 +1511,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
         )
         .expect("handle");
@@ -1771,7 +1541,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
         )
         .expect("handle");
@@ -1785,7 +1554,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "  [pr]: already  "),
         )
         .expect("handle");
@@ -1815,7 +1583,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
         )
         .expect("handle");
@@ -1845,7 +1612,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut |notice| notices.push(notice.to_owned()),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
         )
         .expect("handle");
@@ -1870,14 +1636,8 @@ mod tests {
             }
         }))
         .expect("delivery");
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &PublishRestraint::unrestrained(),
-            &delivery,
-        )
-        .expect("handle");
+        let action = handle_delivery(&mut repository, &publisher, &mut notices(), &delivery)
+            .expect("handle");
         assert_eq!(action, InboxAction::Ack);
         assert!(publisher.calls.lock().expect("calls").is_empty());
         assert_eq!(
@@ -1912,7 +1672,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &occupant_tell(
                 "tell-both",
                 "both fields",
@@ -1935,7 +1694,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-1", "queue is clear", Some("bot-foobar"), None),
             &reactions,
         )
@@ -1968,7 +1726,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-5", "hi", Some("stranger"), None),
         )
         .expect("handle");
@@ -1987,7 +1744,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-6", "hi", Some("bot-foobar"), Some("other-occupant")),
         )
         .expect("handle");
@@ -2002,7 +1758,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-4", "from id", None, Some("occupant-agent")),
         )
         .expect("handle");
@@ -2019,7 +1774,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
         )
         .unwrap();
@@ -2027,7 +1781,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", " "),
         )
         .expect("handle");
@@ -2047,7 +1800,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "landing"),
         )
         .expect("handle");
@@ -2066,7 +1818,6 @@ mod tests {
             &mut repository,
             &NonRetryPublisher,
             &mut |notice| notices.push(notice.to_owned()),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
         )
         .expect("handle");
@@ -2082,7 +1833,6 @@ mod tests {
             &mut repository,
             &NonRetryPublisher,
             &mut |_: &str| {},
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
         )
         .expect("second");
@@ -2117,7 +1867,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
             &reactions,
         )
@@ -2137,7 +1886,6 @@ mod tests {
             &mut repository,
             &NonRetryPublisher,
             &mut |_: &str| {},
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
             &reactions,
         )
@@ -2156,7 +1904,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("progress", "ask-1", "working"),
             &reactions,
         )
@@ -2175,7 +1922,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
             &reactions,
         )
@@ -2201,7 +1947,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
             &reactions,
         )
@@ -2219,7 +1964,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &delivery("final", "ask-1", "hello"),
             &reactions,
         )
@@ -2231,280 +1975,6 @@ mod tests {
         );
         assert_eq!(reactions.removes.lock().expect("removes").len(), 1);
         assert_eq!(publisher.sends.lock().expect("sends").len(), 1);
-    }
-
-    #[test]
-    fn host_tell_beyond_the_ceiling_is_dropped_with_a_notice() {
-        let (mut repository, publisher) = open_repo();
-        let restraint = restrained(1, None, 1_700_000_000, 12 * 60);
-        let mut notices = Vec::new();
-        handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut |notice| notices.push(notice.to_owned()),
-            &restraint,
-            &occupant_tell("tell-a", "one", Some("bot-foobar"), None),
-        )
-        .expect("first");
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut |notice| notices.push(notice.to_owned()),
-            &restraint,
-            &occupant_tell("tell-b", "two", Some("bot-foobar"), None),
-        )
-        .expect("second");
-        assert_eq!(action, InboxAction::Ack);
-        assert_eq!(
-            publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: one".to_owned()]
-        );
-        assert!(notices
-            .iter()
-            .any(|notice| notice.contains("post ceiling 1") && notice.contains("dropped")));
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot_id(), CHANNEL, 0)
-                .unwrap(),
-            1
-        );
-    }
-
-    #[test]
-    fn quiet_hours_drop_a_host_tell_with_a_notice() {
-        let (mut repository, publisher) = open_repo();
-        let mut notices = Vec::new();
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut |notice| notices.push(notice.to_owned()),
-            &restrained(24, Some("23:00-07:00"), 1_700_000_000, 23 * 60),
-            &occupant_tell("tell-quiet", "later", Some("bot-foobar"), None),
-        )
-        .expect("handle");
-        assert_eq!(action, InboxAction::Ack);
-        assert!(publisher.calls.lock().expect("calls").is_empty());
-        assert!(notices.iter().any(|notice| {
-            notice.contains("quiet hours 23:00-07:00") && notice.contains("dropped")
-        }));
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot_id(), CHANNEL, 0)
-                .unwrap(),
-            0
-        );
-        let stored = repository
-            .outbound_attempt("tell-quiet")
-            .unwrap()
-            .expect("row");
-        assert!(stored.abandoned_at.is_some());
-        assert!(repository
-            .pending_outbound_attempts(&bot_id())
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn ceiling_is_per_channel_and_several_tells_share_it() {
-        let (mut repository, publisher) = open_repo();
-        let eng = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        repository
-            .save_session(&SessionRecord {
-                bot_id: bot_id(),
-                channel_id: eng.to_owned(),
-                session_name: "bot-eng".to_owned(),
-                occupant_logical_id: Some("eng-occupant".to_owned()),
-                renew_id: None,
-                ask_context_event_id: None,
-                ask_context_created_at: None,
-            })
-            .unwrap();
-        let restraint = restrained(1, None, 1_700_000_000, 12 * 60);
-        handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &restraint,
-            &occupant_tell("tell-home", "home", Some("bot-foobar"), None),
-        )
-        .expect("home");
-        handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &restraint,
-            &occupant_tell("tell-home-2", "again", Some("bot-foobar"), None),
-        )
-        .expect("home again");
-        handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &restraint,
-            &occupant_tell("tell-eng", "eng", Some("bot-eng"), None),
-        )
-        .expect("eng");
-        assert_eq!(
-            publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: home".to_owned(), "[bot]: eng".to_owned()]
-        );
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot_id(), CHANNEL, 0)
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot_id(), eng, 0)
-                .unwrap(),
-            1
-        );
-    }
-
-    #[test]
-    fn trigger_answer_publishes_regardless_of_the_ceiling() {
-        let (mut repository, publisher) = open_repo();
-        let restraint = restrained(1, None, 1_700_000_000, 12 * 60);
-        handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &restraint,
-            &occupant_tell("tell-cap", "unprompted", Some("bot-foobar"), None),
-        )
-        .expect("tell");
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &restraint,
-            &delivery("final", "ask-1", "the answer"),
-        )
-        .expect("final");
-        assert_eq!(action, InboxAction::Ack);
-        assert_eq!(
-            publisher.calls.lock().expect("calls").as_slice(),
-            &[
-                "[bot]: unprompted".to_owned(),
-                "[bot]: the answer".to_owned()
-            ]
-        );
-        assert_eq!(
-            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
-            TurnState::Posted
-        );
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot_id(), CHANNEL, 0)
-                .unwrap(),
-            1
-        );
-    }
-
-    #[test]
-    fn prepared_tell_retry_is_not_re_gated_by_quiet_hours() {
-        let (mut repository, publisher) = open_repo();
-        repository
-            .save_outbound_attempt(&OutboundAttempt {
-                prepared_event_id: Some("e".repeat(64)),
-                prepared_created_at: Some(1_700_000_000),
-                dispatched: true,
-                bot_id: Some(BotId::new("bot").expect("bot")),
-                ..OutboundAttempt::new("tell-retry", "already sent", CHANNEL)
-            })
-            .unwrap();
-        let mut notices = Vec::new();
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut |notice| notices.push(notice.to_owned()),
-            &restrained(1, Some("23:00-07:00"), 1_700_000_000, 23 * 60),
-            &occupant_tell("tell-retry", "already sent", Some("bot-foobar"), None),
-        )
-        .expect("retry");
-        assert_eq!(action, InboxAction::Ack);
-        assert_eq!(
-            publisher.sends.lock().expect("sends").as_slice(),
-            ["e".repeat(64).as_str()]
-        );
-        assert!(notices.iter().all(|notice| !notice.contains("quiet hours")));
-    }
-
-    #[test]
-    fn prepared_wake_retry_is_not_re_gated_by_quiet_hours() {
-        let (mut repository, publisher) = open_repo();
-        repository.execute_batch_for_test(
-            "UPDATE turns SET publish_reply_to_event_id = NULL,
-                 ask_body = '## Watch event';",
-        );
-        repository
-            .save_outbound_attempt(&OutboundAttempt {
-                prepared_event_id: Some("e".repeat(64)),
-                prepared_created_at: Some(1_700_000_000),
-                dispatched: true,
-                bot_id: Some(BotId::new("bot").expect("bot")),
-                ..OutboundAttempt::new("ask-1", "watched author posted", CHANNEL)
-            })
-            .unwrap();
-        let mut notices = Vec::new();
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut |notice| notices.push(notice.to_owned()),
-            &restrained(1, Some("23:00-07:00"), 1_700_000_000, 23 * 60),
-            &delivery("final", "ask-1", "watched author posted"),
-        )
-        .expect("retry");
-        assert_eq!(action, InboxAction::Ack);
-        assert_eq!(
-            publisher.sends.lock().expect("sends").as_slice(),
-            ["e".repeat(64).as_str()]
-        );
-        assert_eq!(
-            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
-            TurnState::Posted
-        );
-        assert!(notices.iter().all(|notice| !notice.contains("quiet hours")));
-    }
-
-    #[test]
-    fn suppressed_wake_final_fails_the_turn_without_publishing() {
-        let (mut repository, publisher) = open_repo();
-        repository.execute_batch_for_test(
-            "UPDATE turns SET publish_reply_to_event_id = NULL,
-                 ask_body = '## Watch event';",
-        );
-        let restraint = restrained(1, None, 1_700_000_000, 12 * 60);
-        handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut notices(),
-            &restraint,
-            &occupant_tell("tell-cap", "unprompted", Some("bot-foobar"), None),
-        )
-        .expect("tell");
-        let mut notices = Vec::new();
-        let action = handle_delivery(
-            &mut repository,
-            &publisher,
-            &mut |notice| notices.push(notice.to_owned()),
-            &restraint,
-            &delivery("final", "ask-1", "watched author posted"),
-        )
-        .expect("wake");
-        assert_eq!(action, InboxAction::Ack);
-        assert_eq!(
-            publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: unprompted".to_owned()]
-        );
-        assert_eq!(
-            repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
-            TurnState::Failed
-        );
-        assert!(notices
-            .iter()
-            .any(|notice| notice.contains("post ceiling 1") && notice.contains("dropped")));
     }
 
     #[test]
@@ -2535,7 +2005,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-retry", "queue is clear", Some("bot-foobar"), None),
         )
         .expect_err("retryable");
@@ -2552,7 +2021,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &NoopInFlightReaction,
             &first,
             &BotId::new("bot").expect("bot"),
@@ -2576,12 +2044,6 @@ mod tests {
         let sends = publisher.sends.lock().expect("sends");
         assert_eq!(sends.len(), 2);
         assert!(sends.iter().all(|event_id| event_id == &prepared));
-        assert_eq!(
-            repository
-                .count_host_initiated_posts(&bot_id(), CHANNEL, 0)
-                .unwrap(),
-            1
-        );
     }
 
     #[test]
@@ -2592,7 +2054,6 @@ mod tests {
             &mut repository,
             &NonRetryPublisher,
             &mut |notice| notices.push(notice.to_owned()),
-            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-reject", "queue is clear", Some("bot-foobar"), None),
         )
         .expect("handle");
@@ -2612,7 +2073,6 @@ mod tests {
             &mut repository,
             &FakePublisher::default(),
             &mut |notice| notices.push(notice.to_owned()),
-            &PublishRestraint::unrestrained(),
             &NoopInFlightReaction,
             &stored,
             &bot_id,
@@ -2650,7 +2110,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut |notice| notices.push(notice.to_owned()),
-            &PublishRestraint::unrestrained(),
             &NoopInFlightReaction,
             &attempt,
             &BotId::new("bot").expect("bot"),
@@ -2675,7 +2134,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-bad", "   ", Some("bot-foobar"), None),
             &NoopInFlightReaction,
             &mut |name, body| feedback.push((name.to_owned(), body.to_owned())),
@@ -2703,7 +2161,6 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &PublishRestraint::unrestrained(),
             &occupant_tell("tell-dead", "queue is clear", Some("bot-foobar"), None),
         )
         .expect("handle");

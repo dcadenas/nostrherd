@@ -49,8 +49,6 @@ envchain nostrherd nostrherd \
 id = "bot"
 corpus = "/path/to/corpus-repo"
 kind = "opencode"
-# post_ceiling = 24
-# quiet_hours = "23:00-07:00"
 ```
 
 `--check` loads config and database, then exits. It needs neither the
