@@ -4,13 +4,13 @@ Personal `nostrherd` uses envchain namespace `nostrherd`.
 That is not the throwaway live-test namespaces `nostrherd-proof` and
 `nostrherd-proof-peer` (D23 live-test relay, `skills/local-relay`).
 
-`envchain` injects `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` into the
+`envchain` injects `NOSTRHERD_PRIVATE_KEY` and `NOSTRHERD_RELAY_URL` into the
 wrapped process (D29, D30). The binary only reads those names from
 the environment. There is no `--envchain` flag. Do not exec `envchain`
 from the binary. Do not put the nsec in SQLite, logs, process titles,
 or standing pane-env.
 
-Do not point `BUZZ_RELAY_URL` at a production relay.
+Do not point `NOSTRHERD_RELAY_URL` at a production relay.
 
 ## Set the namespace
 
@@ -18,11 +18,11 @@ Do not point `BUZZ_RELAY_URL` at a production relay.
 shows **names only**.
 
 ```bash
-envchain --set nostrherd BUZZ_PRIVATE_KEY
-envchain --set nostrherd BUZZ_RELAY_URL
+envchain --set nostrherd NOSTRHERD_PRIVATE_KEY
+envchain --set nostrherd NOSTRHERD_RELAY_URL
 ```
 
-`BUZZ_RELAY_URL` MUST be a non-production relay you control (local
+`NOSTRHERD_RELAY_URL` MUST be a non-production relay you control (local
 throwaway, or another non-prod URL). Live proofs in this repo use
 `./tools/local-relay` and the proof namespaces, not `nostrherd`.
 
@@ -63,7 +63,7 @@ MUST NOT wrap a publish binary and MUST NOT receive the nsec.
   for personal keys
 - Reuse other personal or sidecar envchain namespaces
 - Pass `--envchain`
-- Export `BUZZ_PRIVATE_KEY` into pane-env
+- Export `NOSTRHERD_PRIVATE_KEY` into pane-env
 - Print, log, or commit nsecs
 - Dump `env` / `printenv`
 - Run these wraps against a production relay

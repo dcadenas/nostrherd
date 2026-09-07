@@ -362,7 +362,7 @@ create and to each of its edits (D42).
 Status: accepted
 
 `envchain NAMESPACE CMD` injects secrets into CMD's environment.
-The host MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` from the
+The host MUST read `NOSTRHERD_PRIVATE_KEY` and `NOSTRHERD_RELAY_URL` from the
 environment when present. Binaries MUST NOT take `--envchain` and MUST
 NOT exec `envchain` themselves. Occupants MUST NOT receive the nsec.
 
@@ -377,10 +377,10 @@ Supersedes the `--envchain` flag shipped in #6.
 Status: accepted
 
 Personal host wrap uses envchain namespace `nostrherd` with
-`BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL`. Occupants do not wrap a
+`NOSTRHERD_PRIVATE_KEY` and `NOSTRHERD_RELAY_URL`. Occupants do not wrap a
 publish binary. That namespace is distinct from throwaway
 `nostrherd-proof` / `nostrherd-proof-peer` (D23 live-test relay). Do
-not point `BUZZ_RELAY_URL` at a production relay.
+not point `NOSTRHERD_RELAY_URL` at a production relay.
 
 ## D31. Host publishes; occupant only kelpie final
 
@@ -963,4 +963,24 @@ author can say it in a sentence and change it without a release.
 The host keeps no counters and no clock. Nothing in `bots.toml`
 configures speech. An existing database keeps its now-unused
 `host_initiated_posts` table; nothing reads or writes it.
+
+## D53. The host's two environment names carry its own prefix
+
+Status: accepted
+
+Amends D29's variable names. The host reads `NOSTRHERD_PRIVATE_KEY`
+and `NOSTRHERD_RELAY_URL`; `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` are
+retired with no fallback.
+
+The old names came from the host being written against Buzz. It runs
+against any NIP-29 relay, proved against `groups_relay` as well as
+Buzz, so a reader who is told that in the first paragraph and then
+types `BUZZ_` twice is being told two different things.
+
+No compatibility shim. An existing namespace needs both new names set
+before the next start, and the host fails closed with a message naming
+the variable it could not read.
+
+`BUZZ_AUTH_TAG` in the test recipes belongs to the `buzz` CLI those
+recipes drive, not to this host, and keeps its name.
 

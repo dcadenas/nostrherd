@@ -22,7 +22,7 @@ SPEC user-visible flows.
 - Print, log, or commit nsecs
 - `cat` key files
 - Dump `env` / `printenv`
-- Point `BUZZ_RELAY_URL` at a production relay
+- Point `NOSTRHERD_RELAY_URL` at a production relay
 - Reuse envchain `nostr-personal` or `buzz-acp`
 
 ## Command

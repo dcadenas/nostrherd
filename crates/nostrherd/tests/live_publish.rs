@@ -22,11 +22,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn relay_url() -> String {
-    std::env::var("BUZZ_RELAY_URL").expect("BUZZ_RELAY_URL (local relay)")
+    std::env::var("NOSTRHERD_RELAY_URL").expect("NOSTRHERD_RELAY_URL (local relay)")
 }
 
 fn operator_keys() -> Keys {
-    let secret = std::env::var("BUZZ_PRIVATE_KEY").expect("BUZZ_PRIVATE_KEY");
+    let secret = std::env::var("NOSTRHERD_PRIVATE_KEY").expect("NOSTRHERD_PRIVATE_KEY");
     Keys::parse(&secret).expect("operator key")
 }
 

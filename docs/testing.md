@@ -190,7 +190,7 @@ def walk(obj):
 walk(d.get("result") or d)
 print(found[-1] if found else "")
 ')
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 hello from example-bot
 EOF
@@ -267,7 +267,7 @@ def walk(obj):
 walk(d.get("result") or d)
 print(found[-1] if found else "")
 ')
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 hello from example-bot
 EOF
@@ -301,7 +301,7 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
 REPLY_TO=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.reply_to_event_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 later from example-bot
 EOF
@@ -325,7 +325,7 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
 REPLY_TO=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.reply_to_event_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 thread reply from example-bot
 EOF
@@ -341,7 +341,7 @@ sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' ORDER BY t.sequence;"
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' AND t.state='open';")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 busy first
 EOF
@@ -452,7 +452,7 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DM' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$DM';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 dm hello from example-bot
 EOF
@@ -480,7 +480,7 @@ sqlite3 "$PROOF/host.sqlite" \
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state, occupant_logical_id = '$LID' FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$RECOVER';"
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 recovered hello
 EOF
@@ -504,7 +504,7 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$EDIT';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 latest from example-bot
 EOF
@@ -538,7 +538,7 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$POSTED' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$POSTED';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 stay up from example-bot
 EOF
@@ -558,7 +558,7 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$LONGWORK' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$LONGWORK';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 long job done
 EOF
@@ -643,7 +643,7 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$CHANNEL';")
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 hello from example-bot
 EOF
@@ -661,7 +661,7 @@ ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
 kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 OCCUPANT_PANE=$(occupant_pane "$SNAME")
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 after host drop
 EOF
@@ -833,7 +833,7 @@ wait_pane() {
 reply_final() {
   local pane=$1 ask=$2 body=$3
   rm -f "$ROOT/target/debug/botcli"
-  HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  HERDR_PANE_ID="$pane" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
     kelpie reply "$ask" --final --stdin <<EOF
 $body
 EOF
@@ -946,7 +946,7 @@ sleep 2
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages delete \
   --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" >/dev/null
 wait_sql "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DELETE';" cancelled
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF' || true
 late final after delete
 EOF
@@ -1158,7 +1158,7 @@ wait_pane() {
 }
 reply_final() {
   local pane=$1 ask=$2 body=$3
-  HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  HERDR_PANE_ID="$pane" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
     kelpie reply "$ask" --final --stdin <<EOF
 $body
 EOF
@@ -1272,7 +1272,7 @@ print("count", len(bots))'
 
 reply_progress() {
   local pane=$1 ask=$2 body=$3
-  HERDR_PANE_ID="$pane" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+  HERDR_PANE_ID="$pane" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
     kelpie reply "$ask" --progress --stdin <<EOF
 $body
 EOF
@@ -1332,7 +1332,7 @@ print("edited_content", int("polishing the answer" in str(bots[0].get("content")
 sqlite3 "$PROOF/host.sqlite" "SELECT edit_count FROM progress_posts WHERE ask_id='$ASK_ID';"
 
 # 4. Final: a second stamped post; the progress post stays up.
-HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
+HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_URL \
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 long job done
 EOF

@@ -59,8 +59,8 @@ struct OperatorEnv {
 
 impl OperatorEnv {
     fn from_env() -> Result<Self, HostError> {
-        let private_key = required_env("BUZZ_PRIVATE_KEY")?;
-        let relay_url = required_env("BUZZ_RELAY_URL")?;
+        let private_key = required_env("NOSTRHERD_PRIVATE_KEY")?;
+        let relay_url = required_env("NOSTRHERD_RELAY_URL")?;
         let keys = Keys::parse(&private_key).map_err(|_| HostError::InvalidOperatorKey)?;
         Ok(Self { keys, relay_url })
     }
@@ -99,7 +99,7 @@ impl fmt::Display for HostError {
             Self::Config(error) => write!(formatter, "{error}"),
             Self::Database(error) => write!(formatter, "failed to open host database: {error}"),
             Self::MissingEnv(name) => write!(formatter, "missing {name}"),
-            Self::InvalidOperatorKey => formatter.write_str("invalid BUZZ_PRIVATE_KEY"),
+            Self::InvalidOperatorKey => formatter.write_str("invalid NOSTRHERD_PRIVATE_KEY"),
             Self::Runtime(error) => write!(formatter, "failed to start async runtime: {error}"),
             Self::WaiterKey(error) => {
                 write!(
@@ -963,8 +963,8 @@ mod tests {
     impl EnvRestore {
         fn capture() -> Self {
             Self {
-                key: std::env::var("BUZZ_PRIVATE_KEY").ok(),
-                url: std::env::var("BUZZ_RELAY_URL").ok(),
+                key: std::env::var("NOSTRHERD_PRIVATE_KEY").ok(),
+                url: std::env::var("NOSTRHERD_RELAY_URL").ok(),
                 pane: std::env::var("HERDR_PANE_ID").ok(),
             }
         }
@@ -972,8 +972,8 @@ mod tests {
 
     impl Drop for EnvRestore {
         fn drop(&mut self) {
-            restore_var("BUZZ_PRIVATE_KEY", self.key.as_deref());
-            restore_var("BUZZ_RELAY_URL", self.url.as_deref());
+            restore_var("NOSTRHERD_PRIVATE_KEY", self.key.as_deref());
+            restore_var("NOSTRHERD_RELAY_URL", self.url.as_deref());
             restore_var("HERDR_PANE_ID", self.pane.as_deref());
         }
     }
@@ -1276,8 +1276,8 @@ mod tests {
         let keys = Keys::generate();
         let secret = keys.secret_key().to_secret_hex();
         let relay_url = "ws://127.0.0.1:13001";
-        std::env::set_var("BUZZ_PRIVATE_KEY", &secret);
-        std::env::set_var("BUZZ_RELAY_URL", relay_url);
+        std::env::set_var("NOSTRHERD_PRIVATE_KEY", &secret);
+        std::env::set_var("NOSTRHERD_RELAY_URL", relay_url);
 
         let operator = OperatorEnv::from_env().expect("read env");
         assert_eq!(operator.relay_url, relay_url);
@@ -1290,8 +1290,8 @@ mod tests {
         let _restore = EnvRestore::capture();
         let keys = Keys::generate();
         let secret = keys.secret_key().to_bech32().expect("nsec");
-        std::env::set_var("BUZZ_PRIVATE_KEY", &secret);
-        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
+        std::env::set_var("NOSTRHERD_PRIVATE_KEY", &secret);
+        std::env::set_var("NOSTRHERD_RELAY_URL", "ws://127.0.0.1:13001");
         OperatorEnv::from_env().expect("read env");
 
         let config = write_config("bot");
@@ -1315,8 +1315,8 @@ mod tests {
     fn check_does_not_require_operator_env() {
         let _lock = lock_env();
         let _restore = EnvRestore::capture();
-        std::env::remove_var("BUZZ_PRIVATE_KEY");
-        std::env::remove_var("BUZZ_RELAY_URL");
+        std::env::remove_var("NOSTRHERD_PRIVATE_KEY");
+        std::env::remove_var("NOSTRHERD_RELAY_URL");
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         run(&Args::parse_from([
@@ -1334,8 +1334,8 @@ mod tests {
     fn runtime_requires_operator_key_from_env() {
         let _lock = lock_env();
         let _restore = EnvRestore::capture();
-        std::env::remove_var("BUZZ_PRIVATE_KEY");
-        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
+        std::env::remove_var("NOSTRHERD_PRIVATE_KEY");
+        std::env::set_var("NOSTRHERD_RELAY_URL", "ws://127.0.0.1:13001");
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
@@ -1346,15 +1346,15 @@ mod tests {
             database.to_str().expect("utf8"),
         ]))
         .expect_err("missing key");
-        assert_eq!(error.to_string(), "missing BUZZ_PRIVATE_KEY");
+        assert_eq!(error.to_string(), "missing NOSTRHERD_PRIVATE_KEY");
     }
 
     #[test]
     fn runtime_requires_relay_url_from_env() {
         let _lock = lock_env();
         let _restore = EnvRestore::capture();
-        std::env::set_var("BUZZ_PRIVATE_KEY", "not-a-key");
-        std::env::remove_var("BUZZ_RELAY_URL");
+        std::env::set_var("NOSTRHERD_PRIVATE_KEY", "not-a-key");
+        std::env::remove_var("NOSTRHERD_RELAY_URL");
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
@@ -1365,7 +1365,7 @@ mod tests {
             database.to_str().expect("utf8"),
         ]))
         .expect_err("missing url");
-        assert_eq!(error.to_string(), "missing BUZZ_RELAY_URL");
+        assert_eq!(error.to_string(), "missing NOSTRHERD_RELAY_URL");
     }
 
     #[test]
@@ -1373,8 +1373,8 @@ mod tests {
         let _lock = lock_env();
         let _restore = EnvRestore::capture();
         let keys = Keys::generate();
-        std::env::set_var("BUZZ_PRIVATE_KEY", keys.secret_key().to_secret_hex());
-        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
+        std::env::set_var("NOSTRHERD_PRIVATE_KEY", keys.secret_key().to_secret_hex());
+        std::env::set_var("NOSTRHERD_RELAY_URL", "ws://127.0.0.1:13001");
         let config = temp_path("empty").with_extension("toml");
         fs::write(&config, "bots = []").expect("write");
         let database = temp_path("host").with_extension("sqlite");
@@ -1412,8 +1412,8 @@ mod tests {
         let _lock = lock_env();
         let _restore = EnvRestore::capture();
         let secret = "nsec1invalidsecretmustnotappear";
-        std::env::set_var("BUZZ_PRIVATE_KEY", secret);
-        std::env::set_var("BUZZ_RELAY_URL", "ws://127.0.0.1:13001");
+        std::env::set_var("NOSTRHERD_PRIVATE_KEY", secret);
+        std::env::set_var("NOSTRHERD_RELAY_URL", "ws://127.0.0.1:13001");
         let config = write_config("bot");
         let database = temp_path("host").with_extension("sqlite");
         let error = run(&Args::parse_from([
@@ -1425,7 +1425,7 @@ mod tests {
         ]))
         .expect_err("invalid key");
         let message = error.to_string();
-        assert_eq!(message, "invalid BUZZ_PRIVATE_KEY");
+        assert_eq!(message, "invalid NOSTRHERD_PRIVATE_KEY");
         assert!(!message.contains(secret));
         assert!(!format!("{error:?}").contains(secret));
     }

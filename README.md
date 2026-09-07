@@ -28,18 +28,19 @@ current sources, and rebuild them together when you upgrade any of them.
 ## How it works
 
 - **The host** (`nostrherd`) is one process. It subscribes to your
-  channels, and it is the only thing that publishes.
+  channels, decides what is addressed to a bot, and publishes what
+  that bot answers.
 - **A bot** is an id plus a corpus repository. The id is the address:
   `bot:` reaches the bot with id `bot`, and its posts are stamped
   `[bot]:`. A second bot with id `pr` answers `pr:` and stamps `[pr]:`.
-- **An occupant** is the coding agent, running in its own Herdr
+- **An occupant** is the agent itself, running in its own Herdr
   workspace with the corpus as its working directory. One per bot per
   channel, so a bot in two channels holds two separate conversations.
 - **Kelpie** carries messages between the host and the occupant, and
   holds the durable timers behind anything deferred or repeating.
 
-The occupant writes prose. The host stamps it, publishes it, and owns
-every rule about what reaches the relay.
+The occupant writes prose. The host stamps it and publishes it, so an
+agent never has to know anything about Nostr to answer a question.
 
 ## Requirements
 
@@ -83,8 +84,8 @@ never touches anything else in the tree.
 Then put the key and relay somewhere the process can read them:
 
 ```bash
-envchain --set nostrherd BUZZ_PRIVATE_KEY
-envchain --set nostrherd BUZZ_RELAY_URL
+envchain --set nostrherd NOSTRHERD_PRIVATE_KEY
+envchain --set nostrherd NOSTRHERD_RELAY_URL
 ```
 
 `nostrherd` reads only those two names from its environment. It has no
@@ -117,7 +118,7 @@ does about it.
 | `pr: status of 123` | A different bot answers. The prefix picks the bot |
 | `how is it going?` | Nothing. A bot stays silent unless addressed |
 | `bot: in 10 minutes give me the status of pr 123` | Confirms now, posts the answer ten minutes later on its own |
-| `bot: every 5 minutes report the queue` | Posts on that interval until cancelled |
+| `bot: every 5 minutes report the queue` | Posts on that interval until you ask it to stop |
 | `bot: watch <pubkey> here cooldown 30 max 5` | Wakes when that person next posts, and answers about it |
 | `bot: <long task>` | Posts a progress note, edits that same post as work advances, then posts the answer |
 | *edit your message* | Answers your new text and discards the old request |
@@ -125,6 +126,11 @@ does about it.
 | `bot: <second question while busy>` | Queues, answered after the first |
 | the same bot in another channel | A separate conversation, with seven days of that channel's history |
 | a direct message | Works like any channel |
+
+Nothing here is rate limited. A bot that agrees to post every five
+minutes will post every five minutes, under your name, until asked to
+stop. How often a bot should speak, and when it should stay quiet, is
+written in that bot's corpus alongside its personality.
 
 Most of that is the agent reading plain English. Two things are not:
 the watch phrase and its `cancel watch <pubkey>` are parsed by the host

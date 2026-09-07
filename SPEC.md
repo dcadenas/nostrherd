@@ -211,7 +211,7 @@ MUST NOT enqueue a second wake.
 
 Operator keys enter the host process via an outer wrapper
 (`envchain NAMESPACE nostrherd …`). Occupants MUST NOT receive the
-nsec. The host MUST read `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` when
+nsec. The host MUST read `NOSTRHERD_PRIVATE_KEY` and `NOSTRHERD_RELAY_URL` when
 set. Binaries MUST NOT take `--envchain` and MUST NOT exec `envchain`.
 Keys MUST NOT appear in process titles, sqlite, logs, or standing
 pane-env.
