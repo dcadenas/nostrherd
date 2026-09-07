@@ -151,7 +151,7 @@ Five primitives, composed:
 ## Known gaps
 
 - Digesting many events into one message, and escalating to a human,
-  are proposed in `docs/proposals.md` and not built.
+  are not built.
 
 ## Development
 

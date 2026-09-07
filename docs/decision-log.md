@@ -690,8 +690,7 @@ flip buzz to peer/verification only; skills/local-relay is unchanged.
 
 Status: accepted
 
-Amends P2 in `docs/proposals.md`, which previously placed the cron in
-the host.
+Amends an earlier proposal that placed the cron in the host.
 
 A repeating schedule is a durable timer bound to a logical agent. That
 is Kelpie's, not the host's: `kelpie tell --every`, with `schedules`
@@ -727,7 +726,6 @@ judgement, written in its corpus (D52).
 
 Status: accepted
 
-Accepts P1 in `docs/proposals.md`.
 
 "Online" means observable relay activity by an author. There is no
 presence protocol on this stack and the host MUST NOT fake one.
@@ -762,7 +760,7 @@ keeps one person's burst from poking a bot repeatedly.
 
 Status: accepted
 
-Closes the implementation choices left open by D45 and P1.
+Closes the implementation choices left open by D45.
 
 Watch management uses exact trigger requests. Create is `watch
 <pubkey[,pubkey...]>`, with optional `here`, `kind <number>`, `cooldown
@@ -806,7 +804,7 @@ in the declaring channel. The final remains a top-level stamped post.
 
 Status: retracted by D52
 
-Amends D44's restraint paragraph. Closes the open points in P2.
+Amends D44's restraint paragraph.
 
 A suppressed host-initiated post is dropped, never held or coalesced.
 Holding would make the host a durable queue with its own firing loop,
