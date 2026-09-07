@@ -7,7 +7,7 @@ Map for agents working in this repository. Not the product spec.
 A DDD host: one process, one actor per configured bot, SQLite for host
 state. Occupants live in **corpus repos** (not this tree). The host
 publishes. Occupants `kelpie reply --final` on a trigger turn and MAY
-`kelpie tell cooee` for a bot-initiated post (D38). Kelpie is the
+`kelpie tell nostrherd` for a bot-initiated post (D38). Kelpie is the
 pane/obligation bus. The Nostr human is never `kelpie from=`.
 
 ## Read order

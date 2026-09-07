@@ -1,6 +1,6 @@
 //! Kelpie ask body: trigger request, then capped unread channel context.
 
-use cooee_domain::EventId;
+use nostrherd_domain::EventId;
 
 use crate::snapshot::render_indexed_event_line;
 use crate::IndexedRelayEvent;
@@ -51,7 +51,7 @@ pub fn render_ask_body(
     body.push('\n');
 
     let Some(cursor) = cursor else {
-        body.push_str("\nFirst ask for this session. Channel history is in `.cooee/places/");
+        body.push_str("\nFirst ask for this session. Channel history is in `.nostrherd/places/");
         body.push_str(session_name);
         body.push_str(".md` (last 7 days). It is not restated here.\n");
         return RenderedAsk {
@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(ask_body_request(&rendered.body), "hello");
         assert!(rendered.body.contains("## Context"));
         assert!(rendered.body.contains(CONTEXT_TRUST));
-        assert!(rendered.body.contains(".cooee/places/bot-foobar.md"));
+        assert!(rendered.body.contains(".nostrherd/places/bot-foobar.md"));
         assert!(!rendered.body.contains("older line"));
         assert_eq!(rendered.cursor.event_id, event_id('a'));
         assert_eq!(rendered.cursor.created_at, 10);

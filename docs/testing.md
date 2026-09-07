@@ -8,7 +8,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 ```
 
-`crates/cooee/src/spec_flows.rs` is in-process acceptance of SPEC
+`crates/nostrherd/src/spec_flows.rs` is in-process acceptance of SPEC
 flows 1–12. It is not a live relay proof.
 
 `queued_turn_recovers_an_unavailable_recorded_occupant_and_drains` proves a
@@ -25,7 +25,7 @@ does not leave stale work that can make later reconciliation ambiguous.
 nostr-sdk's in-process relay to keep fixed-ID refresh behavior in the normal CI
 gate. It replaces populated channel and active-turn scopes with changed values.
 
-`crates/cooee/src/outbox.rs` and `inbox.rs` prove host publish on
+`crates/nostrherd/src/outbox.rs` and `inbox.rs` prove host publish on
 kelpie final, ACK-after-decide, crash-safe retry of the same outbound
 event, best-effort `⏳` add/remove on the trigger, and occupant-tell
 routing (D38). That is not a live relay proof.
@@ -43,7 +43,7 @@ rolling. No live-relay proof: no new event shapes.
 `crates/domain/src/progress.rs` proves the D42 policy on its own: the
 1024-byte cap on a char boundary with a trailing `…`, the 20 s hold from
 the turn's open time, the 30 s edit interval, and the 20-edit cap.
-`crates/cooee/src/progress.rs` proves the host side against SQLite:
+`crates/nostrherd/src/progress.rs` proves the host side against SQLite:
 the row is recorded before the ACK and never relayed from the delivery
 handler, one create after the hold with no `--mention`, later bodies
 coalesce into one edit, a final first discards the pending body and
@@ -64,7 +64,7 @@ A genuine relay-drop proof is `live_retry_after_a_real_relay_drop`
 (kill the throwaway relay, drain, restart, same prepared id lands once).
 
 Ask body shape (request, then capped Context) is proved by
-`crates/cooee/src/ask_body.rs` and
+`crates/nostrherd/src/ask_body.rs` and
 `ask_context_includes_unprefixed_line_between_triggers`.
 
 Host-initiated watch turns are proved by
@@ -85,23 +85,23 @@ Invariants and their tests: `docs/invariants.md`.
 
 | Flow | Unit proof | Live proof |
 | --- | --- | --- |
-| 1 Silence | `flow_01_silence_indexes_without_an_occupant` | landed (`dcadenas/cooee#18`) |
-| 2 First call | `flow_02_first_call_starts_bot_foobar_and_asks` | landed (`dcadenas/cooee#18`) |
-| 3 Follow-up without prefix | `flow_03_follow_up_without_prefix_does_not_poke` | landed (`dcadenas/cooee#19`) |
-| 4 Second call | `flow_04_second_call_reuses_the_same_occupant` | landed (`dcadenas/cooee#19`) |
-| 5 Other channel | `flow_05_another_channel_is_an_independent_occupant` | landed (`dcadenas/cooee#19`) |
-| 6 DM | `flow_06_dm_is_its_own_channel_session` | landed (`dcadenas/cooee#20`) |
-| 7 Thread | `flow_07_thread_stays_on_the_channel_occupant` | landed (`dcadenas/cooee#19`) |
-| 8 Busy | `flow_08_busy_queues_the_second_turn` | landed (`dcadenas/cooee#19`) |
-| 9 Gone pane | `flow_09_gone_pane_continues_the_logical_agent` | landed (`dcadenas/cooee#20`) |
-| 10 Edit / delete | `flow_10_edit_answers_latest_text_and_delete_abandons`, `flow_10_claimed_turn_keeps_the_landing_reply`, `flow_10_posted_turn_is_left_up_after_delete`, `spec_flow_10_cancelled_turn_never_reaches_buzz` | landed (`dcadenas/cooee#20`) |
-| 11 Long work | `flow_11_one_ask_while_the_occupant_works`, `flow_11_progress_is_one_edited_post_then_a_final` (D42: progress post after the hold, edit in place, final leaves it up) | landed (`dcadenas/cooee#20`); progress relay: issue 60 recipe below |
-| 12 Desktop | `flow_12_host_does_not_publish_presence_or_typing` | landed (`dcadenas/cooee#20`) |
+| 1 Silence | `flow_01_silence_indexes_without_an_occupant` | landed (`dcadenas/nostrherd#18`) |
+| 2 First call | `flow_02_first_call_starts_bot_foobar_and_asks` | landed (`dcadenas/nostrherd#18`) |
+| 3 Follow-up without prefix | `flow_03_follow_up_without_prefix_does_not_poke` | landed (`dcadenas/nostrherd#19`) |
+| 4 Second call | `flow_04_second_call_reuses_the_same_occupant` | landed (`dcadenas/nostrherd#19`) |
+| 5 Other channel | `flow_05_another_channel_is_an_independent_occupant` | landed (`dcadenas/nostrherd#19`) |
+| 6 DM | `flow_06_dm_is_its_own_channel_session` | landed (`dcadenas/nostrherd#20`) |
+| 7 Thread | `flow_07_thread_stays_on_the_channel_occupant` | landed (`dcadenas/nostrherd#19`) |
+| 8 Busy | `flow_08_busy_queues_the_second_turn` | landed (`dcadenas/nostrherd#19`) |
+| 9 Gone pane | `flow_09_gone_pane_continues_the_logical_agent` | landed (`dcadenas/nostrherd#20`) |
+| 10 Edit / delete | `flow_10_edit_answers_latest_text_and_delete_abandons`, `flow_10_claimed_turn_keeps_the_landing_reply`, `flow_10_posted_turn_is_left_up_after_delete`, `spec_flow_10_cancelled_turn_never_reaches_buzz` | landed (`dcadenas/nostrherd#20`) |
+| 11 Long work | `flow_11_one_ask_while_the_occupant_works`, `flow_11_progress_is_one_edited_post_then_a_final` (D42: progress post after the hold, edit in place, final leaves it up) | landed (`dcadenas/nostrherd#20`); progress relay: issue 60 recipe below |
+| 12 Desktop | `flow_12_host_does_not_publish_presence_or_typing` | landed (`dcadenas/nostrherd#20`) |
 | 13 Bot-initiated tell | `known_occupant_tell_posts_without_trigger_reply_to`, `occupant_tell_tag_routes_and_drops_scratch` | optional |
 | 14 Author watch | `host_watch_fire_opens_a_normal_turn_with_a_typed_section`, `watched_author_fires_once_per_cooldown_and_unwatched_author_does_not`, `host_wake_final_publishes_without_a_reply_or_mention` | issue 73 required |
 
 Live columns are issues 18–20. Occupant start/ask from the running host
-(`dcadenas/cooee#17`) uses the local relay; it is not the flow 2 live
+(`dcadenas/nostrherd#17`) uses the local relay; it is not the flow 2 live
 proof. Issue 18 is the live proof of flows 1–2: silence until a trigger,
 then a `[bot]:` body. Issue 19 is the live proof of flows 3–5 and 7–8.
 Issue 34 is the live E2E that the occupant only `kelpie reply --final`
@@ -134,17 +134,17 @@ title is `DM` MUST use the peer's kind-0 `display_name` or `name`
 
 ### Flows 1–2 (issue 18)
 
-Use throwaway envchain `cooee-proof` / `cooee-proof-peer`. Do not
+Use throwaway envchain `nostrherd-proof` / `nostrherd-proof-peer`. Do not
 print nsecs, pubkeys, or event ids. Wrap live Buzz calls with
 `env -u BUZZ_AUTH_TAG`. A first-call trigger has no inbound reply marker
 (thread replies are flow 7). Occupant answers with `kelpie reply --final`.
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is18
+PROOF=$HOME/tmp-nostrherd-proof-is18
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -154,22 +154,22 @@ kind = "opencode"
 EOF
 
 # Fresh channel and sqlite. Do not print the channel id.
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-  --name cooee-is18 --type stream --visibility open > "$PROOF/channel.json"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+  --name nostrherd-is18 --type stream --visibility open > "$PROOF/channel.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
   "$PROOF/channel.json" "$PROOF/channel.id"
 CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
-OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-cooee-proof/operator.pub")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-nostrherd-proof/operator.pub")
 
-# Host waiter is pane-less (D2 / issue 27). Do not start a Herdr agent named cooee.
+# Host waiter is pane-less (D2 / issue 27). Do not start a Herdr agent named nostrherd.
 rm -f "$PROOF/host.sqlite"
-envchain cooee-proof "$ROOT/target/debug/cooee" \
+envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 
 # Flow 1: ordinary channel text (no bot: prefix, no operator mention).
 # Expect: no session/turn for this channel, no body starting with [bot]:
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --content 'ordinary hello from the channel'
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM sessions WHERE channel_id='$CHANNEL';"
@@ -178,7 +178,7 @@ sqlite3 "$PROOF/host.sqlite" \
 
 # Flow 2: peer trigger, then occupant kelpie reply --final.
 # Expect: one open turn, host stamps [bot]:, ask resolved.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
@@ -210,17 +210,17 @@ EOF
 
 Same throwaway namespaces and `env -u BUZZ_AUTH_TAG` as flows 1–2. Two
 fresh channels. Do not print channel ids, pubkeys, or event ids. Host
-waiter is pane-less. If a leftover Ready alias named `cooee` blocks
+waiter is pane-less. If a leftover Ready alias named `nostrherd` blocks
 `waiter.register`, retire that incarnation. Occupant recover still uses
 `kelpie start --logical-id`. Queued-turn drain runs on the host refresh
 tick (every 30s).
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is19
+PROOF=$HOME/tmp-nostrherd-proof-is19
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -229,10 +229,10 @@ corpus = "$ROOT/corpus/example-bot"
 kind = "opencode"
 EOF
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-  --name cooee-is19-a --type stream --visibility open > "$PROOF/channel-a.json"
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-  --name cooee-is19-b --type stream --visibility open > "$PROOF/channel-b.json"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+  --name nostrherd-is19-a --type stream --visibility open > "$PROOF/channel-a.json"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+  --name nostrherd-is19-b --type stream --visibility open > "$PROOF/channel-b.json"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
   "$PROOF/channel-a.json" "$PROOF/channel-a.id"
@@ -241,18 +241,18 @@ d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("channel_id") 
   "$PROOF/channel-b.json" "$PROOF/channel-b.id"
 CHANNEL_A=$(tr -d '\n' < "$PROOF/channel-a.id")
 CHANNEL_B=$(tr -d '\n' < "$PROOF/channel-b.id")
-OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-cooee-proof/operator.pub")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-nostrherd-proof/operator.pub")
 
 rm -f "$PROOF/host.sqlite"
-envchain cooee-proof "$ROOT/target/debug/cooee" \
+envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 
 # Flow 3: trigger, then unprefixed follow-up (mention without bot:).
 # Expect: still one turn, no extra ask.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --content 'bot: hello' \
   > "$PROOF/a-trigger1.json"
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --content 'and the PR?'
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A';"
@@ -288,7 +288,7 @@ python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
   "$PROOF/a-trigger1.json" "$PROOF/a-trigger1.id"
 TRIGGER1=$(tr -d '\n' < "$PROOF/a-trigger1.id")
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --reply-to "$TRIGGER1" \
   --content 'bot: later'
 sqlite3 "$PROOF/host.sqlite" \
@@ -298,7 +298,7 @@ sqlite3 "$PROOF/host.sqlite" \
 
 # Flow 5: bot: on the other channel while A's second turn is still open.
 # Expect: two sessions, two names, A still open, B open (does not wait on A).
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL_B" --mention "$OPERATOR_PUB" --content 'bot: status'
 sqlite3 "$PROOF/host.sqlite" "SELECT count(*) FROM sessions;"
 sqlite3 "$PROOF/host.sqlite" "SELECT count(DISTINCT session_name) FROM sessions;"
@@ -318,13 +318,13 @@ EOF
 
 # Flow 7: parent message, then bot: --reply-to that event.
 # Expect: still one A session, open turn.reply_to_event_id equals the parent (0/1).
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --content 'parent for thread' > "$PROOF/a-parent.json"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
   "$PROOF/a-parent.json" "$PROOF/a-parent.id"
 PARENT=$(tr -d '\n' < "$PROOF/a-parent.id")
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --reply-to "$PARENT" \
   --content 'bot: in thread'
 sqlite3 "$PROOF/host.sqlite" \
@@ -343,9 +343,9 @@ EOF
 # Flow 8: two bot: triggers before a reply.
 # Expect: one open and one queued on A; after occupant final of the open turn, poll until
 # the queued turn becomes open (host resume tick is every 30s).
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --content 'bot: first'
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL_A" --mention "$OPERATOR_PUB" --content 'bot: second'
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL_A' ORDER BY t.sequence;"
@@ -380,10 +380,10 @@ resume tick then continues `--logical-id`.
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is20
+PROOF=$HOME/tmp-nostrherd-proof-is20
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -392,15 +392,15 @@ corpus = "$ROOT/corpus/example-bot"
 kind = "opencode"
 EOF
 
-OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-cooee-proof/operator.pub")
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz dms open \
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-nostrherd-proof/operator.pub")
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz dms open \
   --pubkey "$OPERATOR_PUB" > "$PROOF/dm.json"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("dm_id") or d.get("id") or "")' \
   "$PROOF/dm.json" "$PROOF/dm.id"
 for name in recover edit delete longwork posted; do
-  env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-    --name "cooee-is20-$name" --type stream --visibility open \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+    --name "nostrherd-is20-$name" --type stream --visibility open \
     > "$PROOF/${name}-channel.json"
   python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
@@ -413,11 +413,11 @@ DELETE=$(tr -d '\n' < "$PROOF/delete-channel.id")
 LONGWORK=$(tr -d '\n' < "$PROOF/longwork-channel.id")
 POSTED=$(tr -d '\n' < "$PROOF/posted-channel.id")
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz users presence \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz users presence \
   --pubkeys "$OPERATOR_PUB" > "$PROOF/presence-before.json"
 
 rm -f "$PROOF/host.sqlite"
-envchain cooee-proof "$ROOT/target/debug/cooee" \
+envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 
 occupant_pane() {
@@ -443,7 +443,7 @@ print(found[-1] if found else "")
 }
 
 bot_stamped() {
-  env -u BUZZ_AUTH_TAG envchain cooee-proof buzz messages get \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$1" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 print(sum(1 for it in items if str(it.get("content","")).startswith("[bot]:")))'
@@ -451,9 +451,9 @@ print(sum(1 for it in items if str(it.get("content","")).startswith("[bot]:")))'
 
 # Flow 6: DM trigger, then an unprefixed DM line that still mentions so the
 # host sees it. Expect: one session, one turn.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$DM" --mention "$OPERATOR_PUB" --content 'bot: ping'
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$DM" --mention "$OPERATOR_PUB" --content 'unprefixed dm line'
 sqlite3 "$PROOF/host.sqlite" "SELECT count(*) FROM sessions WHERE channel_id='$DM';"
 sqlite3 "$PROOF/host.sqlite" \
@@ -469,7 +469,7 @@ EOF
 
 # Flow 9: close the occupant pane with the ask still open, recover, wait
 # for resume. Expect: same logical id, new pane, still one ask; one [bot]:.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$RECOVER" --mention "$OPERATOR_PUB" --content 'bot: recover me'
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$RECOVER' AND t.state='open';")
@@ -498,7 +498,7 @@ bot_stamped "$RECOVER"
 
 # Flow 10 edit: wait until open, then edit the trigger to bot: latest.
 # Expect: cancelled then open; one [bot]: answering latest.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$EDIT" --mention "$OPERATOR_PUB" --content 'bot: hello' \
   > "$PROOF/edit-trigger.json"
 python3 -c 'import json,sys
@@ -506,7 +506,7 @@ d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or
   "$PROOF/edit-trigger.json" "$PROOF/edit-trigger.id"
 EDIT_EVENT=$(tr -d '\n' < "$PROOF/edit-trigger.id")
 sleep 2
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages edit \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages edit \
   --event "$EDIT_EVENT" --content 'bot: latest'
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' ORDER BY t.sequence;"
@@ -521,7 +521,7 @@ EOF
 bot_stamped "$EDIT"
 
 # Flow 10 delete before publish: no [bot]:.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$DELETE" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
   > "$PROOF/delete-trigger.json"
 python3 -c 'import json,sys
@@ -529,7 +529,7 @@ d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or
   "$PROOF/delete-trigger.json" "$PROOF/delete-trigger.id"
 DELETE_EVENT=$(tr -d '\n' < "$PROOF/delete-trigger.id")
 sleep 2
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages delete --event "$DELETE_EVENT"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages delete --event "$DELETE_EVENT"
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DELETE';"
 bot_stamped "$DELETE"
@@ -538,7 +538,7 @@ bot_stamped "$DELETE"
 # After publish the turn is no longer active, so mutation fetch does not
 # ingest that delete (D24). The witness is the stamped body still on the
 # channel, not sqlite seeing the delete event.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$POSTED" --mention "$OPERATOR_PUB" --content 'bot: stay up' \
   > "$PROOF/posted-trigger.json"
 python3 -c 'import json,sys
@@ -553,13 +553,13 @@ HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
 stay up from example-bot
 EOF
 POSTED_EVENT=$(tr -d '\n' < "$PROOF/posted-trigger.id")
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages delete --event "$POSTED_EVENT"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages delete --event "$POSTED_EVENT"
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$POSTED';"
 bot_stamped "$POSTED"
 
 # Flow 11: one ask while the occupant works; one stamped reply; no working ping.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$LONGWORK" --mention "$OPERATOR_PUB" --content 'bot: long job'
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$LONGWORK';"
@@ -578,7 +578,7 @@ bot_stamped "$LONGWORK"
 # Expect: presence-after equals presence-before. Typing is not published:
 # the host publishes only the SPEC outbound events (stamped replies,
 # progress posts, in-flight reactions) over its own connection (D43).
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz users presence \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz users presence \
   --pubkeys "$OPERATOR_PUB" > "$PROOF/presence-after.json"
 python3 -c 'import json,sys
 b=json.load(open(sys.argv[1])); a=json.load(open(sys.argv[2]))
@@ -589,7 +589,7 @@ raise SystemExit(0 if a==b else 1)' \
 ### Socket waiter (issue 27)
 
 Host waiter is pane-less. First `bot:` still yields one `[bot]:`. Occupant
-envelopes use `from=cooee`. The ask stays open until `inbox.ack`.
+envelopes use `from=nostrherd`. The ask stays open until `inbox.ack`.
 Killing the host before ACK leaves the obligation open. Do not print
 pubkeys or event ids. Live proof landed: no waiter pane, one stamped
 reply, obligation closed only after ACK, drop-host left it open, delete
@@ -597,10 +597,10 @@ cancelled the unposted turn.
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is27
+PROOF=$HOME/tmp-nostrherd-proof-is27
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -609,16 +609,16 @@ corpus = "$ROOT/corpus/example-bot"
 kind = "opencode"
 EOF
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-  --name cooee-is27 --type stream --visibility open > "$PROOF/channel.json"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+  --name nostrherd-is27 --type stream --visibility open > "$PROOF/channel.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
   "$PROOF/channel.json" "$PROOF/channel.id"
 CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
-OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-cooee-proof/operator.pub")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-nostrherd-proof/operator.pub")
 
 rm -f "$PROOF/host.sqlite"
-env -u HERDR_PANE_ID envchain cooee-proof "$ROOT/target/debug/cooee" \
+env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
 HOST_PID=$!
 
@@ -644,10 +644,10 @@ print(found[-1] if found else "")
 ' "$1"
 }
 
-# Expect: report lists waiter cooee with no observed pane.
+# Expect: report lists waiter nostrherd with no observed pane.
 kelpie --json report --live
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
@@ -664,7 +664,7 @@ sqlite3 "$PROOF/host.sqlite" \
 kelpie --json pending "$SNAME"
 
 # Drop-host: second trigger, kill host, occupant replies, pending stays open.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: drop-host'
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
   "SELECT t.ask_id FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL' AND t.state='open';")
@@ -677,7 +677,7 @@ after host drop
 EOF
 # Expect: kelpie pending "$SNAME" still lists the ask.
 kelpie --json pending "$SNAME"
-env -u HERDR_PANE_ID envchain cooee-proof "$ROOT/target/debug/cooee" \
+env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
 HOST_PID=$!
 for _ in $(seq 1 30); do
@@ -692,14 +692,14 @@ done
 kelpie --json pending "$SNAME"
 
 # Delete before publish: trigger, delete, unposted turn cancelled.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
   > "$PROOF/delete-trigger.json"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
   "$PROOF/delete-trigger.json" "$PROOF/delete-trigger.id"
 sleep 2
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages delete \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages delete \
   --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" > "$PROOF/delete.json"
 sleep 2
 sqlite3 "$PROOF/host.sqlite" \
@@ -714,7 +714,7 @@ Host publish on occupant `kelpie reply --final`. Do not invoke `botcli`.
 Do not wrap that reply with envchain. Add the peer as a channel member
 before the trigger so host `--mention` of that author is accepted. Do
 not print nsecs, pubkeys, or event ids. Host waiter is pane-less. If a
-leftover socket waiter named `cooee` blocks `waiter.register`,
+leftover socket waiter named `nostrherd` blocks `waiter.register`,
 `kelpie waiter-retire --logical-id` that waiter.
 
 Live proof landed: one `[bot]:` whose `e` tag is the trigger and whose
@@ -726,11 +726,11 @@ only sqlite. Wait for cancelled-then-open before answering an edit.
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is34
-KEYS=$HOME/tmp-cooee-proof
+PROOF=$HOME/tmp-nostrherd-proof-is34
+KEYS=$HOME/tmp-nostrherd-proof
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -744,25 +744,25 @@ PEER_PUB=$(tr -d ' \n' < "$KEYS/peer.pub")
 
 create_channel() {
   local name=$1 out=$2
-  env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
     --name "$name" --type stream --visibility open > "$PROOF/${out}.json"
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
     "$PROOF/${out}.json" "$PROOF/${out}.id"
   ch=$(tr -d '\n' < "$PROOF/${out}.id")
-  env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels add-member \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels add-member \
     --channel "$ch" --pubkey "$PEER_PUB" --role member >/dev/null
 }
 
-create_channel cooee-is34-first first
-create_channel cooee-is34-edit edit
-create_channel cooee-is34-delete delete
+create_channel nostrherd-is34-first first
+create_channel nostrherd-is34-edit edit
+create_channel nostrherd-is34-delete delete
 FIRST=$(tr -d '\n' < "$PROOF/first.id")
 EDIT=$(tr -d '\n' < "$PROOF/edit.id")
 DELETE=$(tr -d '\n' < "$PROOF/delete.id")
 
 rm -f "$PROOF/host.sqlite"
-env -u HERDR_PANE_ID envchain cooee-proof "$ROOT/target/debug/cooee" \
+env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
   >"$PROOF/host.log" 2>&1 &
 HOST_PID=$!
@@ -790,7 +790,7 @@ print(found[-1] if found else "")
 }
 
 bot_stamped() {
-  env -u BUZZ_AUTH_TAG envchain cooee-proof buzz messages get \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$1" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 print(sum(1 for it in items if str(it.get("content","")).startswith("[bot]:")))'
@@ -851,7 +851,7 @@ EOF
 
 check_posted() {
   local channel=$1 trigger_file=$2 peer_file=$3 needle=$4
-  env -u BUZZ_AUTH_TAG envchain cooee-proof buzz messages get \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$channel" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 trigger=open(sys.argv[1]).read().strip()
@@ -878,7 +878,7 @@ if not (e_ok and p_ok and body_ok):
 # First call: peer p-tags the operator with bot: hello.
 # Occupant answers with kelpie reply --final only (no envchain, no botcli).
 # Expect: one [bot]: body, e tag is the trigger, p tag is the peer (0/1).
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$FIRST" --mention "$OPERATOR_PUB" --content 'bot: hello' \
   > "$PROOF/first-trigger.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
@@ -902,7 +902,7 @@ sqlite3 "$PROOF/host.sqlite" \
 check_posted "$FIRST" "$PROOF/first-trigger.id" "$KEYS/peer.pub" 'hello from example-bot'
 
 # Unprefixed follow-up does not post.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$FIRST" --mention "$OPERATOR_PUB" --content 'and the PR?' \
   >/dev/null
 sleep 3
@@ -911,7 +911,7 @@ sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$FIRST';"
 
 # Edit of an unposted trigger: one [bot]: for the latest text.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$EDIT" --mention "$OPERATOR_PUB" --content 'bot: hello' \
   > "$PROOF/edit-trigger.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
@@ -920,7 +920,7 @@ open(sys.argv[2],"w").write(d.get("event_id") or d.get("id") or "")' \
 EDIT_EVENT=$(tr -d '\n' < "$PROOF/edit-trigger.id")
 wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='open';" 1
 sleep 2
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages edit \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages edit \
   --event "$EDIT_EVENT" --content 'bot: latest' >/dev/null
 wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='cancelled';" 1
 wait_sql "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$EDIT' AND t.state='open';" 1
@@ -932,7 +932,7 @@ for _ in $(seq 1 40); do
   [ "$(bot_stamped "$EDIT")" = 1 ] && break
   sleep 0.5
 done
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz messages get \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
   --channel "$EDIT" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
@@ -942,7 +942,7 @@ if len(bots)!=1 or "latest from example-bot" not in str(bots[0].get("content",""
 '
 
 # Delete before publish: no [bot]:. Late final does not post.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$DELETE" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
   > "$PROOF/delete-trigger.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
@@ -953,7 +953,7 @@ ASK_ID=$(wait_open_ask "$DELETE")
 SNAME=$(sqlite3 "$PROOF/host.sqlite" "SELECT session_name FROM sessions WHERE channel_id='$DELETE';")
 OCCUPANT_PANE=$(wait_pane "$SNAME")
 sleep 2
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages delete \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages delete \
   --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" >/dev/null
 wait_sql "SELECT t.state FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$DELETE';" cancelled
 HERDR_PANE_ID="$OCCUPANT_PANE" env -u BUZZ_PRIVATE_KEY -u BUZZ_RELAY_URL \
@@ -973,10 +973,10 @@ second ask's Context. Do not print nsecs, pubkeys, or event ids.
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is40
+PROOF=$HOME/tmp-nostrherd-proof-is40
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -985,26 +985,26 @@ corpus = "$ROOT/corpus/example-bot"
 kind = "opencode"
 EOF
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-  --name cooee-is40 --type stream --visibility open > "$PROOF/channel.json"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+  --name nostrherd-is40 --type stream --visibility open > "$PROOF/channel.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
   "$PROOF/channel.json" "$PROOF/channel.id"
 CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
-OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-cooee-proof/operator.pub")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-nostrherd-proof/operator.pub")
 
 rm -f "$PROOF/host.sqlite"
-env -u HERDR_PANE_ID envchain cooee-proof "$ROOT/target/debug/cooee" \
+env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" &
 HOST_PID=$!
 
 # First trigger, occupant replies, then an unprefixed line, then a second trigger.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
 # Wait for open turn; kelpie reply --final; then:
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'and the PR?'
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: later'
 # Read the occupant pane. Expect the second ask request "later" and a
 # Context section containing "and the PR?".
@@ -1021,12 +1021,12 @@ Unit proof: `inbound_tokens_route_to_the_matching_bot`,
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is43
+PROOF=$HOME/tmp-nostrherd-proof-is43
 mkdir -p "$PROOF/bot" "$PROOF/pr"
 cp -a "$ROOT/corpus/example-bot/." "$PROOF/bot/"
 cp -a "$ROOT/corpus/example-bot/." "$PROOF/pr/"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -1039,23 +1039,23 @@ corpus = "$PROOF/pr"
 kind = "opencode"
 EOF
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-  --name cooee-is43 --type stream --visibility open > "$PROOF/channel.json"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+  --name nostrherd-is43 --type stream --visibility open > "$PROOF/channel.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
   "$PROOF/channel.json" "$PROOF/channel.id"
 CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
-OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-cooee-proof/operator.pub")
+OPERATOR_PUB=$(tr -d ' \n' < "$HOME/tmp-nostrherd-proof/operator.pub")
 
 rm -f "$PROOF/host.sqlite"
-env -u HERDR_PANE_ID envchain cooee-proof "$ROOT/target/debug/cooee" \
+env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
   >"$PROOF/host.log" 2>&1 &
 HOST_PID=$!
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'pr: hello'
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT bot_id, session_name FROM sessions WHERE channel_id='$CHANNEL' ORDER BY bot_id;"
@@ -1076,13 +1076,13 @@ NOT open a turn. Unit proof: `stamp_outbound_prefixes_once`,
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is48
-KEYS=$HOME/tmp-cooee-proof
+PROOF=$HOME/tmp-nostrherd-proof-is48
+KEYS=$HOME/tmp-nostrherd-proof
 mkdir -p "$PROOF/bot" "$PROOF/pr"
 cp -a "$ROOT/corpus/example-bot/." "$PROOF/bot/"
 cp -a "$ROOT/corpus/example-bot/." "$PROOF/pr/"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -1097,24 +1097,24 @@ EOF
 
 OPERATOR_PUB=$(tr -d ' \n' < "$KEYS/operator.pub")
 PEER_PUB=$(tr -d ' \n' < "$KEYS/peer.pub")
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-  --name cooee-is48 --type stream --visibility open > "$PROOF/channel.json"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+  --name nostrherd-is48 --type stream --visibility open > "$PROOF/channel.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
   "$PROOF/channel.json" "$PROOF/channel.id"
 CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels add-member \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels add-member \
   --channel "$CHANNEL" --pubkey "$PEER_PUB" --role member >/dev/null
 
 rm -f "$PROOF/host.sqlite"
-env -u HERDR_PANE_ID envchain cooee-proof "$ROOT/target/debug/cooee" \
+env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
   >"$PROOF/host.log" 2>&1 &
 HOST_PID=$!
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'pr: hello'
 
 wait_sql() {
@@ -1183,7 +1183,7 @@ done < <(sqlite3 "$PROOF/host.sqlite" \
    WHERE s.channel_id='$CHANNEL' AND t.state='open' ORDER BY s.bot_id;")
 
 stamp_counts() {
-  env -u BUZZ_AUTH_TAG envchain cooee-proof buzz messages get \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$CHANNEL" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 bot=sum(1 for it in items if str(it.get("content","")).startswith("[bot]:"))
@@ -1206,17 +1206,17 @@ wait "$HOST_PID" 2>/dev/null || true
 Expect two session rows, two turns, then one `[bot]:` body and one
 `[pr]:` body. The published stamps MUST NOT open a third turn.
 Occupants still MUST NOT get the nsec. The host waiter name is
-`cooee`; a standing personal waiter blocks this recipe until that
+`nostrherd`; a standing personal waiter blocks this recipe until that
 process is not holding the name.
 
 Wrap the host with envchain. Do not pass `--envchain` (D29):
 
 ```bash
-envchain cooee-proof cooee --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
+envchain nostrherd-proof nostrherd --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 ```
 
-Throwaway namespaces only: `cooee-proof` and
-`cooee-proof-peer`. Never `nostr-personal` or `buzz-acp`.
+Throwaway namespaces only: `nostrherd-proof` and
+`nostrherd-proof-peer`. Never `nostr-personal` or `buzz-acp`.
 
 ### Progress relay (issue 60)
 
@@ -1224,7 +1224,7 @@ The host relays occupant `kelpie reply <ask-id> --progress` bodies as one
 stamped kind 9 per ask, created after the 20 s hold and edited in place
 (kind 40003) under the D42 interval and cap; a cancel Buzz-deletes it
 (kind 9005). Unit proof: `crates/domain/src/progress.rs`,
-`crates/cooee/src/progress.rs`, `progress_acks_without_publish`,
+`crates/nostrherd/src/progress.rs`, `progress_acks_without_publish`,
 `final_after_progress_discards_the_pending_body`,
 `cancelled_progress_post_deleted`,
 `edit_replacement_deletes_the_old_progress_post`,
@@ -1235,18 +1235,18 @@ Same throwaway namespaces and `env -u BUZZ_AUTH_TAG` as the issue-34
 recipe, and its `create_channel`, `occupant_pane`, `wait_sql`,
 `wait_open_ask`, and `wait_pane` helpers. Add the peer as a channel member before the trigger.
 Do not print nsecs, pubkeys, or event ids. The host waiter name is
-`cooee`; a standing personal host blocks this recipe until that
+`nostrherd`; a standing personal host blocks this recipe until that
 process is not holding the name. Progress bodies go through `--stdin`,
 never a shell argument. The flush runs on the 1 s refresh tick, so read
 the channel a few seconds after each boundary.
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is60
-KEYS=$HOME/tmp-cooee-proof
+PROOF=$HOME/tmp-nostrherd-proof-is60
+KEYS=$HOME/tmp-nostrherd-proof
 mkdir -p "$PROOF"
 ./tools/local-relay up
-cargo build -p cooee
+cargo build -p nostrherd
 
 cat > "$PROOF/bots.toml" <<EOF
 [[bots]]
@@ -1257,13 +1257,13 @@ EOF
 
 OPERATOR_PUB=$(tr -d ' \n' < "$KEYS/operator.pub")
 PEER_PUB=$(tr -d ' \n' < "$KEYS/peer.pub")
-create_channel cooee-is60-progress progress
-create_channel cooee-is60-delete delete
+create_channel nostrherd-is60-progress progress
+create_channel nostrherd-is60-delete delete
 PROGRESS=$(tr -d '\n' < "$PROOF/progress.id")
 DELETE=$(tr -d '\n' < "$PROOF/delete.id")
 
 rm -f "$PROOF/host.sqlite"
-env -u HERDR_PANE_ID envchain cooee-proof "$ROOT/target/debug/cooee" \
+env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
   >"$PROOF/host.log" 2>&1 &
 HOST_PID=$!
@@ -1271,7 +1271,7 @@ HOST_PID=$!
 # Stamped kind-9 bodies on a channel: prints "<event id prefix length> <content>"
 # per post so the reader can compare ids without printing them whole.
 stamped_posts() {
-  env -u BUZZ_AUTH_TAG envchain cooee-proof buzz messages get \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$1" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
@@ -1290,7 +1290,7 @@ EOF
 
 # 1. Trigger, then a progress body inside the hold. Expect: a
 #    progress_posts row with pending_body and no post yet.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$PROGRESS" --mention "$OPERATOR_PUB" --content 'bot: long job' \
   > "$PROOF/progress-trigger.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
@@ -1312,7 +1312,7 @@ stamped_posts "$PROGRESS"
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT post_event_id IS NOT NULL, post_event_id = prepared_event_id, edit_count, pending_body IS NULL
    FROM progress_posts WHERE ask_id='$ASK_ID';"
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz messages get \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
   --channel "$PROGRESS" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 trigger=open(sys.argv[1]).read().strip()
@@ -1330,7 +1330,7 @@ reply_progress "$OCCUPANT_PANE" "$ASK_ID" 'drafting'
 reply_progress "$OCCUPANT_PANE" "$ASK_ID" 'polishing the answer'
 sleep 32
 stamped_posts "$PROGRESS"
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz messages get \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
   --channel "$PROGRESS" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 post=open(sys.argv[1]).read().strip()
@@ -1352,7 +1352,7 @@ stamped_posts "$PROGRESS"
 
 # 5. Delete a trigger whose progress post exists: the post is removed
 #    (kind 9005) and the turn is cancelled.
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages send \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$DELETE" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
   > "$PROOF/delete-trigger.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
@@ -1364,7 +1364,7 @@ OCCUPANT_PANE=$(wait_pane "$SNAME")
 reply_progress "$OCCUPANT_PANE" "$ASK_ID" 'about to be deleted'
 sleep 24
 stamped_posts "$DELETE"
-env -u BUZZ_AUTH_TAG envchain cooee-proof-peer buzz messages delete \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages delete \
   --event "$(tr -d '\n' < "$PROOF/delete-trigger.id")" >/dev/null
 wait_sql "SELECT t.state FROM turns t WHERE t.ask_id='$ASK_ID';" cancelled
 sleep 2
@@ -1397,12 +1397,12 @@ channel setup runs through it.
 
 ```bash
 ROOT=$(pwd)
-PROOF=$HOME/tmp-cooee-proof-is54
+PROOF=$HOME/tmp-nostrherd-proof-is54
 mkdir -p "$PROOF"
 ./tools/local-relay up
 
-env -u BUZZ_AUTH_TAG envchain cooee-proof buzz channels create \
-  --name cooee-is54 --type stream --visibility open > "$PROOF/channel.json"
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels create \
+  --name nostrherd-is54 --type stream --visibility open > "$PROOF/channel.json"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));
 open(sys.argv[2],"w").write(d.get("channel_id") or d.get("id") or "")' \
   "$PROOF/channel.json" "$PROOF/channel.id"
@@ -1411,7 +1411,7 @@ export BOTSERVER_LIVE_CHANNEL=$(tr -d '\n' < "$PROOF/channel.id")
 # Expect: "live publish proof complete" — the test asserts each kind's
 # shape on the relay and that the redelivery of the same prepared event
 # leaves exactly one event with that id.
-env -u BUZZ_AUTH_TAG envchain cooee-proof \
+env -u BUZZ_AUTH_TAG envchain nostrherd-proof \
   cargo test --test live_publish -- --ignored --nocapture
 
 # Full host smoke: the actor path publishes the stamped reply over the
@@ -1425,7 +1425,7 @@ corpus = "$ROOT/corpus/example-bot"
 kind = "opencode"
 EOF
 
-env -u HERDR_PANE_ID envchain cooee-proof "$ROOT/target/debug/cooee" \
+env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite" \
   >"$PROOF/host.log" 2>&1 &
 HOST_PID=$!
@@ -1456,7 +1456,7 @@ Use the issue-54 channel setup above, then run:
 
 ```bash
 BOTSERVER_LIVE_CHANNEL="$(tr -d '\n' < "$PROOF/channel.id")" \
-  env -u BUZZ_AUTH_TAG envchain cooee-proof \
+  env -u BUZZ_AUTH_TAG envchain nostrherd-proof \
   cargo test --test live_publish \
     live_refresh_replaces_channel_and_active_turn_filters -- --ignored --nocapture
 ```

@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
-use cooee_domain::{BotId, EventId};
 use nostr_sdk::prelude::FinalizeEvent;
+use nostrherd_domain::{BotId, EventId};
 use rusqlite::Connection;
 
 use crate::outbox::{OutboundAttempt, OutboundPublisher, PreparedOutbound, PublishError};

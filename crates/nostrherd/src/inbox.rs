@@ -365,7 +365,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        std::env::temp_dir().join(format!("cooee-inbox-{nanos}.sock"))
+        std::env::temp_dir().join(format!("nostrherd-inbox-{nanos}.sock"))
     }
 
     fn write_line(stream: &mut std::os::unix::net::UnixStream, value: &serde_json::Value) {

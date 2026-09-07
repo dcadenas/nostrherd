@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use cooee_domain::restraint::POST_CEILING_WINDOW_SECS;
-use cooee_domain::{BotId, EventId, TurnTransition};
+use nostrherd_domain::restraint::POST_CEILING_WINDOW_SECS;
+use nostrherd_domain::{BotId, EventId, TurnTransition};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 

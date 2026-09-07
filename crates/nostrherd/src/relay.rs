@@ -3,13 +3,13 @@
 use std::fmt;
 use std::time::Duration;
 
-use cooee_domain::{
-    place_display as usable_place_display, BotId, EventId, TriggerMatch, INBOUND_TRIGGER,
-};
 use futures::Stream;
 use nostr_sdk::prelude::{
     Client, ClientNotification, Event, Filter, Kind, PublicKey, SingleLetterTag, SubscriptionId,
     Timestamp,
+};
+use nostrherd_domain::{
+    place_display as usable_place_display, BotId, EventId, TriggerMatch, INBOUND_TRIGGER,
 };
 
 use crate::watch::WatchFire;
@@ -478,17 +478,20 @@ impl RelaySubscriber {
         watched_author_pubkeys: &[String],
         since: Timestamp,
     ) -> Result<(), RelaySubscribeError> {
-        self.subscribe_filter("cooee-messages", message_filter(operator_pubkey, since))
+        self.subscribe_filter("nostrherd-messages", message_filter(operator_pubkey, since))
             .await?;
         if let Some(filter) = operator_authored_filter(operator_pubkey, since) {
-            self.subscribe_filter("cooee-authored", filter).await?;
+            self.subscribe_filter("nostrherd-authored", filter).await?;
         }
-        self.update_filter("cooee-channels", channel_filter(channel_ids, since))
-            .await?;
-        self.update_filter("cooee-mutations", mutation_filter(active_event_ids, since))
+        self.update_filter("nostrherd-channels", channel_filter(channel_ids, since))
             .await?;
         self.update_filter(
-            "cooee-watched-authors",
+            "nostrherd-mutations",
+            mutation_filter(active_event_ids, since),
+        )
+        .await?;
+        self.update_filter(
+            "nostrherd-watched-authors",
             author_filter(watched_author_pubkeys, since),
         )
         .await?;
@@ -841,7 +844,7 @@ fn parse_place_metadata(tags: &[Vec<String>]) -> PlaceMetadata {
 }
 
 fn wants_peer_display(channel_name: &str) -> bool {
-    channel_name.trim().is_empty() || cooee_domain::is_generic_dm_title(channel_name)
+    channel_name.trim().is_empty() || nostrherd_domain::is_generic_dm_title(channel_name)
 }
 
 fn other_participant<'a>(operator_pubkey: &str, participants: &'a [String]) -> Option<&'a str> {
@@ -878,8 +881,8 @@ fn parse_profile_display(content: &str) -> Option<String> {
 mod tests {
     use std::collections::HashSet;
 
-    use cooee_domain::BotId;
     use nostr_sdk::prelude::{EventBuilder, FinalizeEvent, Keys, LocalRelay, Tag};
+    use nostrherd_domain::BotId;
 
     use super::*;
     use crate::{NewTurn, SessionRecord, TurnRecord, TurnState};
@@ -1731,15 +1734,15 @@ mod tests {
                 .expect("registered filter")
         };
         assert_eq!(
-            filter_json("cooee-channels")["#h"],
+            filter_json("nostrherd-channels")["#h"],
             serde_json::json!(["channel-b"])
         );
         assert_eq!(
-            filter_json("cooee-mutations")["#e"],
+            filter_json("nostrherd-mutations")["#e"],
             serde_json::json!([second.as_str()])
         );
         assert_eq!(
-            filter_json("cooee-watched-authors")["authors"],
+            filter_json("nostrherd-watched-authors")["authors"],
             serde_json::json!([second_author])
         );
 

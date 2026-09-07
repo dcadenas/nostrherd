@@ -214,7 +214,7 @@ pub fn is_generic_dm_title(display: &str) -> bool {
 /// # Examples
 ///
 /// ```
-/// use cooee_domain::place_display;
+/// use nostrherd_domain::place_display;
 ///
 /// assert_eq!(place_display("#eng", None), "#eng");
 /// assert_eq!(place_display("DM", Some("Sebastian")), "Sebastian");
@@ -484,7 +484,7 @@ impl TurnTransition {
 /// # Examples
 ///
 /// ```
-/// use cooee_domain::parse_occupant_tell;
+/// use nostrherd_domain::parse_occupant_tell;
 ///
 /// assert_eq!(parse_occupant_tell("  queue is clear  "), Some("queue is clear".to_owned()));
 /// assert_eq!(parse_occupant_tell("   "), None);
@@ -889,7 +889,7 @@ mod tests {
 
     #[test]
     fn occupant_tell_publishes_any_text_including_angle_brackets() {
-        let raw = "the <cooee to=\"eng\"> tag, explained";
+        let raw = "the <nostrherd to=\"eng\"> tag, explained";
         assert_eq!(parse_occupant_tell(raw), Some(raw.to_owned()));
     }
 

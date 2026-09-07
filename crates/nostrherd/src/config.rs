@@ -5,8 +5,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use cooee_domain::restraint::{HostRestraint, QuietHours};
-use cooee_domain::{Bot, BotId};
+use nostrherd_domain::restraint::{HostRestraint, QuietHours};
+use nostrherd_domain::{Bot, BotId};
 use serde::Deserialize;
 
 /// Configured bots available to the host process.
@@ -113,7 +113,7 @@ impl BotRegistry {
                 };
             let ceiling = record
                 .post_ceiling
-                .unwrap_or(cooee_domain::restraint::DEFAULT_POST_CEILING_24H);
+                .unwrap_or(nostrherd_domain::restraint::DEFAULT_POST_CEILING_24H);
             let restraint =
                 HostRestraint::new(ceiling, quiet_hours).ok_or(ConfigError::InvalidCeiling {
                     id: id.clone(),
@@ -162,8 +162,8 @@ mod tests {
         assert_eq!(bot.id().as_str(), "bot");
         assert_eq!(bot.corpus_path(), Path::new("/corpus/bot"));
         assert_eq!(bot.occupant_kind(), "opencode");
-        assert_eq!(bot.inbound_trigger(), cooee_domain::INBOUND_TRIGGER);
-        assert_eq!(bot.outbound_prefix(), cooee_domain::OUTBOUND_PREFIX);
+        assert_eq!(bot.inbound_trigger(), nostrherd_domain::INBOUND_TRIGGER);
+        assert_eq!(bot.outbound_prefix(), nostrherd_domain::OUTBOUND_PREFIX);
     }
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
         let pr = &registry.bots()[1];
         assert_eq!(
             pr.restraint().ceiling_24h(),
-            cooee_domain::restraint::DEFAULT_POST_CEILING_24H
+            nostrherd_domain::restraint::DEFAULT_POST_CEILING_24H
         );
         assert!(pr.restraint().quiet_hours().is_none());
     }

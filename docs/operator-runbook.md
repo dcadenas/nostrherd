@@ -1,8 +1,8 @@
 # Operator runbook: personal envchain namespace
 
-Personal `cooee` uses envchain namespace `cooee`.
-That is not the throwaway live-test namespaces `cooee-proof` and
-`cooee-proof-peer` (D23 live-test relay, `skills/local-relay`).
+Personal `nostrherd` uses envchain namespace `nostrherd`.
+That is not the throwaway live-test namespaces `nostrherd-proof` and
+`nostrherd-proof-peer` (D23 live-test relay, `skills/local-relay`).
 
 `envchain` injects `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` into the
 wrapped process (D29, D30). The binary only reads those names from
@@ -14,21 +14,21 @@ Do not point `BUZZ_RELAY_URL` at a production relay.
 
 ## Set the namespace
 
-`--set` prompts. It does not print values. `envchain --list cooee`
+`--set` prompts. It does not print values. `envchain --list nostrherd`
 shows **names only**.
 
 ```bash
-envchain --set cooee BUZZ_PRIVATE_KEY
-envchain --set cooee BUZZ_RELAY_URL
+envchain --set nostrherd BUZZ_PRIVATE_KEY
+envchain --set nostrherd BUZZ_RELAY_URL
 ```
 
 `BUZZ_RELAY_URL` MUST be a non-production relay you control (local
 throwaway, or another non-prod URL). Live proofs in this repo use
-`./tools/local-relay` and the proof namespaces, not `cooee`.
+`./tools/local-relay` and the proof namespaces, not `nostrherd`.
 
 ## Wrap the host
 
-`cooee` registers a pane-less Kelpie waiter named `cooee`
+`nostrherd` registers a pane-less Kelpie waiter named `nostrherd`
 (`waiter.register`, then a reconnecting `inbox.claim`). It does not
 need `HERDR_PANE_ID`. Occupant panes are still Herdr sessions.
 
@@ -37,9 +37,9 @@ process is needed on the publish path. `buzz` stays the peer and
 verification client in live recipes.
 
 ```bash
-envchain cooee cooee \
+envchain nostrherd nostrherd \
   --config /path/to/bots.toml \
-  --database /path/to/cooee.sqlite
+  --database /path/to/nostrherd.sqlite
 ```
 
 `bots.toml`:
@@ -61,7 +61,7 @@ MUST NOT wrap a publish binary and MUST NOT receive the nsec.
 
 ## Do not
 
-- Reuse throwaway namespaces `cooee-proof` / `cooee-proof-peer`
+- Reuse throwaway namespaces `nostrherd-proof` / `nostrherd-proof-peer`
   for personal keys
 - Reuse other personal or sidecar envchain namespaces
 - Pass `--envchain`

@@ -1,5 +1,5 @@
 [package]
-name = "cooee-domain"
+name = "nostrherd-domain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

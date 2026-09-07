@@ -10,15 +10,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Timelike;
-use cooee_domain::buzz::{self, BuzzEvent};
-use cooee_domain::restraint::{
-    evaluate_restraint, HostRestraint, RestraintVerdict, POST_CEILING_WINDOW_SECS,
-};
-use cooee_domain::{
-    outbound_prefix_for, parse_occupant_tell, stamp_outbound, BotId, EventId, TurnState,
-};
 use nostr_sdk::prelude::{
     Client, Event, EventBuilder, Filter, FinalizeEvent, Keys, Kind, SingleLetterTag, Tag, Timestamp,
+};
+use nostrherd_domain::buzz::{self, BuzzEvent};
+use nostrherd_domain::restraint::{
+    evaluate_restraint, HostRestraint, RestraintVerdict, POST_CEILING_WINDOW_SECS,
+};
+use nostrherd_domain::{
+    outbound_prefix_for, parse_occupant_tell, stamp_outbound, BotId, EventId, TurnState,
 };
 
 use crate::inbox::InboxDelivery;
@@ -1447,8 +1447,8 @@ mod tests {
     use crate::test_support::{
         event_id, fake_event_id, open_repo, open_repo_for, FakePublisher, CHANNEL,
     };
-    use cooee_domain::restraint::QuietHours;
-    use cooee_domain::BotId;
+    use nostrherd_domain::restraint::QuietHours;
+    use nostrherd_domain::BotId;
 
     struct NonRetryPublisher;
 

@@ -1,4 +1,4 @@
-# cooee
+# nostrherd
 
 Run coding agents as bots on Nostr. You address one in a channel, it
 answers there, and it can also speak on its own — later, on a schedule,
@@ -13,7 +13,7 @@ The host watches the relay, wakes an agent when someone addresses it,
 and publishes what that agent writes. The agent never touches the relay
 and never holds a key.
 
-**Bots post as you.** cooee signs with your own Nostr key, so a bot
+**Bots post as you.** nostrherd signs with your own Nostr key, so a bot
 is your identity speaking, not a separate account. Everything it says is
 attributable to you. Treat the key and the relay you point it at
 accordingly.
@@ -22,12 +22,12 @@ accordingly.
 
 Alpha, and built for its author's own use. The database schema, the
 channel conventions, and the corpus contract all still change. Herdr and
-Kelpie are alpha too, and cooee pins neither: build all three from
+Kelpie are alpha too, and nostrherd pins neither: build all three from
 current sources, and rebuild them together when you upgrade any of them.
 
 ## How it works
 
-- **The host** (`cooee`) is one process. It subscribes to your
+- **The host** (`nostrherd`) is one process. It subscribes to your
   channels, and it is the only thing that publishes.
 - **A bot** is an id plus a corpus repository. The id is the address:
   `bot:` reaches the bot with id `bot`, and its posts are stamped
@@ -84,20 +84,20 @@ never touches anything else in the tree.
 Then put the key and relay somewhere the process can read them:
 
 ```bash
-envchain --set cooee BUZZ_PRIVATE_KEY
-envchain --set cooee BUZZ_RELAY_URL
+envchain --set nostrherd BUZZ_PRIVATE_KEY
+envchain --set nostrherd BUZZ_RELAY_URL
 ```
 
-`cooee` reads only those two names from its environment. It has no
+`nostrherd` reads only those two names from its environment. It has no
 flag that takes a key, and it never writes one to the database, the
 logs, or a process title.
 
 ## Run
 
 ```bash
-envchain cooee ./target/release/cooee \
+envchain nostrherd ./target/release/nostrherd \
   --config bots.toml \
-  --database cooee.sqlite
+  --database nostrherd.sqlite
 ```
 
 `--check` loads the config and database and exits, without needing the
@@ -140,7 +140,7 @@ Five primitives, composed:
   host stamps and publishes it.
 - **Progress**: `kelpie reply <ask-id> --progress` with the full current
   status. The host keeps one post and edits it in place.
-- **Speak unprompted**: `kelpie tell cooee`. The host publishes it
+- **Speak unprompted**: `kelpie tell nostrherd`. The host publishes it
   stamped, answering nothing.
 - **Later, and again**: the same tell with `--due-in` for once, or
   `--every` for a repeat. Kelpie holds the delivery and the host
