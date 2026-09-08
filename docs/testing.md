@@ -11,6 +11,13 @@ cargo test --all-targets
 `crates/nostrherd/src/spec_flows.rs` is in-process acceptance of SPEC
 flows 1–12. It is not a live relay proof.
 
+Issue 80 uses unit proof: `non_uuid_channel_starts_an_occupant_and_publishes_its_answer`
+covers ingest, session binding, occupant start/ask, and the stamped final
+through the fake publisher. Domain tests pin UUID-compatible names and
+FNV-1a suffixes, exercise display collisions and suffix exhaustion, and
+assert Herdr's grammar and 32-character cap on every candidate. No live
+host or relay is needed for this proof.
+
 `queued_turn_recovers_an_unavailable_recorded_occupant_and_drains` proves a
 queued ask that finds its recorded occupant unavailable continues the same
 logical id, cancels the failed ask obligation, retires the stale Ready

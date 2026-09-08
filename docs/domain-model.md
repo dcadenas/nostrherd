@@ -17,7 +17,7 @@ One actor in the host process maps 1:1 to one `Bot`.
 
 ### Session
 
-A live conversation lane for one bot in one Buzz **channel UUID**
+A live conversation lane for one bot in one opaque **channel ID**
 (including DMs). Name is derived, e.g. `bot-foobar`. Threads are not
 sessions (D10).
 Holds: place id, occupant Kelpie logical id when bound, renew id when
@@ -58,7 +58,7 @@ timer ledger (D44, D45).
 ## Values
 
 - `EventId`, `Pubkey` — relay coordinates, opaque hex.
-- `Place` — `Channel(uuid)` | `Dm(pubkey)` | `GroupDm(id)` (shape TBD).
+- `Place` — `Channel(id)` | `Dm(pubkey)` | `GroupDm(id)` (shape TBD).
 - `TriggerMatch` — first token `{bot-id}:` after an optional mention,
   plus either an operator `p`-tag or operator authorship (D8, D9, D34).
   A non-prefix reply in an open thread is not a match.

@@ -369,6 +369,60 @@ fn flow_02_first_call_starts_bot_foobar_and_asks() {
 }
 
 #[test]
+fn non_uuid_channel_starts_an_occupant_and_publishes_its_answer() {
+    let channel = "opaque/group:with spaces";
+    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let message = trigger_event(channel, "@daniel bot: hello", None);
+    let action = harness.ingest(&message).expect("trigger");
+    let mut actor = harness.actor();
+    let waiter = harness.kelpie.register_waiter().expect("waiter");
+    assert_eq!(
+        actor
+            .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
+            .expect("first call"),
+        TriggerOutcome::Asked
+    );
+    let session = actor
+        .repository
+        .session(actor.bot().id(), channel)
+        .expect("session query")
+        .expect("session");
+    assert_eq!(session.session_name, "bot-foobar");
+    assert_eq!(
+        session.occupant_logical_id.as_deref(),
+        Some("occupant-agent")
+    );
+    assert_eq!(
+        harness.panes.calls.lock().expect("panes")[0].0,
+        "bot-foobar"
+    );
+    assert_eq!(ask_requests(&harness), ["hello"]);
+    assert_eq!(turns(&actor, channel)[0].state, TurnState::Open);
+
+    let publisher = FlowPublisher {
+        prepared: Mutex::new(Vec::new()),
+    };
+    actor
+        .handle_occupant_delivery(
+            &harness.kelpie,
+            &waiter,
+            &publisher,
+            &occupant_reply("ask-1", "final", "hello from the occupant"),
+        )
+        .expect("published final");
+    let prepared = publisher.prepared.lock().expect("prepared");
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0].channel_id, channel);
+    assert_eq!(prepared[0].body, "[bot]: hello from the occupant");
+    assert_eq!(
+        prepared[0].reply_to_event_id.as_ref().map(EventId::as_str),
+        Some(message.id.to_hex().as_str())
+    );
+    assert_eq!(prepared[0].mention, message.pubkey.to_hex());
+    assert_eq!(turns(&actor, channel)[0].state, TurnState::Posted);
+}
+
+#[test]
 fn flow_03_follow_up_without_prefix_does_not_poke() {
     let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
     let first = trigger_event(FOOBAR, "@daniel bot: hello", None);

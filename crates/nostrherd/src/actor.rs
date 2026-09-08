@@ -2871,7 +2871,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_ingest_declines_a_non_uuid_channel() {
+    fn persist_ingest_queues_a_non_uuid_channel() {
         let mut repository =
             SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
                 .expect("repository");
@@ -2894,22 +2894,29 @@ mod tests {
 
         assert_eq!(
             persist_ingest(&bot, &mut repository, &action, "").expect("persist"),
-            TriggerOutcome::Declined
+            TriggerOutcome::Queued
         );
-        assert!(repository
+        let turns = repository
             .turns_for_session(bot.id(), "not-a-uuid")
-            .expect("turns")
-            .is_empty());
+            .expect("turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state, TurnState::Queued);
         assert!(repository.event_processed(&event).expect("processed"));
     }
 
     #[test]
     fn handle_ingest_acks_an_unnameable_channel_without_kelpie() {
         let (mut actor, kelpie, runner, panes) = actor([adopt()]);
+        actor.bot = Bot::new(
+            BotId::new(&"a".repeat(32)).expect("id"),
+            actor.bot.corpus_path().to_owned(),
+            "opencode",
+        )
+        .expect("bot");
         let waiter = kelpie.register_waiter().expect("waiter");
         let event = event_id('a');
         let action = crate::relay::IngestAction::TurnCandidate {
-            bot_id: nostrherd_domain::BotId::new("bot").expect("id"),
+            bot_id: actor.bot.id().clone(),
             event_id: event.clone(),
             channel_id: "not-a-uuid".to_owned(),
             reply_to_event_id: None,
