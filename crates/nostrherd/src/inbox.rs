@@ -285,7 +285,7 @@ pub fn spawn_inbox(socket: PathBuf, waiter_id: String) -> HostInbox {
             }
             if last_notice.is_none_or(|last| last.elapsed() >= RECONNECT_NOTICE_INTERVAL) {
                 eprintln!(
-                    "nostrherd: inbox receive/ack loop failed at {}: {}; reconnecting every second (notices limited to every 30 seconds)",
+                    "nostrherd: inbox failed at {}: {}; reconnecting every second (notices limited to every 30 seconds)",
                     socket.to_string_lossy().escape_debug(),
                     inbox_error_summary(&error)
                 );

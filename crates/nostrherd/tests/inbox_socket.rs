@@ -190,7 +190,7 @@ fn reconnect_failures_are_visible_without_retry_spam() {
         .unwrap();
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stderr.matches("inbox receive/ack loop failed").count(), 1);
+    assert_eq!(stderr.matches("inbox failed").count(), 1);
     assert!(stderr.contains("I/O NotFound"));
     assert!(stderr.contains("reconnecting every second"));
 }
