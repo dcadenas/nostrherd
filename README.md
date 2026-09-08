@@ -74,8 +74,7 @@ you are willing to speak as.
   starts it with Postgres and Redis in Docker; see
   `skills/local-relay/SKILL.md`.
 
-**5. [`envchain`](https://github.com/sorah/envchain)** to hold the key,
-and Rust (stable) to build nostrherd.
+**5. Rust (stable)** to build nostrherd.
 
 ## Build
 
@@ -104,21 +103,24 @@ recent channel messages under `.nostrherd/places/`. Those place files
 are generated chat history, so keep them out of git — the template's
 `.gitignore` already does.
 
-Then put the key and relay somewhere the process can read them:
+nostrherd reads two environment variables, and nothing else:
 
-```bash
-envchain --set nostrherd NOSTRHERD_PRIVATE_KEY
-envchain --set nostrherd NOSTRHERD_RELAY_URL
-```
+| Variable | Value |
+| --- | --- |
+| `NOSTRHERD_PRIVATE_KEY` | the account's secret key, hex or nsec |
+| `NOSTRHERD_RELAY_URL` | the relay's websocket URL, such as `wss://relay.example` |
 
-`nostrherd` reads only those two names from its environment. It has no
-flag that takes a key, and it never writes one to the database, the
-logs, or a process title.
+There is no flag that takes a key, and nostrherd never writes one to
+the database, the logs, or a process title. Supply the two however you
+already handle secrets. Anything that puts them in the environment
+works, so `env`, a systemd unit, a `.env` file your shell sources, or a
+secret manager such as [`envchain`](https://github.com/sorah/envchain)
+or [`credchain`](https://github.com/dcadenas/credchain) are all fine.
 
 ## Run
 
 ```bash
-envchain nostrherd ./target/release/nostrherd \
+./target/release/nostrherd \
   --config bots.toml \
   --database nostrherd.sqlite
 ```
