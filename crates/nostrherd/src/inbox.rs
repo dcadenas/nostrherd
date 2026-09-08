@@ -6,7 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -14,6 +14,7 @@ use crate::KelpieError;
 
 /// Default reconnect pause after a dropped inbox connection.
 const RECONNECT_WAIT: Duration = Duration::from_secs(1);
+const RECONNECT_NOTICE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// One queued delivery offered on a claimed inbox connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,11 +94,25 @@ impl HostInbox {
 /// Default Kelpie daemon socket path.
 #[must_use]
 pub fn default_socket() -> PathBuf {
-    if let Some(path) = std::env::var_os("KELPIE_SOCKET") {
+    socket_path(
+        std::env::var_os("KELPIE_SOCKET"),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        &std::env::temp_dir(),
+    )
+}
+
+fn socket_path(
+    explicit: Option<std::ffi::OsString>,
+    runtime: Option<std::ffi::OsString>,
+    temp: &Path,
+) -> PathBuf {
+    if let Some(path) = explicit {
         return PathBuf::from(path);
     }
-    let runtime =
-        std::env::var_os("XDG_RUNTIME_DIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    // Match Kelpie's paths::runtime_root_with, including an empty XDG value.
+    let runtime = runtime
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| temp.join("kelpie-client"), PathBuf::from);
     runtime.join("kelpie/kelpie.sock")
 }
 
@@ -259,16 +274,35 @@ fn optional_text(params: &Value, key: &str) -> Option<String> {
 pub fn spawn_inbox(socket: PathBuf, waiter_id: String) -> HostInbox {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (ack_tx, ack_rx) = mpsc::channel();
-    thread::spawn(move || loop {
-        if drain_inbox(&socket, &waiter_id, &tx, &ack_rx).is_ok() {
-            return;
+    thread::spawn(move || {
+        let mut last_notice: Option<Instant> = None;
+        loop {
+            let Err(error) = drain_inbox(&socket, &waiter_id, &tx, &ack_rx) else {
+                return;
+            };
+            if tx.is_closed() {
+                return;
+            }
+            if last_notice.is_none_or(|last| last.elapsed() >= RECONNECT_NOTICE_INTERVAL) {
+                eprintln!(
+                    "nostrherd: inbox connection/claim failed at {}: {}; retrying every second (notices limited to every 30 seconds)",
+                    socket.to_string_lossy().escape_debug(),
+                    inbox_error_summary(&error)
+                );
+                last_notice = Some(Instant::now());
+            }
+            thread::sleep(RECONNECT_WAIT);
         }
-        if tx.is_closed() {
-            return;
-        }
-        thread::sleep(RECONNECT_WAIT);
     });
     HostInbox { rx, ack_tx }
+}
+
+fn inbox_error_summary(error: &KelpieError) -> String {
+    // Receipt text can contain message bodies. Never include it in diagnostics.
+    match error {
+        KelpieError::Io(error) => format!("I/O {:?}", error.kind()),
+        _ => "Kelpie protocol or receipt failure".to_owned(),
+    }
 }
 
 fn drain_inbox(
@@ -359,6 +393,41 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{parse_delivery, InboxConn};
+
+    #[test]
+    fn socket_resolution_matches_kelpie_fallbacks() {
+        let temp = std::path::Path::new("/custom-temp");
+        for runtime in [None, Some("".into())] {
+            assert_eq!(
+                super::socket_path(None, runtime, temp),
+                temp.join("kelpie-client/kelpie/kelpie.sock")
+            );
+        }
+        assert_eq!(
+            super::socket_path(None, Some("/run/user/42".into()), temp),
+            PathBuf::from("/run/user/42/kelpie/kelpie.sock")
+        );
+        for runtime in [None, Some("/run/user/42".into())] {
+            assert_eq!(
+                super::socket_path(Some("/override.sock".into()), runtime, temp),
+                PathBuf::from("/override.sock")
+            );
+        }
+    }
+
+    #[test]
+    fn inbox_diagnostics_do_not_include_receipt_contents() {
+        let error = crate::KelpieError::InvalidReceipt("private reply body".to_owned());
+        assert_eq!(
+            super::inbox_error_summary(&error),
+            "Kelpie protocol or receipt failure"
+        );
+        let error = crate::KelpieError::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private error detail",
+        ));
+        assert_eq!(super::inbox_error_summary(&error), "I/O PermissionDenied");
+    }
 
     fn temp_socket() -> PathBuf {
         let nanos = SystemTime::now()

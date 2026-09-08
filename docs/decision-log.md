@@ -23,6 +23,13 @@ attribution only; the waiting agent stays `nostrherd`. Session occupants
 are `bot-<place>` (or `<botid>-<place>`). Receipts multiplex on ask id
 in SQLite.
 
+Implementation note (issue 83): the inbox honors `KELPIE_SOCKET`, otherwise
+uses nonempty `XDG_RUNTIME_DIR/kelpie/kelpie.sock`, otherwise
+`std::env::temp_dir()/kelpie-client/kelpie/kelpie.sock`, matching Kelpie's
+runtime fallback. Reconnect failures report the socket and a safe error
+category immediately, then at most once per 30 seconds while retrying each
+second. Receipt bodies are not diagnostic text. ACK ordering is unchanged.
+
 ## D3. SQLite is host state, not the relay
 
 Status: accepted
