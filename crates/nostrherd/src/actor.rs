@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nostrherd_domain::{Bot, BotId, EventId, SessionName};
@@ -177,6 +177,7 @@ impl InFlightReaction for ReactionHost {
 #[derive(Debug)]
 pub struct BotActor<R, P> {
     bot: Bot,
+    conduct_path: PathBuf,
     pub(crate) repository: R,
     panes: P,
     reactions: ReactionHost,
@@ -227,9 +228,10 @@ where
 {
     /// Create an actor for one configured bot.
     #[must_use]
-    pub fn new(bot: Bot, repository: R, panes: P) -> Self {
+    pub fn new(bot: Bot, repository: R, panes: P, conduct_path: PathBuf) -> Self {
         Self {
             bot,
+            conduct_path,
             repository,
             panes,
             reactions: ReactionHost {
@@ -1284,6 +1286,7 @@ where
         refresh_place_snapshot(
             self.bot.corpus_path(),
             self.bot.id().as_str(),
+            &self.conduct_path,
             &session.session_name,
             &markdown,
         )
@@ -1650,7 +1653,12 @@ mod tests {
         let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
             .expect("repository");
         (
-            BotActor::new(bot(), repository, Arc::clone(&panes)),
+            BotActor::new(
+                bot(),
+                repository,
+                Arc::clone(&panes),
+                PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
+            ),
             kelpie,
             runner,
             panes,

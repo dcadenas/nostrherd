@@ -67,7 +67,8 @@ MUST NOT wrap a publish binary and MUST NOT receive the nsec.
 - Print, log, or commit nsecs
 - Dump `env` / `printenv`
 - Run these wraps against a production relay
-# Existing Corpus Contract Migration
+
+## Existing Corpus Contract Migration
 
 After installing the host-written contract feature, the operator can migrate
 each live corpus separately. This is not performed by the host or by its tests.
@@ -76,8 +77,9 @@ each live corpus separately. This is not performed by the host or by its tests.
    in the README. Back up the corpus's author-owned files.
 2. At an operator-chosen restart, confirm `startup.md` contains one populated
    `nostrherd-contract` block and one snapshot block, with a readable advice path.
-3. Remove the old hand-copied protocol section from `AGENTS.md` by hand, keeping
-   personality and bot-specific advice. Review the corpus diff before committing.
+3. Remove old hand-copied protocol sections from both `AGENTS.md` and text
+   outside host markers in `startup.md` by hand. Keep personality, bot-specific
+   advice and the generated marker blocks. Review the corpus diff before committing.
 4. Confirm a new occupant reads `startup.md` and a test trigger gets one stamped
    reply. An occupant already running is not notified of contract changes.
 

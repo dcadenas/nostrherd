@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::IndexedRelayEvent;
 
@@ -81,6 +82,7 @@ pub fn render_place_snapshot(
 pub fn refresh_place_snapshot(
     corpus: &Path,
     bot_id: &str,
+    conduct: &Path,
     session_name: &str,
     markdown: &str,
 ) -> io::Result<PathBuf> {
@@ -94,15 +96,8 @@ pub fn refresh_place_snapshot(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("md.tmp");
-    {
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(markdown.as_bytes())?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, &path)?;
-    let conduct = bot_conduct_path(&std::env::current_exe()?)?;
-    point_startup_at_snapshots(corpus, bot_id, &conduct)?;
+    atomic_write(&path, markdown)?;
+    point_startup_at_snapshots(corpus, bot_id, conduct)?;
     Ok(path)
 }
 
@@ -116,13 +111,19 @@ fn snapshot_file_stem(session_name: &str) -> Option<&str> {
         .then_some(session_name)
 }
 
-fn bot_conduct_path(executable: &Path) -> io::Result<PathBuf> {
+/// Locate readable conduct advice relative to the running host executable.
+///
+/// # Errors
+///
+/// Returns an I/O error if neither the installation nor Cargo checkout ships it.
+pub fn bot_conduct_path(executable: &Path) -> io::Result<PathBuf> {
     let directory = executable.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "host executable has no parent")
     })?;
     let relative = "skills/bot-conduct/SKILL.md";
     let adjacent = directory.join(relative);
     if adjacent.is_file() {
+        fs::read_to_string(&adjacent)?;
         return adjacent.canonicalize();
     }
     // Cargo binaries (including test binaries in deps/) use the checkout's assets.
@@ -133,6 +134,7 @@ fn bot_conduct_path(executable: &Path) -> io::Result<PathBuf> {
         if let Some(root) = target.parent() {
             let source = root.join(relative);
             if source.is_file() {
+                fs::read_to_string(&source)?;
                 return source.canonicalize();
             }
         }
@@ -183,7 +185,32 @@ fn point_startup_at_snapshots(corpus: &Path, bot_id: &str, conduct: &Path) -> io
     if updated == existing {
         return Ok(());
     }
-    fs::write(path, updated)
+    atomic_write(&path, &updated)
+}
+
+fn atomic_write(path: &Path, text: &str) -> io::Result<()> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "md.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let result = (|| {
+        if let Ok(metadata) = fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
 }
 
 fn upsert_startup_block(
@@ -315,8 +342,14 @@ mod tests {
     #[test]
     fn refresh_writes_snapshot_and_points_startup_md() {
         let corpus = temp_corpus();
-        let path = refresh_place_snapshot(&corpus, "bot", "bot-foobar", "# Channel snapshot\n")
-            .expect("write");
+        let path = refresh_place_snapshot(
+            &corpus,
+            "bot",
+            Path::new("/synthetic/skills/bot-conduct/SKILL.md"),
+            "bot-foobar",
+            "# Channel snapshot\n",
+        )
+        .expect("write");
         assert_eq!(path, corpus.join(".nostrherd/places/bot-foobar.md"));
         assert_eq!(
             fs::read_to_string(&path).expect("snapshot"),
@@ -330,7 +363,14 @@ mod tests {
     #[test]
     fn refresh_rejects_unsafe_session_names() {
         let corpus = temp_corpus();
-        let error = refresh_place_snapshot(&corpus, "bot", "../other", "x").expect_err("unsafe");
+        let error = refresh_place_snapshot(
+            &corpus,
+            "bot",
+            Path::new("/synthetic/skills/bot-conduct/SKILL.md"),
+            "../other",
+            "x",
+        )
+        .expect_err("unsafe");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
@@ -452,6 +492,24 @@ mod tests {
                 .expect_err("missing assets")
                 .kind(),
             io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn atomic_write_preserves_the_destination_when_rename_fails() {
+        let corpus = temp_corpus();
+        let destination = corpus.join("startup.md");
+        fs::create_dir(&destination).expect("directory prevents replacement");
+        fs::write(destination.join("author.md"), "author text").expect("author file");
+        atomic_write(&destination, "new contract").expect_err("rename must fail");
+        assert_eq!(
+            fs::read_to_string(destination.join("author.md")).expect("author file"),
+            "author text"
+        );
+        assert_eq!(
+            fs::read_dir(&corpus).expect("corpus").count(),
+            1,
+            "temporary file was removed"
         );
     }
 }

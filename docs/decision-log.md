@@ -1019,7 +1019,11 @@ The block names the running installation's `skills/bot-conduct/SKILL.md` as a
 file to read, not a harness skill to load. The runtime resolves it beside the
 executable, or in the source checkout above its Cargo `target/` directory.
 Relocated binaries ship that relative skills path beside the executable.
-No build-time absolute path or corpus copy is used; missing advice fails startup.
+No build-time absolute path or corpus copy is used. Missing or unreadable advice
+fails host startup before Kelpie or relay connection. Actors receive the resolved
+path explicitly; tests can supply a synthetic installation independent of the
+Cargo output directory. Updated startup files use a synced temporary file and
+atomic rename, preserving author text if a write is interrupted.
 Bot-specific handwritten advice can override shared advice, not the contract.
 
 `corpus/template-bot/` is the creation template; `corpus/example-bot/` remains

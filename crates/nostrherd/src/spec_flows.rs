@@ -252,6 +252,7 @@ impl Harness {
             self.bot.clone(),
             SqliteRepository::open(&self.db_path).expect("actor db"),
             Arc::clone(&self.panes),
+            PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
         )
     }
 

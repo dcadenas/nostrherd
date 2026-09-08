@@ -89,6 +89,7 @@ enum HostError {
     Kelpie(KelpieError),
     Actor(ActorError<rusqlite::Error>),
     NoBots,
+    Conduct(std::io::Error),
     NotificationClosed,
     InboxClosed,
 }
@@ -114,6 +115,9 @@ impl fmt::Display for HostError {
             Self::Kelpie(error) => write!(formatter, "{error}"),
             Self::Actor(error) => write!(formatter, "{error}"),
             Self::NoBots => formatter.write_str("bot config has no bots"),
+            Self::Conduct(error) => {
+                write!(formatter, "cannot load occupant conduct advice: {error}")
+            }
             Self::NotificationClosed => formatter.write_str("relay notification channel closed"),
             Self::InboxClosed => formatter.write_str("kelpie inbox closed"),
         }
@@ -125,7 +129,7 @@ impl std::error::Error for HostError {
         match self {
             Self::Config(error) => Some(error),
             Self::Database(error) => Some(error),
-            Self::Runtime(error) | Self::WaiterKey(error) => Some(error),
+            Self::Runtime(error) | Self::WaiterKey(error) | Self::Conduct(error) => Some(error),
             Self::Relay(error) => Some(error),
             Self::Subscribe(error) => Some(error),
             Self::Ingest(error) => Some(error),
@@ -611,6 +615,7 @@ async fn poll_relay(
 
 fn start_actors(
     bots: Vec<Bot>,
+    conduct_path: &Path,
     database: &Path,
     kelpie: &KelpieClient,
     waiter: &HostWaiter<'_>,
@@ -623,9 +628,14 @@ fn start_actors(
         .into_iter()
         .map(|bot| {
             SqliteRepository::open(database).map(|repository| {
-                BotActor::new(bot, repository, HerdrPaneAllocator::default())
-                    .with_reactions(Arc::clone(&reactions))
-                    .with_progress_relay(Arc::clone(&progress_relay))
+                BotActor::new(
+                    bot,
+                    repository,
+                    HerdrPaneAllocator::default(),
+                    conduct_path.to_path_buf(),
+                )
+                .with_reactions(Arc::clone(&reactions))
+                .with_progress_relay(Arc::clone(&progress_relay))
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -680,6 +690,9 @@ fn handle_host_delivery(
 
 #[allow(clippy::too_many_lines)]
 async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result<(), HostError> {
+    let executable = std::env::current_exe().map_err(HostError::Conduct)?;
+    let conduct_path =
+        nostrherd::snapshot::bot_conduct_path(&executable).map_err(HostError::Conduct)?;
     let operator_pubkey = operator.keys.public_key().to_hex();
     let kelpie = KelpieClient::default();
     let waiter = register_host_waiter(&kelpie, database)?;
@@ -699,7 +712,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
         operator.keys.clone(),
         operator.relay_url.clone(),
     );
-    let mut actors = start_actors(bots, database, &kelpie, &waiter, &publisher)?;
+    let mut actors = start_actors(bots, &conduct_path, database, &kelpie, &waiter, &publisher)?;
     let inbound_triggers = actors
         .iter()
         .map(|actor| {
@@ -1122,6 +1135,7 @@ mod tests {
                     bot.clone(),
                     SqliteRepository::open(&database).expect("db"),
                     HerdrPaneAllocator::default(),
+                    PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
                 )
             })
             .collect::<Vec<_>>();
