@@ -11,8 +11,8 @@ use crate::outbox::OutboundAttempt;
 use crate::progress::ProgressPost;
 use crate::watch::{WatchFire, WatchRecord};
 use crate::{
-    HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord, TurnReplacement,
-    TurnState,
+    HostRepository, IndexedRelayEvent, NewTurn, OccupantStartAttempt, SessionRecord, TurnRecord,
+    TurnReplacement, TurnState,
 };
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -354,19 +354,30 @@ impl SqliteRepository {
                      REFERENCES relay_events(event_id)
              ) STRICT;
 
-              CREATE TABLE IF NOT EXISTS sessions (
-                  id INTEGER PRIMARY KEY,
-                  bot_id TEXT NOT NULL,
-                  channel_id TEXT NOT NULL,
-                  session_name TEXT NOT NULL UNIQUE,
-                  occupant_logical_id TEXT,
-                  renew_id TEXT,
-                  ask_context_event_id TEXT CHECK(
-                      ask_context_event_id IS NULL OR length(ask_context_event_id) = 64
-                  ),
-                  ask_context_created_at INTEGER,
-                  UNIQUE(bot_id, channel_id)
-              ) STRICT;
+               CREATE TABLE IF NOT EXISTS sessions (
+                   id INTEGER PRIMARY KEY,
+                   bot_id TEXT NOT NULL,
+                   channel_id TEXT NOT NULL,
+                   session_name TEXT NOT NULL UNIQUE,
+                   occupant_logical_id TEXT,
+                   renew_id TEXT,
+                   ask_context_event_id TEXT CHECK(
+                       ask_context_event_id IS NULL OR length(ask_context_event_id) = 64
+                   ),
+                   ask_context_created_at INTEGER,
+                   UNIQUE(bot_id, channel_id)
+               ) STRICT;
+
+               CREATE TABLE IF NOT EXISTS occupant_starts (
+                   sequence INTEGER PRIMARY KEY,
+                   session_name TEXT NOT NULL,
+                   attempt_key TEXT NOT NULL UNIQUE,
+                   attempt_json TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+               ) STRICT;
+               CREATE INDEX IF NOT EXISTS occupant_starts_session
+                   ON occupant_starts(session_name, sequence);
 
              CREATE TABLE IF NOT EXISTS turns (
                  sequence INTEGER PRIMARY KEY,
@@ -517,6 +528,40 @@ impl SqliteRepository {
 
 impl HostRepository for SqliteRepository {
     type Error = rusqlite::Error;
+
+    fn occupant_start(
+        &self,
+        session_name: &str,
+    ) -> Result<Option<OccupantStartAttempt>, Self::Error> {
+        let json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT attempt_json FROM occupant_starts WHERE session_name = ?1
+                 ORDER BY sequence DESC LIMIT 1",
+                [session_name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+    }
+
+    fn save_occupant_start(&mut self, attempt: &OccupantStartAttempt) -> Result<(), Self::Error> {
+        let json = serde_json::to_string(attempt)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let now = crate::unix_now()
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        self.connection.execute(
+            "INSERT INTO occupant_starts(session_name, attempt_key, attempt_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(attempt_key) DO UPDATE SET
+                 attempt_json = excluded.attempt_json,
+                 updated_at = excluded.updated_at",
+            params![attempt.launch.name, attempt.key, json, now],
+        )?;
+        Ok(())
+    }
 
     fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
         let transaction = self.connection.transaction()?;

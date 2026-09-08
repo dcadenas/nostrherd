@@ -37,8 +37,21 @@ impl StartedOccupant {
     }
 }
 
+/// Outcome of reconciling one recorded occupant start attempt.
+#[derive(Debug)]
+pub(crate) enum StartReconciliation {
+    /// The exact recorded seat is Ready and live under its public name.
+    Ready(StartedOccupant),
+    /// The recorded logical id is known but its binding ended; continuing it
+    /// needs a fresh launch attempt, never a new identity.
+    FailedStart { logical_agent_id: String },
+    /// The attempt cannot be settled from available evidence; starting a
+    /// replacement would risk a duplicate identity.
+    Unsettled(String),
+}
+
 /// Launch coordinates for a corpus occupant.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OccupantLaunch {
     pub name: String,
     pub pane_id: String,
@@ -47,6 +60,16 @@ pub struct OccupantLaunch {
     pub cwd: PathBuf,
     pub timeout_ms: u64,
     pub logical_agent_id: Option<String>,
+}
+
+/// Durable intent and diagnostic receipt for one occupant launch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OccupantStartAttempt {
+    pub key: String,
+    pub launch: OccupantLaunch,
+    pub receipt: Option<Value>,
+    pub diagnostic: Option<String>,
+    pub completed: bool,
 }
 
 /// Short trusted body used only to finish `kelpie start --tell`.
@@ -378,6 +401,17 @@ impl KelpieClient {
         bootstrap: &str,
         sender_id: Option<&str>,
     ) -> Result<StartedOccupant, KelpieError> {
+        self.start_occupant_with_receipt(launch, bootstrap, sender_id, None, &mut None)
+    }
+
+    pub(crate) fn start_occupant_with_receipt(
+        &self,
+        launch: &OccupantLaunch,
+        bootstrap: &str,
+        sender_id: Option<&str>,
+        key: Option<&str>,
+        receipt: &mut Option<Value>,
+    ) -> Result<StartedOccupant, KelpieError> {
         let timeout_ms = launch.timeout_ms.to_string();
         let cwd = launch.cwd.to_str().ok_or_else(|| {
             KelpieError::InvalidReceipt("occupant corpus path is not valid UTF-8".to_owned())
@@ -405,11 +439,15 @@ impl KelpieClient {
         if let Some(sender_id) = sender_id {
             arguments.extend(["--sender-id".to_owned(), sender_id.to_owned()]);
         }
+        if let Some(key) = key {
+            arguments.extend(["--idempotency-key".to_owned(), key.to_owned()]);
+        }
         if let Some(logical_agent_id) = &launch.logical_agent_id {
             arguments.extend(["--logical-id".to_owned(), logical_agent_id.clone()]);
         }
         let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
         let output = self.invoke(&arguments, bootstrap.as_bytes())?;
+        *receipt = Some(output.receipt.clone());
         if !output.success {
             return Err(output.rejected());
         }
@@ -436,6 +474,123 @@ impl KelpieClient {
             ));
         }
         Ok(started)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn reconcile_occupant_start(
+        &self,
+        launch: &mut OccupantLaunch,
+    ) -> Result<StartReconciliation, KelpieError> {
+        let output = self.invoke(&["--json", "report"], &[])?;
+        if !output.success {
+            return Err(output.rejected());
+        }
+        let agents = result(&output.receipt)?
+            .get("agents")
+            .and_then(Value::as_array)
+            .ok_or_else(|| KelpieError::InvalidReceipt("missing report agents".to_owned()))?;
+        let mut matches = Vec::new();
+        for agent in agents {
+            let Some(incarnations) = agent.get("incarnations").and_then(Value::as_array) else {
+                continue;
+            };
+            for incarnation in incarnations {
+                if incarnation.get("intended_pane_id").and_then(Value::as_str)
+                    == Some(&launch.pane_id)
+                    && incarnation
+                        .get("expected_terminal_id")
+                        .and_then(Value::as_str)
+                        == Some(&launch.terminal_id)
+                {
+                    matches.push((agent, incarnation));
+                }
+            }
+        }
+        if matches.is_empty() {
+            return Ok(StartReconciliation::Unsettled(
+                "no recorded incarnation; absence does not settle an interrupted start".to_owned(),
+            ));
+        }
+        if matches.len() > 1 {
+            return Ok(StartReconciliation::Unsettled(format!(
+                "report shows {} incarnations on the recorded seat",
+                matches.len()
+            )));
+        }
+        let (agent, incarnation) = matches[0];
+        let logical_agent_id = field(agent, "agent_id")?;
+        if agent.get("public_name").and_then(Value::as_str) != Some(&launch.name)
+            || incarnation.get("backend_kind").and_then(Value::as_str) != Some(&launch.backend)
+            || incarnation.get("working_directory").and_then(Value::as_str) != launch.cwd.to_str()
+        {
+            return Ok(StartReconciliation::Unsettled(
+                "recorded seat does not match the intended name, backend, and corpus".to_owned(),
+            ));
+        }
+        if launch
+            .logical_agent_id
+            .as_ref()
+            .is_some_and(|expected| expected != &logical_agent_id)
+        {
+            return Ok(StartReconciliation::Unsettled(
+                "report names a different logical agent than the recorded start".to_owned(),
+            ));
+        }
+        launch.logical_agent_id = Some(logical_agent_id.clone());
+        match field(incarnation, "state")?.as_str() {
+            "ready" => {
+                let incarnation_id = field(incarnation, "incarnation_id")?;
+                let live = self.occupant_whoami(&launch.name)?;
+                if live.logical_agent_id != logical_agent_id
+                    || live.incarnation_id != incarnation_id
+                {
+                    return Ok(StartReconciliation::Unsettled(
+                        "ready occupant differs from the recorded start seat".to_owned(),
+                    ));
+                }
+                Ok(StartReconciliation::Ready(live))
+            }
+            // A terminal state proves the recorded binding ended; continuing
+            // the same logical id needs a fresh launch attempt (D20), never a
+            // new identity.
+            "failed" => Ok(StartReconciliation::FailedStart { logical_agent_id }),
+            "starting" | "unknown" | "lost" => {
+                let output = self.invoke(
+                    &[
+                        "--json",
+                        "adopt",
+                        "--pane",
+                        &launch.pane_id,
+                        "--terminal",
+                        &launch.terminal_id,
+                        "--logical-id",
+                        &logical_agent_id,
+                    ],
+                    &[],
+                )?;
+                if !output.success {
+                    return Ok(StartReconciliation::Unsettled(format!(
+                        "exact-seat adoption is not proven: {}",
+                        output.rejected()
+                    )));
+                }
+                let receipt = result(&output.receipt)?;
+                if field(receipt, "logical_agent_id")? != logical_agent_id
+                    || field(receipt, "public_name")? != launch.name
+                {
+                    return Ok(StartReconciliation::Unsettled(
+                        "adoption returned a different occupant".to_owned(),
+                    ));
+                }
+                Ok(StartReconciliation::Ready(StartedOccupant {
+                    logical_agent_id,
+                    incarnation_id: field(receipt, "incarnation_id")?,
+                }))
+            }
+            state => Ok(StartReconciliation::Unsettled(format!(
+                "recorded seat incarnation is {state}"
+            ))),
+        }
     }
 
     /// Arm wall-clock renew on one occupant's exact incarnation.
@@ -1532,6 +1687,21 @@ pub struct TurnReplacement {
 /// Persistence used by the host ingest and turn-processing paths.
 pub trait HostRepository {
     type Error;
+
+    /// Read the latest durable launch attempt for a session.
+    ///
+    /// # Errors
+    /// Returns a persistence error when the record cannot be read.
+    fn occupant_start(
+        &self,
+        session_name: &str,
+    ) -> Result<Option<OccupantStartAttempt>, Self::Error>;
+
+    /// Persist launch intent before calling Kelpie, then retain its receipt.
+    ///
+    /// # Errors
+    /// Returns a persistence error when the record cannot be saved.
+    fn save_occupant_start(&mut self, attempt: &OccupantStartAttempt) -> Result<(), Self::Error>;
 
     /// Acknowledge an emitted ingest action, returning false if already acknowledged.
     ///
