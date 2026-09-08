@@ -2363,6 +2363,49 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_failed_starts_use_the_same_ended_rule_for_siblings() {
+        for outcome in ["failed", "pending", "unknown"] {
+            let (actor, kelpie, runner, _) = actor([]);
+            let output = start_report(actor.bot.corpus_path(), "failed");
+            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let current = &report["result"]["agents"][0]["incarnations"][0];
+            let mut sibling = current.clone();
+            sibling["incarnation_id"] = "prior-declaration".into();
+            sibling["intended_pane_id"] = "old:pane".into();
+            sibling["state"] = "declared".into();
+            sibling["latest_operation"] = serde_json::json!({"kind":"start","outcome":outcome});
+            report["result"]["agents"][0]["incarnations"]
+                .as_array_mut()
+                .unwrap()
+                .push(sibling);
+            runner
+                .outputs
+                .lock()
+                .unwrap()
+                .push_back(success(&report["result"]));
+            let mut launch = OccupantLaunch {
+                name: "bot-foobar".to_owned(),
+                pane_id: "w2:p1".to_owned(),
+                terminal_id: "term-9".to_owned(),
+                backend: "opencode".to_owned(),
+                cwd: actor.bot.corpus_path().to_path_buf(),
+                timeout_ms: 90_000,
+                logical_agent_id: None,
+            };
+            let result = kelpie.reconcile_occupant_start(&mut launch, None).unwrap();
+            if outcome == "failed" {
+                assert!(matches!(
+                    result,
+                    crate::StartReconciliation::FailedStart { .. }
+                ));
+            } else {
+                assert!(matches!(result, crate::StartReconciliation::Unsettled(_)));
+            }
+            assert_eq!(runner.calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
     fn readiness_conflict_adopts_the_exact_recorded_identity() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),

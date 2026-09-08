@@ -609,9 +609,25 @@ impl KelpieClient {
             ));
         }
         launch.logical_agent_id = Some(logical_agent_id.clone());
-        let matched_incarnation = field(incarnation, "incarnation_id")?;
+        // mark_rejected can fail a start operation without demoting declared.
+        // Use the same evidence for the matched binding and its siblings.
+        let ended = |entry: &Value| {
+            matches!(
+                entry["state"].as_str(),
+                Some("failed" | "retired" | "superseded")
+            ) || (entry["state"].as_str() == Some("declared")
+                && entry
+                    .pointer("/latest_operation/kind")
+                    .and_then(Value::as_str)
+                    == Some("start")
+                && entry
+                    .pointer("/latest_operation/outcome")
+                    .and_then(Value::as_str)
+                    == Some("failed"))
+        };
         match field(incarnation, "state")?.as_str() {
             "ready" => {
+                let matched_incarnation = field(incarnation, "incarnation_id")?;
                 let live = self.occupant_whoami(&launch.name)?;
                 if live.logical_agent_id != logical_agent_id
                     || live.incarnation_id != matched_incarnation
@@ -625,31 +641,10 @@ impl KelpieClient {
             // A terminal state proves the recorded binding ended; continuing
             // the same logical id needs a fresh launch attempt (D20), never a
             // new identity.
-            state @ ("failed" | "retired" | "superseded" | "declared")
-                if state != "declared"
-                    || (incarnation
-                        .pointer("/latest_operation/kind")
-                        .and_then(Value::as_str)
-                        == Some("start")
-                        && incarnation
-                            .pointer("/latest_operation/outcome")
-                            .and_then(Value::as_str)
-                            == Some("failed")) =>
-            {
-                // A decisive rejection can leave the incarnation declared: Kelpie's
-                // mark_rejected demotes only starting, but still fails its operation.
-                let has_other_runtime =
-                    agent["incarnations"]
-                        .as_array()
-                        .is_some_and(|incarnations| {
-                            incarnations.iter().any(|entry| {
-                                entry["incarnation_id"].as_str() != Some(&matched_incarnation)
-                                    && !matches!(
-                                        entry["state"].as_str(),
-                                        Some("failed" | "retired" | "superseded")
-                                    )
-                            })
-                        });
+            _ if ended(incarnation) => {
+                let has_other_runtime = agent["incarnations"]
+                    .as_array()
+                    .is_some_and(|incarnations| incarnations.iter().any(|entry| !ended(entry)));
                 if has_other_runtime {
                     return Ok(StartReconciliation::Unsettled(
                         "failed start has another unsettled or live incarnation".to_owned(),
