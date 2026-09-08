@@ -609,12 +609,12 @@ impl KelpieClient {
             ));
         }
         launch.logical_agent_id = Some(logical_agent_id.clone());
+        let matched_incarnation = field(incarnation, "incarnation_id")?;
         match field(incarnation, "state")?.as_str() {
             "ready" => {
-                let incarnation_id = field(incarnation, "incarnation_id")?;
                 let live = self.occupant_whoami(&launch.name)?;
                 if live.logical_agent_id != logical_agent_id
-                    || live.incarnation_id != incarnation_id
+                    || live.incarnation_id != matched_incarnation
                 {
                     return Ok(StartReconciliation::Unsettled(
                         "ready occupant differs from the recorded start seat".to_owned(),
@@ -625,16 +625,29 @@ impl KelpieClient {
             // A terminal state proves the recorded binding ended; continuing
             // the same logical id needs a fresh launch attempt (D20), never a
             // new identity.
-            "failed" | "retired" | "superseded" => {
+            state @ ("failed" | "retired" | "superseded" | "declared")
+                if state != "declared"
+                    || (incarnation
+                        .pointer("/latest_operation/kind")
+                        .and_then(Value::as_str)
+                        == Some("start")
+                        && incarnation
+                            .pointer("/latest_operation/outcome")
+                            .and_then(Value::as_str)
+                            == Some("failed")) =>
+            {
+                // A decisive rejection can leave the incarnation declared: Kelpie's
+                // mark_rejected demotes only starting, but still fails its operation.
                 let has_other_runtime =
                     agent["incarnations"]
                         .as_array()
                         .is_some_and(|incarnations| {
                             incarnations.iter().any(|entry| {
-                                !matches!(
-                                    entry["state"].as_str(),
-                                    Some("failed" | "retired" | "superseded")
-                                )
+                                entry["incarnation_id"].as_str() != Some(&matched_incarnation)
+                                    && !matches!(
+                                        entry["state"].as_str(),
+                                        Some("failed" | "retired" | "superseded")
+                                    )
                             })
                         });
                 if has_other_runtime {

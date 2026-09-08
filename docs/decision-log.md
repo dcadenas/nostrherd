@@ -252,6 +252,10 @@ seat; ambiguous evidence without such an id is not a namesake-selection rule.
 Launch completion and the session binding are one SQLite transaction. Keep the
 first start error separately from the latest reconciliation diagnostic.
 
+A `declared` incarnation whose recorded **start operation** has failed is also
+recoverable under that logical id. A failed adoption alone is not evidence
+that a pending or unknown native start has ended.
+
 An original open ask stays open. Its recovery MUST NOT send a second ask;
 Kelpie's reminder delivers the original question. Queued work has no prior
 delivered ask, so it drains through the recovered occupant.

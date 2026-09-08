@@ -2024,6 +2024,7 @@ mod tests {
             "two-identities",
             "two-ready",
             "failed-with-live-successor",
+            "declared-failed-with-live-successor",
         ] {
             let (actor, kelpie, runner, _) = actor([]);
             let output = start_report(actor.bot.corpus_path(), "ready");
@@ -2042,10 +2043,21 @@ mod tests {
                         .unwrap()
                         .push(twin);
                 }
-                "two-ready" | "failed-with-live-successor" => {
+                "two-ready"
+                | "failed-with-live-successor"
+                | "declared-failed-with-live-successor" => {
                     let mut second = agent["incarnations"][0].clone();
-                    if mismatch == "failed-with-live-successor" {
-                        agent["incarnations"][0]["state"] = "failed".into();
+                    second["incarnation_id"] = "successor-incarnation".into();
+                    if mismatch != "two-ready" {
+                        agent["incarnations"][0]["state"] =
+                            if mismatch == "failed-with-live-successor" {
+                                "failed"
+                            } else {
+                                "declared"
+                            }
+                            .into();
+                        agent["incarnations"][0]["latest_operation"] =
+                            serde_json::json!({"kind":"start","outcome":"failed"});
                         second["intended_pane_id"] = "w9:p1".into();
                     }
                     agent["incarnations"].as_array_mut().unwrap().push(second);
@@ -2297,6 +2309,56 @@ mod tests {
                 ));
             }
             assert_eq!(launch.logical_agent_id.as_deref(), Some("occupant-agent"));
+        }
+    }
+
+    #[test]
+    fn declared_start_retries_only_with_a_failed_start_operation() {
+        for (kind, outcome) in [
+            ("start", "failed"),
+            ("start", "pending"),
+            ("start", "unknown"),
+            ("adopt", "failed"),
+        ] {
+            let (actor, kelpie, runner, _) = actor([]);
+            let output = start_report(actor.bot.corpus_path(), "declared");
+            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            report["result"]["agents"][0]["incarnations"][0]["latest_operation"] =
+                serde_json::json!({"kind":kind,"outcome":outcome});
+            runner
+                .outputs
+                .lock()
+                .unwrap()
+                .push_back(success(&report["result"]));
+            let rejected = kind == "start" && outcome == "failed";
+            if !rejected {
+                runner
+                    .outputs
+                    .lock()
+                    .unwrap()
+                    .push_back(failure("conflict", "no adoptable runtime"));
+            }
+            let mut launch = OccupantLaunch {
+                name: "bot-foobar".to_owned(),
+                pane_id: "w2:p1".to_owned(),
+                terminal_id: "term-9".to_owned(),
+                backend: "opencode".to_owned(),
+                cwd: actor.bot.corpus_path().to_path_buf(),
+                timeout_ms: 90_000,
+                logical_agent_id: None,
+            };
+            let result = kelpie.reconcile_occupant_start(&mut launch, None);
+            if rejected {
+                assert!(matches!(
+                    result.unwrap(),
+                    crate::StartReconciliation::FailedStart { .. }
+                ));
+            } else {
+                assert!(
+                    result.is_err(),
+                    "{kind}/{outcome} must not authorize a replacement"
+                );
+            }
         }
     }
 
