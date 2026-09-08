@@ -237,6 +237,15 @@ bind it. The host continues the recorded id with `kelpie start
 agent, not a twin. `adopt --logical-id` remains the path when a live
 pane already exists.
 
+Implementation notes (issue 82): record launch coordinates and a stable start
+key before calling Kelpie, retaining each attempt's receipt and diagnostic.
+An ambiguous attempt is reconciled by its pane and terminal, with matching
+name, backend, corpus and any recorded logical id; a namesake is not evidence.
+Adopt a live unsettled seat under that same logical id. A decisively failed
+start may retry on a new pane under its recorded logical id. Missing or
+conflicting evidence keeps the attempt unsettled, without another allocation.
+Launch completion and the session binding are one SQLite transaction.
+
 An original open ask stays open. Its recovery MUST NOT send a second ask;
 Kelpie's reminder delivers the original question. Queued work has no prior
 delivered ask, so it drains through the recovered occupant.

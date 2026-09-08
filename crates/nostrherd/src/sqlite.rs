@@ -552,7 +552,8 @@ impl HostRepository for SqliteRepository {
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let now = crate::unix_now()
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
             "INSERT INTO occupant_starts(session_name, attempt_key, attempt_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)
              ON CONFLICT(attempt_key) DO UPDATE SET
@@ -560,6 +561,22 @@ impl HostRepository for SqliteRepository {
                  updated_at = excluded.updated_at",
             params![attempt.launch.name, attempt.key, json, now],
         )?;
+        if attempt.completed {
+            let logical_id = attempt.launch.logical_agent_id.as_deref().ok_or(
+                rusqlite::Error::InvalidParameterName(
+                    "completed start requires a logical identity".to_owned(),
+                ),
+            )?;
+            let changed = transaction.execute(
+                "UPDATE sessions SET occupant_logical_id = ?1 WHERE session_name = ?2
+                 AND (occupant_logical_id IS NULL OR occupant_logical_id = ?1)",
+                params![logical_id, attempt.launch.name],
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        transaction.commit()?;
         Ok(())
     }
 

@@ -4,6 +4,14 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = dispatch-proof ]; then
+  shift
+  test "${NOSTRHERD_DISPATCH_PROOF:-}" = isolated || {
+    echo "dispatch-proof requires an isolated Herdr/Kelpie/relay fixture" >&2
+    exit 1
+  }
+  exec "${NOSTRHERD_DISPATCH_PROOF_BIN:?set the built dispatch_proof example path}" "$@"
+fi
 if [ "${1:-}" = contract-proof ]; then
   exec cargo test --manifest-path "$ROOT/Cargo.toml" -p nostrherd --lib \
     spec_flows::local_relay_contract_before_synthetic_occupant -- --exact --nocapture
@@ -17,7 +25,7 @@ BIND=127.0.0.1:13001
 HEALTH=18081
 
 usage() {
-  echo "usage: $0 up|down|status|smoke|trigger [--content TEXT]|contract-proof" >&2
+  echo "usage: $0 up|down|status|smoke|trigger [--content TEXT]|contract-proof|dispatch-proof CASE HOST [IDENTITIES]" >&2
   exit 2
 }
 

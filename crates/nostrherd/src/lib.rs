@@ -521,10 +521,24 @@ impl KelpieClient {
             ));
         }
         if matches.len() > 1 {
-            return Ok(StartReconciliation::Unsettled(format!(
-                "report shows {} incarnations on the recorded seat",
-                matches.len()
-            )));
+            let logical_id = field(matches[0].0, "agent_id")?;
+            if matches.iter().any(|(agent, _)| {
+                agent.get("agent_id").and_then(Value::as_str) != Some(&logical_id)
+            }) {
+                return Ok(StartReconciliation::Unsettled(
+                    "report shows different logical identities on the recorded seat".to_owned(),
+                ));
+            }
+            // Adoption can leave an ended incarnation beside its Ready successor.
+            // A crash before persisting the adoption receipt must reuse that successor.
+            matches.retain(|(_, incarnation)| {
+                incarnation.get("state").and_then(Value::as_str) == Some("ready")
+            });
+            if matches.len() != 1 {
+                return Ok(StartReconciliation::Unsettled(
+                    "report does not show one Ready successor on the recorded seat".to_owned(),
+                ));
+            }
         }
         let (agent, incarnation) = matches[0];
         let logical_agent_id = field(agent, "agent_id")?;
@@ -562,40 +576,33 @@ impl KelpieClient {
             // A terminal state proves the recorded binding ended; continuing
             // the same logical id needs a fresh launch attempt (D20), never a
             // new identity.
-            "failed" => Ok(StartReconciliation::FailedStart { logical_agent_id }),
-            "starting" | "unknown" | "lost" => {
-                let output = self.invoke(
-                    &[
-                        "--json",
-                        "adopt",
-                        "--pane",
-                        &launch.pane_id,
-                        "--terminal",
-                        &launch.terminal_id,
-                        "--logical-id",
-                        &logical_agent_id,
-                    ],
-                    &[],
-                )?;
-                if !output.success {
-                    return Ok(StartReconciliation::Unsettled(format!(
-                        "exact-seat adoption is not proven: {}",
-                        output.rejected()
-                    )));
-                }
-                let receipt = result(&output.receipt)?;
-                if field(receipt, "logical_agent_id")? != logical_agent_id
-                    || field(receipt, "public_name")? != launch.name
-                {
+            "failed" => {
+                let has_other_runtime =
+                    agent["incarnations"]
+                        .as_array()
+                        .is_some_and(|incarnations| {
+                            incarnations.iter().any(|entry| {
+                                !matches!(
+                                    entry["state"].as_str(),
+                                    Some("failed" | "retired" | "superseded")
+                                )
+                            })
+                        });
+                if has_other_runtime {
                     return Ok(StartReconciliation::Unsettled(
-                        "adoption returned a different occupant".to_owned(),
+                        "failed start has another unsettled or live incarnation".to_owned(),
                     ));
                 }
-                Ok(StartReconciliation::Ready(StartedOccupant {
-                    logical_agent_id,
-                    incarnation_id: field(receipt, "incarnation_id")?,
-                }))
+                Ok(StartReconciliation::FailedStart { logical_agent_id })
             }
+            "starting" | "unknown" | "lost" => self
+                .adopt_occupant(
+                    &launch.pane_id,
+                    &launch.terminal_id,
+                    &launch.name,
+                    &logical_agent_id,
+                )
+                .map(StartReconciliation::Ready),
             state => Ok(StartReconciliation::Unsettled(format!(
                 "recorded seat incarnation is {state}"
             ))),
@@ -1707,6 +1714,7 @@ pub trait HostRepository {
     ) -> Result<Option<OccupantStartAttempt>, Self::Error>;
 
     /// Persist launch intent before calling Kelpie, then retain its receipt.
+    /// Completed attempts atomically bind their logical identity to the session.
     ///
     /// # Errors
     /// Returns a persistence error when the record cannot be saved.
