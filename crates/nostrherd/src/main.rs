@@ -322,7 +322,7 @@ async fn channel_display_for(
     match subscriber.place_display(operator_pubkey, channel_id).await {
         Ok(display) if !display.is_empty() => display,
         Ok(_) => {
-            eprintln!("place display missing for new session, using uuid slug");
+            eprintln!("place display missing for new session, using channel ID slug");
             String::new()
         }
         Err(error) => {
