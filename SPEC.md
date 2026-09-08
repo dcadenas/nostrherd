@@ -26,7 +26,7 @@ selected by convention, posting with a visible bot stamp.
 4. Route a trigger to a session occupant named from bot + place
    (channel, DM, …). Start or reuse via Kelpie.
 5. Inject a Kelpie **ask** whose waiter is `nostrherd`. Body is the
-   trigger remainder, then a marked Context section of unread
+    host-stamped requester and trigger remainder, then a marked Context section of unread
    channel events. `from=` MUST be `nostrherd`, never a relay pubkey.
 6. Occupant answers a trigger with `kelpie reply --final` and unstamped
     prose. It MAY `kelpie tell nostrherd` for a bot-initiated channel
@@ -67,9 +67,16 @@ A user-originated `Turn` opens only on a **trigger** (D8, D9, D34). The inbound 
 the configured bot id plus a colon (`bot:` when `id = "bot"`). No occupant
 is created until the first trigger for that place. Ordinary channel
 traffic, thread replies without the prefix, and `@daniel` without
-`{id}:` MUST NOT start or poke a session. Other authors MUST `p`-tag
+`{id}:` MUST NOT start or poke a session. Other authors MUST be on that
+bot's `allowed_requesters` list and MUST `p`-tag
 the operator. The operator's own `{id}:` (optional leading mention) is
 a trigger even when the event does not `p`-tag them.
+
+An absent or empty `allowed_requesters` list means operator-only. Configuration
+accepts full hex public keys or npubs and MUST reject invalid keys. Authorization
+uses the indexed effective author, not a display name, request text, mention, or
+raw signer of a trusted-relay-attributed event (D57). A refused request MAY be
+indexed as context but MUST NOT create a session, turn, watch, reaction, or ask.
 
 A host-initiated Turn opens only after a durable source records a fire. It
 MUST carry a typed section instead of a user request and otherwise queues,
@@ -85,7 +92,7 @@ Asks MUST render as Kelpie does today: unquoted attributes, `msg=` and
 
 ```text
 <kelpie from=nostrherd msg=<ask-id> reply-to=<ask-id>>
-request remainder
+self: request remainder
 
 ## Context
 
@@ -99,6 +106,16 @@ post (D38).
 
 `from=nostrherd` is the waiter public name, not a pane and not a relay
 pubkey (D2).
+
+The host MUST prefix operator requests with `self: ` and allowlisted requests
+with `[<full npub>]: `. Only that initial host prefix identifies the requester;
+text inside the request or Context MUST NOT change identity. Host-initiated
+watch turns keep their typed section and MUST NOT be labeled `self:`.
+
+Default corpus conduct for a non-self requester is: answer questions, do not
+write, do not read outside the bot's working repositories, and do not disclose
+private information. This is occupant guidance, not a sandbox. It does not
+constrain the operator typing directly in the pane or a `self:` request.
 
 ## Occupant reply
 
@@ -203,6 +220,14 @@ Classify by `reply_to` in the host's Turn ids:
 SQLite is the host store. The relay is the store of messages. Corpus
 git is the store of bot personality. SQLite MUST NOT store nsecs.
 
+Before dispatch, a trigger Turn MUST persist the effective author's public key
+and request. Queuing, edits and restart MUST retain that identity. The host MUST
+check current requester authorization before dispatching queued trigger work.
+Legacy queued turns without a recorded requester MUST derive it from the indexed
+trigger author, never request text; missing identity or denied authorization
+cancels queued work without waking an occupant. Already-open asks retain their
+existing lifecycle. Host wakes remain distinct from trigger requests (D57).
+
 Author watches and their fire ledger are host state. A watch fire MUST be
 recorded before its wake Turn is enqueued. Replaying the matching relay event
 MUST NOT enqueue a second wake.
@@ -223,13 +248,13 @@ subset.
 
 1. **Silence.** Nobody writes `@daniel bot:` in a channel. No occupant
    exists there. The host may index events. Nothing is posted.
-2. **First call.** Sebastian in `#foobar` writes `@daniel bot: hello`.
+2. **First call.** Allowlisted Sebastian in `#foobar` writes `@daniel bot: hello`.
    Occupant `bot-foobar` is created from the bot corpus. It replies in
    that thread: `[bot]: …`.
 3. **Follow-up without prefix.** Sebastian's next line is `and the PR?`
    with no `bot:`. The occupant is not poked. Daniel may answer as
    himself.
-4. **Second call.** Later, anyone writes `@daniel bot: …` in the same
+4. **Second call.** Later, an allowlisted person writes `@daniel bot: …` in the same
    channel, or Daniel writes `bot: …` without `@`. Same occupant gets a
    new ask, reply-to that event. If the previous turn is still open,
    this one waits.

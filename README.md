@@ -100,7 +100,12 @@ A bot is one entry in `bots.toml`:
 id = "bot"                      # the trigger: "bot: ..." in a channel
 corpus = "/path/to/corpus-repo" # the agent's working directory
 kind = "opencode"               # which agent CLI Herdr launches
+allowed_requesters = []         # default: only the configured account can ask
 ```
+
+To admit another person, add their full hex public key or npub to that bot's
+`allowed_requesters` array and restart the host. Invalid keys reject the config.
+The configured account remains authorized even when the list is nonempty.
 
 The corpus is an ordinary git repository holding the bot's personality.
 Copy `corpus/template-bot/` to start one; its `AGENTS.md` is the only
@@ -153,10 +158,16 @@ Now say `bot: hello` in that channel. Two cases differ:
 
 - **You, from the configured account.** The host sees your own message
   and answers.
-- **Anyone else.** Their message must also `p`-tag your account, which
+- **An allowlisted person.** Their message must also `p`-tag your account, which
   most clients do when you `@`-mention it. A plain `bot: hello` from
   someone who has not mentioned you is ignored on purpose, so a bot is
   never woken by a channel it happens to be reading.
+
+Everyone else is ignored as a requester, even if they mention you. The occupant
+sees `self: hello` for your request or `[<full npub>]: hello` for an allowlisted
+person. Default non-self conduct allows answering questions, but not writes,
+reads outside the bot's working repositories, or disclosure of private information.
+That conduct is guidance, not a sandbox; the host enforces the requester allowlist.
 
 A stamped `[bot]:` reply should land in the thread. If nothing happens,
 check that Herdr and `kelpied` are running and that the host log shows

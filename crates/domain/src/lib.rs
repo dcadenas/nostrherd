@@ -82,6 +82,7 @@ pub struct Bot {
     inbound_trigger: String,
     outbound_prefix: String,
     occupant_kind: String,
+    allowed_requesters: Vec<String>,
 }
 
 impl Bot {
@@ -100,6 +101,7 @@ impl Bot {
             inbound_trigger,
             outbound_prefix,
             occupant_kind,
+            allowed_requesters: Vec::new(),
         })
     }
 
@@ -126,6 +128,28 @@ impl Bot {
     #[must_use]
     pub fn occupant_kind(&self) -> &str {
         &self.occupant_kind
+    }
+
+    /// Configure additional requester public keys as normalized hex.
+    #[must_use]
+    pub fn with_allowed_requesters(mut self, keys: Vec<String>) -> Self {
+        self.allowed_requesters = keys;
+        self
+    }
+
+    #[must_use]
+    pub fn allowed_requesters(&self) -> &[String] {
+        &self.allowed_requesters
+    }
+
+    /// Authorize the operator or an explicitly allowlisted requester.
+    #[must_use]
+    pub fn authorizes(&self, operator: &str, author: &str) -> bool {
+        author.eq_ignore_ascii_case(operator)
+            || self
+                .allowed_requesters
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case(author))
     }
 }
 

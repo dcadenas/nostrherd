@@ -1727,7 +1727,7 @@ pub struct NewTurn {
     pub channel_id: String,
     pub event_id: EventId,
     pub reply_to_event_id: Option<EventId>,
-    /// Persisted ask source for host-initiated turns.
+    /// Trigger requester/request JSON, or a typed host-wake body; absent on legacy triggers.
     pub ask_body: Option<String>,
     /// Relay event answered by the final, absent for host-initiated wakes.
     pub publish_reply_to_event_id: Option<EventId>,

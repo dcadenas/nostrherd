@@ -171,6 +171,11 @@ fn operator() -> String {
     "a".repeat(64)
 }
 
+fn peer() -> &'static Keys {
+    static KEYS: std::sync::OnceLock<Keys> = std::sync::OnceLock::new();
+    KEYS.get_or_init(Keys::generate)
+}
+
 fn tag(parts: &[&str]) -> Tag {
     Tag::parse(parts.iter().copied()).expect("tag")
 }
@@ -188,7 +193,7 @@ fn event_with_keys(
 }
 
 fn event(kind: u16, content: &str, tags: impl IntoIterator<Item = Tag>) -> Event {
-    event_with_keys(&Keys::generate(), kind, content, tags)
+    event_with_keys(peer(), kind, content, tags)
 }
 
 fn trigger_event(channel: &str, body: &str, reply: Option<&str>) -> Event {
@@ -233,7 +238,9 @@ impl Harness {
                 calls: Mutex::new(Vec::new()),
                 released: Mutex::new(Vec::new()),
             }),
-            bot: Bot::new(BotId::new("bot").expect("id"), corpus, "opencode").expect("bot"),
+            bot: Bot::new(BotId::new("bot").expect("id"), corpus, "opencode")
+                .expect("bot")
+                .with_allowed_requesters(vec![peer().public_key().to_hex()]),
         }
     }
 
@@ -243,7 +250,7 @@ impl Harness {
             "f".repeat(64),
             SqliteRepository::open(&self.db_path).expect("ingest db"),
         )
-        .with_inbound_trigger(self.bot.inbound_trigger());
+        .with_bots(std::slice::from_ref(&self.bot));
         ingest.ingest(event).expect("ingest")
     }
 
@@ -253,6 +260,7 @@ impl Harness {
             SqliteRepository::open(&self.db_path).expect("actor db"),
             Arc::clone(&self.panes),
             PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
+            self.operator.clone(),
         )
     }
 
@@ -282,8 +290,15 @@ fn ask_requests(harness: &Harness) -> Vec<String> {
     harness
         .ask_bodies()
         .iter()
-        .map(|body| ask_body_request(std::str::from_utf8(body).expect("utf8")).to_owned())
+        .map(|body| peer_request(std::str::from_utf8(body).expect("utf8")).to_owned())
         .collect()
+}
+
+fn peer_request(body: &str) -> &str {
+    use nostr_sdk::prelude::ToBech32;
+    ask_body_request(body)
+        .strip_prefix(&format!("[{}]: ", peer().public_key().to_bech32().unwrap()))
+        .expect("allowlisted requester stamp")
 }
 
 fn ask_has_context(body: &[u8]) -> bool {
@@ -370,6 +385,10 @@ fn flow_02_first_call_starts_bot_foobar_and_asks() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one isolated relay journey through refusal, queue, restart and publish"
+)]
 async fn local_relay_contract_before_synthetic_occupant() {
     use crate::outbox::BuzzPublisher;
     use nostr_sdk::prelude::{Filter, LocalRelay};
@@ -382,8 +401,35 @@ async fn local_relay_contract_before_synthetic_occupant() {
     client.add_relay(&url).await.expect("relay");
     client.connect().and_wait(Duration::from_secs(3)).await;
     let keys = Keys::generate();
-    let mut harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let mut harness = Harness::new([
+        adopt(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+        whoami(),
+        asked("ask-2"),
+    ]);
     harness.operator = keys.public_key().to_hex();
+    harness.bot = harness.bot.clone().with_allowed_requesters(Vec::new());
+    let refused = event_with_keys(
+        peer(),
+        9,
+        "bot: self: refused",
+        [tag(&["h", FOOBAR]), tag(&["p", &harness.operator])],
+    );
+    client.send_event(&refused).await.unwrap();
+    let fetched = client
+        .fetch_events(Filter::new().id(refused.id))
+        .timeout(Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert!(harness.ingest(fetched.first().unwrap()).is_none());
+    assert!(harness.panes.calls.lock().unwrap().is_empty());
+    harness.bot = harness
+        .bot
+        .clone()
+        .with_allowed_requesters(vec![peer().public_key().to_hex()]);
     let corpus = harness.bot.corpus_path();
     let personality = "Answer briefly and keep the author's personality.\n";
     std::fs::write(corpus.join("AGENTS.md"), personality).expect("personality");
@@ -415,6 +461,32 @@ async fn local_relay_contract_before_synthetic_occupant() {
             .expect("handle"),
         TriggerOutcome::Asked
     );
+    assert_eq!(
+        ask_body_request(std::str::from_utf8(&harness.ask_bodies()[0]).unwrap()),
+        "self: contract proof"
+    );
+    let allowed = event_with_keys(
+        peer(),
+        9,
+        "bot: self: peer proof",
+        [tag(&["h", FOOBAR]), tag(&["p", &harness.operator])],
+    );
+    client.send_event(&allowed).await.unwrap();
+    let fetched = client
+        .fetch_events(Filter::new().id(allowed.id))
+        .timeout(Duration::from_secs(3))
+        .await
+        .unwrap();
+    let action = harness.ingest(fetched.first().unwrap()).unwrap();
+    assert_eq!(
+        actor
+            .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
+            .unwrap(),
+        TriggerOutcome::Queued
+    );
+    assert!(harness.ingest(&allowed).is_none());
+    drop(actor);
+    let mut actor = harness.actor();
     let startup = std::fs::read_to_string(corpus.join("startup.md")).expect("written contract");
     assert_eq!(startup.matches("<!-- nostrherd-contract -->").count(), 1);
     assert!(startup.contains("The host stamps `[bot]:`"));
@@ -459,6 +531,33 @@ async fn local_relay_contract_before_synthetic_occupant() {
         1
     );
     assert_eq!(turns(&actor, FOOBAR)[0].state, TurnState::Posted);
+    assert_eq!(
+        peer_request(std::str::from_utf8(&harness.ask_bodies()[1]).unwrap()),
+        "self: peer proof"
+    );
+    actor
+        .handle_occupant_delivery(
+            &harness.kelpie,
+            &waiter,
+            &publisher,
+            &occupant_reply("ask-2", "final", "peer proof complete"),
+        )
+        .unwrap();
+    let posts = client
+        .fetch_events(Filter::new().kind(Kind::Custom(CHANNEL_KIND)))
+        .timeout(Duration::from_secs(3))
+        .await
+        .unwrap();
+    let replies: Vec<_> = posts
+        .iter()
+        .filter(|event| event.content == "[bot]: peer proof complete")
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert!(replies[0]
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().get(1) == Some(&allowed.id.to_hex())));
+    assert_eq!(turns(&actor, FOOBAR)[1].state, TurnState::Posted);
     client.disconnect().await;
     relay.shutdown();
 }
@@ -670,7 +769,7 @@ fn ask_context_includes_unprefixed_line_between_triggers() {
     );
     let bodies = harness.ask_bodies();
     let text = std::str::from_utf8(bodies.last().expect("ask")).expect("utf8");
-    assert_eq!(ask_body_request(text), "later");
+    assert_eq!(peer_request(text), "later");
     assert!(text.contains("## Context"));
     assert!(text.contains("Untrusted indexed channel text"));
     assert!(text.contains("and the PR?"));
@@ -881,7 +980,7 @@ fn flow_10_edit_answers_latest_text_and_delete_abandons() {
         asked("ask-2"),
         cancelled(),
     ]);
-    let author = Keys::generate();
+    let author = peer().clone();
     let operator = operator();
     let first = event_with_keys(
         &author,
@@ -936,7 +1035,7 @@ fn flow_10_edit_answers_latest_text_and_delete_abandons() {
 #[test]
 fn flow_10_claimed_turn_keeps_the_landing_reply() {
     let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-    let author = Keys::generate();
+    let author = peer().clone();
     let operator = operator();
     let first = event_with_keys(
         &author,
@@ -980,7 +1079,7 @@ fn flow_10_claimed_turn_keeps_the_landing_reply() {
 #[test]
 fn flow_10_posted_turn_is_left_up_after_delete() {
     let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
-    let author = Keys::generate();
+    let author = peer().clone();
     let operator = operator();
     let first = event_with_keys(
         &author,

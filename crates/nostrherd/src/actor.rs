@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use nostrherd_domain::{Bot, BotId, EventId, SessionName};
 
-use crate::ask_body::{render_ask_body, AskContextCursor};
+use crate::ask_body::{render_ask_body, AskContextCursor, TriggerRequest};
 use crate::inbox::InboxDelivery;
 use crate::outbox::{
     self, InFlightReaction, InboxAction, NoopInFlightReaction, OutboundPublisher, OutboxError,
@@ -55,6 +55,7 @@ pub trait OccupantPaneAllocator {
 /// One triggering event ready for the bot actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerWork {
+    pub author_pubkey: String,
     pub event_id: EventId,
     pub channel_id: String,
     pub channel_display: String,
@@ -178,6 +179,7 @@ impl InFlightReaction for ReactionHost {
 /// Serialized in-process actor for one configured bot.
 #[derive(Debug)]
 pub struct BotActor<R, P> {
+    operator_pubkey: String,
     bot: Bot,
     conduct_path: PathBuf,
     pub(crate) repository: R,
@@ -230,8 +232,15 @@ where
 {
     /// Create an actor for one configured bot.
     #[must_use]
-    pub fn new(bot: Bot, repository: R, panes: P, conduct_path: PathBuf) -> Self {
+    pub fn new(
+        bot: Bot,
+        repository: R,
+        panes: P,
+        conduct_path: PathBuf,
+        operator_pubkey: String,
+    ) -> Self {
         Self {
+            operator_pubkey,
             bot,
             conduct_path,
             repository,
@@ -315,6 +324,22 @@ where
         if work.nostr_body.trim().is_empty() {
             return Err(ActorError::EmptyAskBody);
         }
+        if !self
+            .bot
+            .authorizes(&self.operator_pubkey, &work.author_pubkey)
+        {
+            self.repository
+                .mark_event_processed(&work.event_id)
+                .map_err(ActorError::Repository)?;
+            return Ok(TriggerOutcome::Declined);
+        }
+        let request = TriggerRequest {
+            author_pubkey: work.author_pubkey.clone(),
+            request: work.nostr_body.clone(),
+        };
+        if request.stamped(&self.operator_pubkey).is_none() {
+            return Ok(TriggerOutcome::Declined);
+        }
         let display = if work.channel_display.is_empty() {
             work.channel_id.as_str()
         } else {
@@ -329,7 +354,10 @@ where
                 channel_id: work.channel_id.clone(),
                 event_id: work.event_id.clone(),
                 reply_to_event_id: work.reply_to_event_id.clone(),
-                ask_body: None,
+                ask_body: Some(
+                    serde_json::to_string(&request)
+                        .map_err(|error| ActorError::Snapshot(io::Error::other(error)))?,
+                ),
                 publish_reply_to_event_id: Some(work.event_id.clone()),
             })
             .map_err(ActorError::Repository)?
@@ -340,7 +368,7 @@ where
         if !self.should_ask_event(&work.channel_id, &work.event_id)? {
             return Ok(TriggerOutcome::Queued);
         }
-        self.ask_oldest_queued(kelpie, waiter, &work.channel_id, &work.nostr_body)?;
+        self.ask_oldest_queued(kelpie, waiter, &work.channel_id)?;
         Ok(TriggerOutcome::Asked)
     }
 
@@ -368,7 +396,7 @@ where
         if !self.should_ask_event(&fire.channel_id, &fire.wake_event_id)? {
             return Ok(TriggerOutcome::Queued);
         }
-        self.ask_oldest_queued(kelpie, waiter, &fire.channel_id, &fire.ask_body())?;
+        self.ask_oldest_queued(kelpie, waiter, &fire.channel_id)?;
         Ok(TriggerOutcome::Asked)
     }
 
@@ -460,6 +488,12 @@ where
                     kelpie,
                     waiter,
                     &TriggerWork {
+                        author_pubkey: self
+                            .repository
+                            .indexed_event(event_id)
+                            .map_err(ActorError::Repository)?
+                            .map(|event| event.author_pubkey)
+                            .unwrap_or_default(),
                         event_id: event_id.clone(),
                         channel_id: channel_id.clone(),
                         channel_display: channel_display.to_owned(),
@@ -774,11 +808,14 @@ where
             else {
                 continue;
             };
-            let body = self.queued_ask_body(&queued.event_id)?;
-            let Some(body) = body else {
+            if self.queued_ask_body(&queued.event_id)?.is_none() {
+                self.repository
+                    .cancel_queued_turn(&queued.event_id)
+                    .map_err(ActorError::Repository)?;
+                self.reactions.remove(&queued.event_id);
                 continue;
-            };
-            match self.ask_oldest_queued(kelpie, waiter, &session.channel_id, &body) {
+            }
+            match self.ask_oldest_queued(kelpie, waiter, &session.channel_id) {
                 Ok(()) => return Ok(Some(TriggerOutcome::Asked)),
                 Err(error) => {
                     if first_error.is_none() {
@@ -823,6 +860,41 @@ where
                 .map_err(ActorError::Repository)?;
             return Ok(TriggerOutcome::Declined);
         };
+        let author = active
+            .ask_body
+            .as_deref()
+            .and_then(|body| serde_json::from_str::<TriggerRequest>(body).ok())
+            .map(|request| request.author_pubkey);
+        let author = match author {
+            Some(author) => Some(author),
+            None => self
+                .repository
+                .indexed_event(target_event_id)
+                .map_err(ActorError::Repository)?
+                .map(|event| event.author_pubkey),
+        };
+        let Some(author) = author else {
+            return self.abandon_unclaimed(
+                kelpie,
+                waiter,
+                event_id,
+                target_event_id,
+                "requester unavailable",
+            );
+        };
+        if !self.bot.authorizes(&self.operator_pubkey, &author) {
+            return self.abandon_unclaimed(
+                kelpie,
+                waiter,
+                event_id,
+                target_event_id,
+                "requester not authorized",
+            );
+        }
+        let request_record = TriggerRequest {
+            author_pubkey: author,
+            request: request.to_owned(),
+        };
         let Some(replaced) = self
             .repository
             .replace_unclaimed_turn(&NewTurn {
@@ -830,7 +902,10 @@ where
                 channel_id: active.channel_id.clone(),
                 event_id: target_event_id.clone(),
                 reply_to_event_id: active.reply_to_event_id.clone(),
-                ask_body: None,
+                ask_body: Some(
+                    serde_json::to_string(&request_record)
+                        .map_err(|error| ActorError::Snapshot(io::Error::other(error)))?,
+                ),
                 publish_reply_to_event_id: Some(target_event_id.clone()),
             })
             .map_err(ActorError::Repository)?
@@ -854,7 +929,7 @@ where
             .mark_event_processed(event_id)
             .map_err(ActorError::Repository)?;
         if self.should_ask_event(&replaced.queued.channel_id, &replaced.queued.event_id)? {
-            self.ask_oldest_queued(kelpie, waiter, &replaced.queued.channel_id, request)?;
+            self.ask_oldest_queued(kelpie, waiter, &replaced.queued.channel_id)?;
             return Ok(TriggerOutcome::Asked);
         }
         match self.resume_queued(kelpie, waiter)? {
@@ -939,8 +1014,31 @@ where
             .repository
             .active_turn_for_event(event_id)
             .map_err(ActorError::Repository)?;
-        if let Some(body) = turn.as_ref().and_then(|turn| turn.ask_body.clone()) {
-            return Ok(Some(body));
+        if let Some(turn) = &turn {
+            if turn.publish_reply_to_event_id.is_none() {
+                return Ok(turn.ask_body.clone());
+            }
+            if let Some(body) = &turn.ask_body {
+                let Ok(request) = serde_json::from_str::<TriggerRequest>(body) else {
+                    return Ok(None);
+                };
+                return Ok(self
+                    .bot
+                    .authorizes(&self.operator_pubkey, &request.author_pubkey)
+                    .then(|| request.stamped(&self.operator_pubkey))
+                    .flatten());
+            }
+        }
+        let Some(author) = self
+            .repository
+            .indexed_event(event_id)
+            .map_err(ActorError::Repository)?
+            .map(|event| event.author_pubkey)
+        else {
+            return Ok(None);
+        };
+        if !self.bot.authorizes(&self.operator_pubkey, &author) {
+            return Ok(None);
         }
         Ok(self
             .repository
@@ -949,8 +1047,14 @@ where
             .and_then(|content| {
                 nostrherd_domain::TriggerMatch::from_body(&content, self.bot.inbound_trigger())
             })
-            .map(|trigger| trigger.request().to_owned())
-            .filter(|content| !content.is_empty()))
+            .filter(|trigger| !trigger.request().is_empty())
+            .and_then(|trigger| {
+                TriggerRequest {
+                    author_pubkey: author,
+                    request: trigger.request().to_owned(),
+                }
+                .stamped(&self.operator_pubkey)
+            }))
     }
 
     fn recover_open_session(
@@ -1016,13 +1120,27 @@ where
         kelpie: &KelpieClient,
         waiter: &HostWaiter<'_>,
         channel_id: &str,
-        nostr_body: &str,
     ) -> Result<(), ActorError<R::Error>> {
         let mut session = self
             .repository
             .session(self.bot.id(), channel_id)
             .map_err(ActorError::Repository)?
             .ok_or(ActorError::UnnameableSession)?;
+        let queued = self
+            .repository
+            .turns_for_session(self.bot.id(), channel_id)
+            .map_err(ActorError::Repository)?
+            .into_iter()
+            .filter(|turn| turn.state == TurnState::Queued)
+            .min_by_key(|turn| turn.sequence)
+            .ok_or(ActorError::UnnameableSession)?;
+        let Some(stamped_body) = self.queued_ask_body(&queued.event_id)? else {
+            self.repository
+                .cancel_queued_turn(&queued.event_id)
+                .map_err(ActorError::Repository)?;
+            self.reactions.remove(&queued.event_id);
+            return Ok(());
+        };
         let snapshot_relpath = self.refresh_snapshot(&session)?;
         if session.occupant_logical_id.is_none() {
             let occupant =
@@ -1052,20 +1170,15 @@ where
                 )?;
             }
         }
-        let queued = self
-            .repository
-            .turns_for_session(self.bot.id(), channel_id)
-            .map_err(ActorError::Repository)?
-            .into_iter()
-            .filter(|turn| turn.state == TurnState::Queued)
-            .min_by_key(|turn| turn.sequence)
-            .ok_or(ActorError::UnnameableSession)?;
         let events = self.channel_events_for_occupant(channel_id)?;
-        let context_event_id = queued
-            .ask_body
-            .as_ref()
-            .and(queued.reply_to_event_id.as_ref())
-            .unwrap_or(&queued.event_id);
+        let context_event_id = if queued.publish_reply_to_event_id.is_none() {
+            queued
+                .reply_to_event_id
+                .as_ref()
+                .unwrap_or(&queued.event_id)
+        } else {
+            &queued.event_id
+        };
         let trigger_created_at = match self
             .repository
             .indexed_event(context_event_id)
@@ -1085,7 +1198,7 @@ where
             _ => None,
         };
         let rendered = render_ask_body(
-            nostr_body,
+            &stamped_body,
             &session.session_name,
             channel_id,
             cursor.as_ref(),
@@ -1451,6 +1564,16 @@ pub fn persist_ingest<R: HostRepository>(
             } else {
                 channel_display
             };
+            let Some(event) = repository
+                .indexed_event(event_id)
+                .map_err(ActorError::Repository)?
+            else {
+                return Ok(TriggerOutcome::Declined);
+            };
+            let request = TriggerRequest {
+                author_pubkey: event.author_pubkey,
+                request: trigger.request().to_owned(),
+            };
             match ensure_bot_session(bot, repository, channel_id, display) {
                 Ok(_) => {}
                 Err(ActorError::UnnameableSession) => {
@@ -1467,7 +1590,10 @@ pub fn persist_ingest<R: HostRepository>(
                     channel_id: channel_id.clone(),
                     event_id: event_id.clone(),
                     reply_to_event_id: reply_to_event_id.clone(),
-                    ask_body: None,
+                    ask_body: Some(
+                        serde_json::to_string(&request)
+                            .map_err(|error| ActorError::Snapshot(io::Error::other(error)))?,
+                    ),
                     publish_reply_to_event_id: Some(event_id.clone()),
                 })
                 .map_err(ActorError::Repository)?
@@ -1741,11 +1867,82 @@ mod tests {
 
     fn work(character: char, body: &str, reply: Option<char>) -> TriggerWork {
         TriggerWork {
+            author_pubkey: "b".repeat(64),
             event_id: event_id(character),
             channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
             channel_display: "Foobar".to_owned(),
             reply_to_event_id: reply.map(event_id),
             nostr_body: body.to_owned(),
+        }
+    }
+
+    fn index_work(repository: &mut SqliteRepository, work: &TriggerWork) {
+        repository
+            .index_event(
+                &IndexedRelayEvent {
+                    event_id: work.event_id.clone(),
+                    author_pubkey: work.author_pubkey.clone(),
+                    created_at: 1,
+                    kind: 9,
+                    content: format!("bot: {}", work.nostr_body),
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(work.channel_id.clone()),
+                    target_event_id: None,
+                },
+                true,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn queued_requester_checks_cover_legacy_rows_revocation_and_missing_identity() {
+        for (stored, indexed, allowed) in [
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+        ] {
+            let (mut actor, kelpie, runner, panes) = actor([adopt()]);
+            actor.operator_pubkey = "a".repeat(64);
+            let work = work('c', "status", None);
+            actor.ensure_session(&work.channel_id, "Foobar").unwrap();
+            if indexed {
+                index_work(&mut actor.repository, &work);
+            }
+            if allowed {
+                actor.bot = actor
+                    .bot
+                    .clone()
+                    .with_allowed_requesters(vec![work.author_pubkey.clone()]);
+            }
+            actor
+                .repository
+                .enqueue_turn(&NewTurn {
+                    bot_id: actor.bot.id().clone(),
+                    channel_id: work.channel_id.clone(),
+                    event_id: work.event_id.clone(),
+                    reply_to_event_id: None,
+                    publish_reply_to_event_id: Some(work.event_id.clone()),
+                    ask_body: stored.then(|| {
+                        serde_json::to_string(&TriggerRequest {
+                            author_pubkey: work.author_pubkey.clone(),
+                            request: work.nostr_body.clone(),
+                        })
+                        .unwrap()
+                    }),
+                })
+                .unwrap();
+            let waiter = kelpie.register_waiter().unwrap();
+            assert_eq!(actor.resume_queued(&kelpie, &waiter).unwrap(), None);
+            assert!(panes.calls.lock().unwrap().is_empty());
+            assert_eq!(runner.calls.lock().unwrap().len(), 1);
+            assert_eq!(
+                actor
+                    .repository
+                    .turns_for_session(actor.bot.id(), &work.channel_id)
+                    .unwrap()[0]
+                    .state,
+                TurnState::Cancelled
+            );
         }
     }
 
@@ -1774,6 +1971,7 @@ mod tests {
                 repository,
                 Arc::clone(&panes),
                 PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
+                "b".repeat(64),
             ),
             kelpie,
             runner,
@@ -2140,14 +2338,15 @@ mod tests {
             SqliteRepository::open(&database).expect("reopen repository"),
             Arc::clone(&panes),
             PathBuf::from("/synthetic-install/skills/bot-conduct/SKILL.md"),
+            "b".repeat(64),
         );
         for _ in 0..2 {
             actor
-                .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+                .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
                 .expect_err("still unsettled");
         }
         actor
-            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
             .expect("same occupant recovered");
         assert_eq!(panes.calls.lock().unwrap().len(), 1);
         assert!(panes.released.lock().unwrap().is_empty());
@@ -2198,7 +2397,7 @@ mod tests {
             .handle_trigger(&kelpie, &waiter, &trigger)
             .unwrap_err();
         actor
-            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
             .unwrap_err();
         assert_eq!(panes.calls.lock().unwrap().len(), 1);
         assert!(panes.released.lock().unwrap().is_empty());
@@ -2243,9 +2442,10 @@ mod tests {
             SqliteRepository::open(database).unwrap(),
             Arc::clone(&panes),
             PathBuf::from("/synthetic-install/skills/bot-conduct/SKILL.md"),
+            "b".repeat(64),
         );
         actor
-            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
             .unwrap();
         let attempt = actor
             .repository
@@ -2492,7 +2692,7 @@ mod tests {
             asked("ask-recovered-commit"),
         ]);
         actor
-            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
             .unwrap();
         assert_eq!(panes.calls.lock().unwrap().len(), 1);
         assert!(
@@ -2740,6 +2940,8 @@ mod tests {
 
     fn ask_request(body: &[u8]) -> &str {
         crate::ask_body::ask_body_request(std::str::from_utf8(body).expect("utf8"))
+            .strip_prefix("self: ")
+            .expect("operator requester stamp")
     }
 
     fn ask_has_context(body: &[u8]) -> bool {
@@ -3515,6 +3717,7 @@ mod tests {
             .expect("trigger"),
         };
 
+        index_work(&mut actor.repository, &trigger);
         assert_eq!(
             actor
                 .handle_ingest(&kelpie, &waiter, &action, &trigger.channel_display)
@@ -3530,6 +3733,7 @@ mod tests {
                 .expect("repository");
         let bot = bot();
         let trigger = work('a', "@daniel bot: hello", Some('c'));
+        index_work(&mut repository, &trigger);
         let action = crate::relay::IngestAction::TurnCandidate {
             bot_id: nostrherd_domain::BotId::new("bot").expect("id"),
             event_id: trigger.event_id.clone(),
@@ -3608,6 +3812,13 @@ mod tests {
                 .expect("repository");
         let bot = bot();
         let event = event_id('a');
+        index_work(
+            &mut repository,
+            &TriggerWork {
+                channel_id: "not-a-uuid".to_owned(),
+                ..work('a', "hi", None)
+            },
+        );
         let action = crate::relay::IngestAction::TurnCandidate {
             bot_id: nostrherd_domain::BotId::new("bot").expect("id"),
             event_id: event.clone(),
