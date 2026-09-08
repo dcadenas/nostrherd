@@ -84,8 +84,11 @@ pub const OCCUPANT_BOOTSTRAP: &str =
 /// Wall-clock renew interval for a session occupant (D27).
 pub const OCCUPANT_RENEW_EVERY: &str = "45m";
 
-/// Prepare prompt stored on the occupant renew policy (D27).
-pub const OCCUPANT_RENEW_PREPARE: &str = "Write progress.md so a later instance of you can resume this channel work with no memory of this conversation: what is done, what is next, decisions and why, absolute paths.";
+/// Prepare prompt stored on one session's occupant renew policy.
+#[must_use]
+pub fn occupant_renew_prepare(progress_relpath: &str) -> String {
+    format!("Write {progress_relpath} so a later instance of you can resume this channel work with no memory of this conversation: what is done, what is next, decisions and why, absolute paths. Keep root startup.md channel-neutral. Do not write root progress.md or another session's state.")
+}
 
 /// Return the current Unix timestamp in seconds.
 ///
@@ -108,9 +111,9 @@ pub fn occupant_bootstrap(snapshot_relpath: &str) -> String {
 
 /// Resume prompt stored on the occupant renew policy.
 #[must_use]
-pub fn occupant_renew_resume(snapshot_relpath: &str) -> String {
+pub fn occupant_renew_resume(snapshot_relpath: &str, progress_relpath: &str) -> String {
     format!(
-        "Read startup.md, then the channel snapshot at {snapshot_relpath}. Continue from progress.md if it exists."
+        "Read startup.md, then the channel snapshot at {snapshot_relpath}. Continue from {progress_relpath} if it exists. Do not read root progress.md or another session's state. Keep root startup.md channel-neutral."
     )
 }
 
@@ -676,8 +679,10 @@ impl KelpieClient {
         logical_agent_id: &str,
         incarnation_id: &str,
         snapshot_relpath: &str,
+        progress_relpath: &str,
     ) -> Result<String, KelpieError> {
-        let resume = occupant_renew_resume(snapshot_relpath);
+        let prepare = occupant_renew_prepare(progress_relpath);
+        let resume = occupant_renew_resume(snapshot_relpath, progress_relpath);
         let output = self.invoke(
             &[
                 "--json",
@@ -687,7 +692,7 @@ impl KelpieClient {
                 "--recipient-incarnation",
                 incarnation_id,
                 "--prepare-prompt",
-                OCCUPANT_RENEW_PREPARE,
+                &prepare,
                 "--prompt",
                 &resume,
                 "--on-timeout",
@@ -1420,9 +1425,10 @@ mod tests {
         }))]));
         let client = KelpieClient::with_runner(Arc::clone(&runner));
         let snapshot = ".nostrherd/places/bot-foobar.md";
+        let progress = ".nostrherd/sessions/bot-foobar/progress.md";
 
         let renew_id = client
-            .arm_occupant_renew("occupant-agent", "occupant-incarnation", snapshot)
+            .arm_occupant_renew("occupant-agent", "occupant-incarnation", snapshot, progress)
             .expect("renew");
 
         assert_eq!(renew_id, "renew-1");
@@ -1448,11 +1454,11 @@ mod tests {
         assert!(calls[0]
             .0
             .windows(2)
-            .any(|pair| pair == ["--prepare-prompt", OCCUPANT_RENEW_PREPARE]));
+            .any(|pair| pair == ["--prepare-prompt", &occupant_renew_prepare(progress)]));
         assert!(calls[0]
             .0
             .windows(2)
-            .any(|pair| pair == ["--prompt", &occupant_renew_resume(snapshot)]));
+            .any(|pair| pair == ["--prompt", &occupant_renew_resume(snapshot, progress)]));
     }
 
     #[test]
@@ -1668,6 +1674,7 @@ pub mod ask_body;
 pub mod config;
 pub mod herdr;
 pub mod inbox;
+pub mod init;
 pub mod outbox;
 pub mod progress;
 pub mod relay;

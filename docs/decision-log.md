@@ -356,7 +356,7 @@ upper slack is Buzz's accepted clock drift from D24). Corpus
 Occupant start and each new Turn refresh that file. The occupant
 self-renews (`kelpie renew --every 45m --on-timeout abort` on its own
 incarnation). The host MUST NOT arm occupant renew with `--sender-id`
-of waiter `nostrherd` (D32). Prepare writes `progress.md`. Resume reads
+of waiter `nostrherd` (D32). Prepare writes the session checkpoint (D56). Resume reads
 `startup.md` and the snapshot. D19's MUST is the file contents, not
 occupant filesystem isolation: occupants share the corpus cwd (D7).
 Token-count renew remains later (Q6).
@@ -1059,7 +1059,28 @@ a throwaway proof fixture. Removing copied protocol from existing live corpora
 is a separate operator-owned rollout, never an automatic host migration.
 Contract changes are not announced; the block regenerates on refresh and
 occupants read it on startup or renew. No announcement mechanism is added.
+## D56. Shared corpus instructions; channel-local continuation state
 
+Status: accepted
+
+Amends D27 and D55. Occupants sharing a corpus keep the same channel-neutral
+root `startup.md` and fixed corpus instructions. Channel work and continuation
+instructions MUST NOT be written into that shared startup file.
+
+The renew checkpoint is `.nostrherd/sessions/<session-name>/progress.md`.
+The key is the existing stored, filesystem-safe session name (D10, D54), not
+a channel ID, pane, incarnation or ask id. The host creates the directory;
+the occupant writes the checkpoint. Prepare and resume prompts name that exact
+path, and resume also names the existing `.nostrherd/places/<session-name>.md`
+snapshot. No additional continuation file is needed. All channel-specific
+occupant state belongs under that session directory. Keep `.nostrherd/` ignored
+in corpus git, as the creation template already does.
+
+Root `progress.md` and other sessions' checkpoints MUST NOT be read or written
+for continuation. Existing shared checkpoints are not migrated automatically:
+their channel ownership is ambiguous. Existing renew policies receive the new
+prompts when armed again; this change does not mutate running policies or
+restart occupants.
 ## D57. Operator-only default and host-stamped requester identity
 
 Status: accepted (issue 87)

@@ -390,7 +390,6 @@ fn flow_02_first_call_starts_bot_foobar_and_asks() {
     reason = "one isolated relay journey through refusal, queue, restart and publish"
 )]
 async fn local_relay_contract_before_synthetic_occupant() {
-    use crate::outbox::BuzzPublisher;
     use nostr_sdk::prelude::{Filter, LocalRelay};
     use std::time::Duration;
 
@@ -508,8 +507,20 @@ async fn local_relay_contract_before_synthetic_occupant() {
             .find(|call| call.0[1] == "start")
             .expect("synthetic start");
         assert!(String::from_utf8_lossy(&bootstrap.1).contains("Read startup.md before answering"));
+        let renew = calls
+            .iter()
+            .find(|call| call.0[1] == "renew")
+            .expect("renew");
+        for flag in ["--prepare-prompt", "--prompt"] {
+            let prompt = renew
+                .0
+                .windows(2)
+                .find(|pair| pair[0] == flag)
+                .expect("prompt");
+            assert!(prompt[1].contains(".nostrherd/sessions/bot-foobar/progress.md"));
+        }
     }
-    let publisher = BuzzPublisher::new(client.clone(), keys, url.to_string());
+    let publisher = crate::outbox::BuzzPublisher::new(client.clone(), keys, url.to_string());
     actor
         .handle_occupant_delivery(
             &harness.kelpie,
@@ -798,6 +809,11 @@ fn flow_05_another_channel_is_an_independent_occupant() {
     actor
         .handle_ingest(&harness.kelpie, &waiter, &foobar_action, "Foobar")
         .expect("foobar");
+    let corpus = harness.bot.corpus_path();
+    let startup = std::fs::read_to_string(corpus.join("startup.md")).expect("startup");
+    let foobar_progress = corpus.join(".nostrherd/sessions/bot-foobar/progress.md");
+    assert!(!foobar_progress.exists());
+    std::fs::write(&foobar_progress, "Foobar checkpoint").expect("checkpoint");
     assert_eq!(
         actor
             .handle_ingest(&harness.kelpie, &waiter, &eng_action, "Eng")
@@ -817,6 +833,44 @@ fn flow_05_another_channel_is_an_independent_occupant() {
         .map(|(name, _)| name.clone())
         .collect();
     assert_eq!(names, ["bot-foobar", "bot-eng"]);
+    let eng_progress = corpus.join(".nostrherd/sessions/bot-eng/progress.md");
+    assert!(!eng_progress.exists());
+    std::fs::write(&eng_progress, "Eng checkpoint").expect("checkpoint");
+    assert_eq!(
+        std::fs::read_to_string(foobar_progress).expect("foobar checkpoint"),
+        "Foobar checkpoint"
+    );
+    assert_eq!(
+        std::fs::read_to_string(eng_progress).expect("eng checkpoint"),
+        "Eng checkpoint"
+    );
+    assert_eq!(
+        std::fs::read_to_string(corpus.join("startup.md")).expect("startup"),
+        startup
+    );
+    assert!(!startup.contains("bot-foobar"));
+    assert!(!startup.contains("bot-eng"));
+    assert!(!corpus.join("progress.md").exists());
+    let calls = harness.runner.calls.lock().expect("calls");
+    let renews: Vec<_> = calls.iter().filter(|call| call.0[1] == "renew").collect();
+    assert_eq!(renews.len(), 2);
+    for (renew, name, other) in [
+        (renews[0], "bot-foobar", "bot-eng"),
+        (renews[1], "bot-eng", "bot-foobar"),
+    ] {
+        for flag in ["--prepare-prompt", "--prompt"] {
+            let prompt = renew
+                .0
+                .windows(2)
+                .find(|pair| pair[0] == flag)
+                .expect("prompt");
+            assert!(prompt[1].contains(&format!(".nostrherd/sessions/{name}/progress.md")));
+            assert!(!prompt[1].contains(other));
+            if flag == "--prompt" {
+                assert!(prompt[1].contains(&format!(".nostrherd/places/{name}.md")));
+            }
+        }
+    }
 }
 
 #[test]
