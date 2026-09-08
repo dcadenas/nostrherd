@@ -142,6 +142,46 @@ with leftover `botcli`. Occupant steps below match the current path
 
 ## Live local relay
 
+### Dispatch identity (issue 82)
+
+`dispatch_proof` drives a real host, Herdr/Kelpie occupant and local
+`groups_relay`. It generates the operator key in memory and passes it only
+through the host child's environment, never a key file or command argument.
+The example refuses an existing case directory and checks one stamped pong,
+its trigger reference and the exact session's logical identity count.
+
+Run only inside a disposable fixture with a fresh Herdr/Kelpie store, direct
+executables (not version-manager shims), and a relay on `127.0.0.1:18082`.
+Do not reuse an operator runtime or an occupied loopback port. The fixture
+mounts this source at `/src`, places the real Kelpie CLI at `/work/bin/kelpie`,
+and provides a working `pi` backend. Herdr 0.9.0 needs a Kelpie build with
+endpoint-generation negotiation, such as commit `14675cc8`; the original
+protocol-20-only Kelpie build rejects its protocol-22 handshake.
+
+```bash
+cargo build -p nostrherd --bin nostrherd --example dispatch_proof
+NOSTRHERD_DISPATCH_PROOF=isolated \
+NOSTRHERD_DISPATCH_PROOF_BIN=/path/to/target/debug/examples/dispatch_proof \
+  ./tools/local-relay dispatch-proof /work/new-case /path/to/nostrherd 1
+```
+
+Ship `skills/bot-conduct/SKILL.md` beside a relocated host binary (D55).
+The case directory retains `host.log`, `host.sqlite` and `report.json`.
+For transport-fault proof, `NOSTRHERD_PROOF_KELPIE_DIR` prepends a fixture-only
+CLI wrapper to the host child's PATH without changing the occupant's PATH.
+A wrapper can run the real start but withhold its receipt; the real report
+must still contain only one identity after the host reconciles. Label such
+injected faults separately from naturally occurring readiness conflicts.
+
+The unit tests listed under I23 exercise repeated readiness conflicts, exact
+adoption receipts, missing/mismatched evidence, SQLite rollback and disk reopen.
+`restart_replays_an_undeclared_start_with_the_original_key_and_preserves_io_error`
+also compares the complete start argv and stdin across restart, not merely the
+presence of a key flag. `terminal_starts_are_recoverable_and_a_receipt_disambiguates_reused_seats`
+covers ended states and identity evidence on a reused seat.
+`declared_start_retries_only_with_a_failed_start_operation` distinguishes a
+decisive native rejection from pending/unknown starts and failed adoptions.
+
 Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, 43, 48, and 60 require it.
 
 Issue 41 names new occupants from Buzz place display. Create a stream

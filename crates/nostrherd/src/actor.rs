@@ -43,6 +43,8 @@ pub trait OccupantPaneAllocator {
     fn allocate(&self, session_name: &str, cwd: &Path) -> Result<OccupantPane, Self::Error>;
 
     /// Close a pane whose occupant never started.
+    /// Start errors alone do not prove a pane is empty; automatic reclamation
+    /// of leaked workspaces is outside D39's scope.
     ///
     /// # Errors
     ///
@@ -1024,7 +1026,7 @@ where
         let snapshot_relpath = self.refresh_snapshot(&session)?;
         if session.occupant_logical_id.is_none() {
             let occupant =
-                self.start_occupant(kelpie, waiter, &session, &snapshot_relpath, None)?;
+                self.start_occupant(kelpie, waiter, &mut session, &snapshot_relpath, None)?;
             session.occupant_logical_id = Some(occupant.logical_agent_id().to_owned());
             self.repository
                 .save_session(&session)
@@ -1201,10 +1203,113 @@ where
     }
 
     fn start_occupant(
-        &self,
+        &mut self,
         kelpie: &KelpieClient,
         waiter: &HostWaiter<'_>,
-        session: &SessionRecord,
+        session: &mut SessionRecord,
+        snapshot_relpath: &str,
+        continue_as: Option<&str>,
+    ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
+        match self
+            .repository
+            .occupant_start(&session.session_name)
+            .map_err(ActorError::Repository)?
+        {
+            Some(attempt) if !attempt.completed || session.occupant_logical_id.is_none() => {
+                self.resume_recorded_start(kelpie, attempt, session)
+            }
+            _ => self.fresh_start(kelpie, waiter, session, snapshot_relpath, continue_as),
+        }
+    }
+
+    /// Settle one previously recorded, unsettled launch attempt.
+    ///
+    /// Reconciliation re-reads Kelpie's own records by exact seat, so a retry
+    /// never allocates a second identity for the same bot (D20).
+    fn resume_recorded_start(
+        &mut self,
+        kelpie: &KelpieClient,
+        mut attempt: crate::OccupantStartAttempt,
+        session: &mut SessionRecord,
+    ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
+        let outcome =
+            match kelpie.reconcile_occupant_start(&mut attempt.launch, attempt.receipt.as_ref()) {
+                Ok(crate::StartReconciliation::Missing) => {
+                    // Kelpie atomically reserves the key with identity/operation creation.
+                    // Reusing it on this same seat either starts once or is refused; it
+                    // cannot allocate a second identity (client-protocol idempotency).
+                    kelpie
+                        .dispatch_occupant_start(&mut attempt)
+                        .map(crate::StartReconciliation::Ready)
+                }
+                other => other,
+            };
+        match outcome {
+            Ok(crate::StartReconciliation::Ready(started)) => {
+                session.occupant_logical_id = Some(started.logical_agent_id().to_owned());
+                attempt.launch.logical_agent_id = Some(started.logical_agent_id().to_owned());
+                attempt.completed = true;
+                self.repository
+                    .save_occupant_start(&attempt)
+                    .map_err(ActorError::Repository)?;
+                Ok(started)
+            }
+            Ok(crate::StartReconciliation::FailedStart { logical_agent_id }) => {
+                session.occupant_logical_id = Some(logical_agent_id);
+                attempt.completed = true;
+                attempt.diagnostic = Some(
+                    "recorded incarnation ended; next attempt must continue its logical identity"
+                        .to_owned(),
+                );
+                self.repository
+                    .save_occupant_start(&attempt)
+                    .map_err(ActorError::Repository)?;
+                Err(ActorError::Kelpie(KelpieError::InvalidReceipt(
+                    "recorded incarnation ended; retry must continue its logical identity"
+                        .to_owned(),
+                )))
+            }
+            Ok(crate::StartReconciliation::Unsettled(reason)) => {
+                if attempt.diagnostic.as_deref() != Some(reason.as_str()) {
+                    eprintln!(
+                        "occupant start for {} is unsettled: {reason}; keeping the recorded attempt",
+                        session.session_name
+                    );
+                    attempt.diagnostic = Some(reason);
+                    self.repository
+                        .save_occupant_start(&attempt)
+                        .map_err(ActorError::Repository)?;
+                }
+                Err(ActorError::Kelpie(KelpieError::InvalidReceipt(format!(
+                    "unsettled occupant start for {}: refusing to allocate a replacement",
+                    session.session_name
+                ))))
+            }
+            Ok(crate::StartReconciliation::Missing) => {
+                unreachable!("missing start was dispatched above")
+            }
+            Err(error) => {
+                attempt.diagnostic = Some(error.to_string());
+                self.repository
+                    .save_occupant_start(&attempt)
+                    .map_err(ActorError::Repository)?;
+                Err(ActorError::Kelpie(error))
+            }
+        }
+    }
+
+    /// Persist one launch attempt with its key, then invoke Kelpie.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the start fails; the durable attempt keeps the
+    /// receipt and diagnostic so the retry path reconciles instead of minting
+    /// a second logical agent.
+    fn fresh_start(
+        &mut self,
+        kelpie: &KelpieClient,
+        waiter: &HostWaiter<'_>,
+        session: &mut SessionRecord,
         snapshot_relpath: &str,
         continue_as: Option<&str>,
     ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
@@ -1222,30 +1327,43 @@ where
             timeout_ms: OCCUPANT_START_TIMEOUT_MS,
             logical_agent_id: continue_as.map(str::to_owned),
         };
-        match kelpie.start_occupant(
-            &launch,
-            &bootstrap,
-            Some(waiter.identity().logical_agent_id()),
-        ) {
-            Ok(started) => Ok(started),
+        let key = format!(
+            "nostrherd:{}:{}:{}",
+            session.session_name, pane.pane_id, pane.terminal_id
+        );
+        let mut attempt = crate::OccupantStartAttempt {
+            key,
+            launch,
+            bootstrap,
+            sender_id: waiter.identity().logical_agent_id().to_owned(),
+            receipt: None,
+            start_error: None,
+            diagnostic: None,
+            completed: false,
+        };
+        self.repository
+            .save_occupant_start(&attempt)
+            .map_err(ActorError::Repository)?;
+        let outcome = kelpie.dispatch_occupant_start(&mut attempt);
+        match outcome {
+            Ok(started) => {
+                session.occupant_logical_id = Some(started.logical_agent_id().to_owned());
+                attempt.launch.logical_agent_id = Some(started.logical_agent_id().to_owned());
+                attempt.completed = true;
+                self.repository
+                    .save_occupant_start(&attempt)
+                    .map_err(ActorError::Repository)?;
+                Ok(started)
+            }
             Err(error) => {
-                // Release only on a rejection, which proves Herdr refused the
-                // request and no agent runs in this pane; the next attempt
-                // allocates a fresh one, so an unreleased pane stays behind as
-                // an empty tab. Every other error is ambiguous or reports a
-                // receipt problem raised after `runtime_start` already
-                // succeeded, and closing the pane there kills a live occupant
-                // Kelpie still tracks. Leaking an empty pane is the safer half
-                // of that trade.
-                if matches!(error, KelpieError::Rejected { .. }) {
-                    if let Err(release_error) = self.panes.release(&pane) {
-                        eprintln!(
-                            "occupant pane {} release failed: {release_error}",
-                            pane.pane_id
-                        );
-                    }
+                attempt.diagnostic = Some(error.to_string());
+                self.repository
+                    .save_occupant_start(&attempt)
+                    .map_err(ActorError::Repository)?;
+                match self.resume_recorded_start(kelpie, attempt, session) {
+                    Err(ActorError::Kelpie(_)) => Err(ActorError::Kelpie(error)),
+                    outcome => outcome,
                 }
-                Err(ActorError::Kelpie(error))
             }
         }
     }
@@ -1437,13 +1555,11 @@ mod tests {
         type Error = io::Error;
 
         fn allocate(&self, session_name: &str, cwd: &Path) -> Result<OccupantPane, Self::Error> {
-            self.calls
-                .lock()
-                .expect("calls")
-                .push((session_name.to_owned(), cwd.to_path_buf()));
+            let mut calls = self.calls.lock().expect("calls");
+            calls.push((session_name.to_owned(), cwd.to_path_buf()));
             Ok(OccupantPane {
-                pane_id: "w2:p1".to_owned(),
-                terminal_id: "term-9".to_owned(),
+                pane_id: format!("w2:p{}", calls.len()),
+                terminal_id: format!("term-{}", calls.len() + 8),
             })
         }
 
@@ -1803,7 +1919,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_start_releases_its_pane_before_surfacing_the_error() {
+    fn a_rejected_start_without_runtime_evidence_keeps_its_pane() {
         let (mut actor, kelpie, _runner, panes) = actor([
             adopt(),
             failure(
@@ -1820,10 +1936,7 @@ mod tests {
             .expect_err("start rejected");
 
         assert!(error.to_string().contains("agent_pane_busy"), "{error}");
-        assert_eq!(
-            panes.released.lock().expect("released").as_slice(),
-            &["w2:p1".to_owned()]
-        );
+        assert!(panes.released.lock().expect("released").is_empty());
         let session = actor
             .repository
             .session(actor.bot.id(), &trigger.channel_id)
@@ -1850,6 +1963,605 @@ mod tests {
             panes.released.lock().expect("released").is_empty(),
             "a pane whose occupant may be running must not be closed"
         );
+    }
+
+    fn start_report(cwd: &Path, state: &str) -> CommandOutput {
+        success(&serde_json::json!({"agents": [{
+            "agent_id": "occupant-agent",
+            "public_name": "bot-foobar",
+            "incarnations": [{
+                "incarnation_id": "occupant-incarnation",
+                "state": state,
+                "intended_pane_id": "w2:p1",
+                "expected_terminal_id": "term-9",
+                "backend_kind": "opencode",
+                "working_directory": cwd
+            }]
+        }]}))
+    }
+
+    #[test]
+    fn reconciliation_recovers_a_ready_successor_after_an_adoption_receipt_is_lost() {
+        let (actor, kelpie, runner, _) = actor([]);
+        let output = start_report(actor.bot.corpus_path(), "starting");
+        let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let incarnations = report["result"]["agents"][0]["incarnations"]
+            .as_array_mut()
+            .unwrap();
+        let mut ready = incarnations[0].clone();
+        incarnations[0]["incarnation_id"] = "prior-start-incarnation".into();
+        ready["state"] = "ready".into();
+        incarnations.push(ready);
+        runner
+            .outputs
+            .lock()
+            .unwrap()
+            .extend([success(&report["result"]), whoami()]);
+        let mut launch = OccupantLaunch {
+            name: "bot-foobar".to_owned(),
+            pane_id: "w2:p1".to_owned(),
+            terminal_id: "term-9".to_owned(),
+            backend: "opencode".to_owned(),
+            cwd: actor.bot.corpus_path().to_path_buf(),
+            timeout_ms: 90_000,
+            logical_agent_id: None,
+        };
+        assert!(matches!(
+            kelpie.reconcile_occupant_start(&mut launch, None).unwrap(),
+            crate::StartReconciliation::Ready(_)
+        ));
+        assert_eq!(launch.logical_agent_id.as_deref(), Some("occupant-agent"));
+        assert_eq!(runner.calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reconciliation_refuses_a_conflicting_seat_without_adopting() {
+        for mismatch in [
+            "name",
+            "backend",
+            "corpus",
+            "identity",
+            "two-identities",
+            "two-ready",
+            "failed-with-live-successor",
+            "declared-failed-with-live-successor",
+        ] {
+            let (actor, kelpie, runner, _) = actor([]);
+            let output = start_report(actor.bot.corpus_path(), "ready");
+            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let agent = &mut report["result"]["agents"][0];
+            match mismatch {
+                "name" => agent["public_name"] = "other".into(),
+                "backend" => agent["incarnations"][0]["backend_kind"] = "other".into(),
+                "corpus" => agent["incarnations"][0]["working_directory"] = "/other".into(),
+                "identity" => agent["agent_id"] = "other".into(),
+                "two-identities" => {
+                    let mut twin = agent.clone();
+                    twin["agent_id"] = "other".into();
+                    report["result"]["agents"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(twin);
+                }
+                "two-ready"
+                | "failed-with-live-successor"
+                | "declared-failed-with-live-successor" => {
+                    let mut second = agent["incarnations"][0].clone();
+                    second["incarnation_id"] = "successor-incarnation".into();
+                    if mismatch != "two-ready" {
+                        agent["incarnations"][0]["state"] =
+                            if mismatch == "failed-with-live-successor" {
+                                "failed"
+                            } else {
+                                "declared"
+                            }
+                            .into();
+                        agent["incarnations"][0]["latest_operation"] =
+                            serde_json::json!({"kind":"start","outcome":"failed"});
+                        second["intended_pane_id"] = "w9:p1".into();
+                    }
+                    agent["incarnations"].as_array_mut().unwrap().push(second);
+                }
+                _ => unreachable!(),
+            }
+            runner
+                .outputs
+                .lock()
+                .unwrap()
+                .push_back(success(&report["result"]));
+            let mut launch = OccupantLaunch {
+                name: "bot-foobar".to_owned(),
+                pane_id: "w2:p1".to_owned(),
+                terminal_id: "term-9".to_owned(),
+                backend: "opencode".to_owned(),
+                cwd: actor.bot.corpus_path().to_path_buf(),
+                timeout_ms: 90_000,
+                logical_agent_id: (mismatch != "two-identities")
+                    .then(|| "occupant-agent".to_owned()),
+            };
+            assert!(
+                matches!(
+                    kelpie.reconcile_occupant_start(&mut launch, None).unwrap(),
+                    crate::StartReconciliation::Unsettled(_)
+                ),
+                "{mismatch}"
+            );
+            assert_eq!(runner.calls.lock().unwrap().len(), 1, "{mismatch}");
+        }
+    }
+
+    #[test]
+    fn readiness_conflicts_and_host_restart_keep_one_start_identity() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            failure(
+                "conflict",
+                "readiness does not prove the intended incarnation",
+            ),
+        ]);
+        let database = actor.bot.corpus_path().join("host.sqlite");
+        actor.repository = SqliteRepository::open(&database).expect("disk repository");
+        let bot = actor.bot.clone();
+        runner.outputs.lock().expect("outputs").extend([
+            start_report(bot.corpus_path(), "starting"),
+            failure("conflict", "not yet ready"),
+            start_report(bot.corpus_path(), "starting"),
+            failure("conflict", "not yet ready"),
+            start_report(bot.corpus_path(), "unknown"),
+            failure("conflict", "not yet ready"),
+            start_report(bot.corpus_path(), "ready"),
+            whoami(),
+            renewed(),
+            whoami(),
+            asked("ask-recovered"),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect_err("conflict");
+        let attempt = actor
+            .repository
+            .occupant_start("bot-foobar")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attempt.receipt.as_ref().unwrap()["error"]["class"],
+            "conflict"
+        );
+        assert_eq!(
+            attempt.launch.logical_agent_id.as_deref(),
+            Some("occupant-agent")
+        );
+        drop(actor);
+
+        let mut actor = BotActor::new(
+            bot,
+            SqliteRepository::open(&database).expect("reopen repository"),
+            Arc::clone(&panes),
+            PathBuf::from("/synthetic-install/skills/bot-conduct/SKILL.md"),
+        );
+        for _ in 0..2 {
+            actor
+                .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+                .expect_err("still unsettled");
+        }
+        actor
+            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+            .expect("same occupant recovered");
+        assert_eq!(panes.calls.lock().unwrap().len(), 1);
+        assert!(panes.released.lock().unwrap().is_empty());
+        let calls = runner.calls.lock().unwrap();
+        let starts: Vec<_> = calls
+            .iter()
+            .filter(|(args, _)| args.iter().any(|arg| arg == "start"))
+            .collect();
+        assert_eq!(starts.len(), 1);
+        assert!(starts[0]
+            .0
+            .windows(2)
+            .any(|args| args == ["--idempotency-key", &attempt.key]));
+        assert_eq!(
+            actor
+                .repository
+                .session(actor.bot.id(), &trigger.channel_id)
+                .unwrap()
+                .unwrap()
+                .occupant_logical_id
+                .as_deref(),
+            Some("occupant-agent")
+        );
+        assert_eq!(
+            actor
+                .repository
+                .occupant_start("bot-foobar")
+                .unwrap()
+                .unwrap()
+                .key,
+            attempt.key
+        );
+    }
+
+    #[test]
+    fn missing_start_report_does_not_authorize_a_replacement() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            failure("unknown", "start response lost"),
+            success(&serde_json::json!({"agents": []})),
+            failure("conflict", "key belongs to prior operation; refusing retry"),
+            success(&serde_json::json!({"agents": []})),
+            failure("conflict", "key belongs to prior operation; refusing retry"),
+        ]);
+        let waiter = kelpie.register_waiter().unwrap();
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .unwrap_err();
+        actor
+            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+            .unwrap_err();
+        assert_eq!(panes.calls.lock().unwrap().len(), 1);
+        assert!(panes.released.lock().unwrap().is_empty());
+        assert!(runner.outputs.lock().unwrap().is_empty());
+        let calls = runner.calls.lock().unwrap();
+        let starts: Vec<_> = calls
+            .iter()
+            .filter(|(args, _)| args.iter().any(|arg| arg == "start"))
+            .collect();
+        assert_eq!(starts.len(), 3);
+        assert!(starts.iter().all(|call| *call == starts[0]));
+    }
+
+    #[test]
+    fn restart_replays_an_undeclared_start_with_the_original_key_and_preserves_io_error() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            CommandOutput {
+                success: false,
+                status: "exit status: 1".to_owned(),
+                stdout: Vec::new(),
+                stderr: b"connection refused before dispatch".to_vec(),
+            },
+            failure("unknown", "report unavailable"),
+            success(&serde_json::json!({"agents": []})),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-after-restart"),
+        ]);
+        let database = actor.bot.corpus_path().join("host.sqlite");
+        actor.repository = SqliteRepository::open(&database).unwrap();
+        let bot = actor.bot.clone();
+        let waiter = kelpie.register_waiter().unwrap();
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .unwrap_err();
+        drop(actor);
+        let mut actor = BotActor::new(
+            bot,
+            SqliteRepository::open(database).unwrap(),
+            Arc::clone(&panes),
+            PathBuf::from("/synthetic-install/skills/bot-conduct/SKILL.md"),
+        );
+        actor
+            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+            .unwrap();
+        let attempt = actor
+            .repository
+            .occupant_start("bot-foobar")
+            .unwrap()
+            .unwrap();
+        assert!(attempt.completed);
+        assert!(attempt
+            .start_error
+            .unwrap()
+            .contains("connection refused before dispatch"));
+        assert_eq!(panes.calls.lock().unwrap().len(), 1);
+        let calls = runner.calls.lock().unwrap();
+        let starts: Vec<_> = calls
+            .iter()
+            .filter(|(args, _)| args.iter().any(|arg| arg == "start"))
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0], starts[1]);
+    }
+
+    #[test]
+    fn terminal_starts_are_recoverable_and_a_receipt_disambiguates_reused_seats() {
+        for state in ["failed", "retired", "superseded", "ready"] {
+            let (actor, kelpie, runner, _) = actor([]);
+            let output = start_report(actor.bot.corpus_path(), state);
+            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let mut other = report["result"]["agents"][0].clone();
+            other["agent_id"] = "other-identity".into();
+            report["result"]["agents"]
+                .as_array_mut()
+                .unwrap()
+                .push(other);
+            runner
+                .outputs
+                .lock()
+                .unwrap()
+                .push_back(success(&report["result"]));
+            if state == "ready" {
+                runner.outputs.lock().unwrap().push_back(whoami());
+            }
+            let mut launch = OccupantLaunch {
+                name: "bot-foobar".to_owned(),
+                pane_id: "w2:p1".to_owned(),
+                terminal_id: "term-9".to_owned(),
+                backend: "opencode".to_owned(),
+                cwd: actor.bot.corpus_path().to_path_buf(),
+                timeout_ms: 90_000,
+                logical_agent_id: None,
+            };
+            let receipt = serde_json::json!({"result": {"logical_agent_id": "occupant-agent", "incarnation_id": "occupant-incarnation"}});
+            let outcome = kelpie
+                .reconcile_occupant_start(&mut launch, Some(&receipt))
+                .unwrap();
+            if state == "ready" {
+                assert!(matches!(outcome, crate::StartReconciliation::Ready(_)));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    crate::StartReconciliation::FailedStart { .. }
+                ));
+            }
+            assert_eq!(launch.logical_agent_id.as_deref(), Some("occupant-agent"));
+        }
+    }
+
+    #[test]
+    fn declared_start_retries_only_with_a_failed_start_operation() {
+        for (kind, outcome) in [
+            ("start", "failed"),
+            ("start", "pending"),
+            ("start", "unknown"),
+            ("adopt", "failed"),
+        ] {
+            let (actor, kelpie, runner, _) = actor([]);
+            let output = start_report(actor.bot.corpus_path(), "declared");
+            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            report["result"]["agents"][0]["incarnations"][0]["latest_operation"] =
+                serde_json::json!({"kind":kind,"outcome":outcome});
+            runner
+                .outputs
+                .lock()
+                .unwrap()
+                .push_back(success(&report["result"]));
+            let rejected = kind == "start" && outcome == "failed";
+            if !rejected {
+                runner
+                    .outputs
+                    .lock()
+                    .unwrap()
+                    .push_back(failure("conflict", "no adoptable runtime"));
+            }
+            let mut launch = OccupantLaunch {
+                name: "bot-foobar".to_owned(),
+                pane_id: "w2:p1".to_owned(),
+                terminal_id: "term-9".to_owned(),
+                backend: "opencode".to_owned(),
+                cwd: actor.bot.corpus_path().to_path_buf(),
+                timeout_ms: 90_000,
+                logical_agent_id: None,
+            };
+            let result = kelpie.reconcile_occupant_start(&mut launch, None);
+            if rejected {
+                assert!(matches!(
+                    result.unwrap(),
+                    crate::StartReconciliation::FailedStart { .. }
+                ));
+            } else {
+                assert!(
+                    result.is_err(),
+                    "{kind}/{outcome} must not authorize a replacement"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn consecutive_failed_starts_use_the_same_ended_rule_for_siblings() {
+        for outcome in ["failed", "pending", "unknown"] {
+            let (actor, kelpie, runner, _) = actor([]);
+            let output = start_report(actor.bot.corpus_path(), "failed");
+            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let current = &report["result"]["agents"][0]["incarnations"][0];
+            let mut sibling = current.clone();
+            sibling["incarnation_id"] = "prior-declaration".into();
+            sibling["intended_pane_id"] = "old:pane".into();
+            sibling["state"] = "declared".into();
+            sibling["latest_operation"] = serde_json::json!({"kind":"start","outcome":outcome});
+            report["result"]["agents"][0]["incarnations"]
+                .as_array_mut()
+                .unwrap()
+                .push(sibling);
+            runner
+                .outputs
+                .lock()
+                .unwrap()
+                .push_back(success(&report["result"]));
+            let mut launch = OccupantLaunch {
+                name: "bot-foobar".to_owned(),
+                pane_id: "w2:p1".to_owned(),
+                terminal_id: "term-9".to_owned(),
+                backend: "opencode".to_owned(),
+                cwd: actor.bot.corpus_path().to_path_buf(),
+                timeout_ms: 90_000,
+                logical_agent_id: None,
+            };
+            let result = kelpie.reconcile_occupant_start(&mut launch, None).unwrap();
+            if outcome == "failed" {
+                assert!(matches!(
+                    result,
+                    crate::StartReconciliation::FailedStart { .. }
+                ));
+            } else {
+                assert!(matches!(result, crate::StartReconciliation::Unsettled(_)));
+            }
+            assert_eq!(runner.calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn readiness_conflict_adopts_the_exact_recorded_identity() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            failure("conflict", "exact intended incarnation is not ready"),
+        ]);
+        runner.outputs.lock().unwrap().extend([
+            start_report(actor.bot.corpus_path(), "starting"),
+            success(&serde_json::json!({
+                "outcome": "succeeded",
+                "logical_agent_id": "occupant-agent",
+                "incarnation_id": "occupant-incarnation",
+                "operation_id": "adopt-operation"
+            })),
+            renewed(),
+            whoami(),
+            asked("ask-adopted"),
+        ]);
+        let waiter = kelpie.register_waiter().unwrap();
+        actor
+            .handle_trigger(&kelpie, &waiter, &work('a', "hello", None))
+            .unwrap();
+        assert_eq!(panes.calls.lock().unwrap().len(), 1);
+        let calls = runner.calls.lock().unwrap();
+        let args = &calls
+            .iter()
+            .find(|(args, _)| args.iter().any(|arg| arg == "adopt"))
+            .unwrap()
+            .0;
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--logical-id", "occupant-agent"]));
+        assert!(args.windows(2).any(|pair| pair == ["--pane", "w2:p1"]));
+        assert!(args.windows(2).any(|pair| pair == ["--terminal", "term-9"]));
+        let attempt = actor
+            .repository
+            .occupant_start("bot-foobar")
+            .unwrap()
+            .unwrap();
+        assert!(attempt.completed);
+        assert_eq!(
+            attempt.launch.logical_agent_id.as_deref(),
+            Some("occupant-agent")
+        );
+        assert_eq!(attempt.receipt.unwrap()["error"]["class"], "conflict");
+    }
+
+    #[test]
+    fn failed_binding_commit_leaves_launch_unsettled_and_recovers_without_starting_twice() {
+        let (mut actor, kelpie, runner, panes) = actor([adopt(), start()]);
+        let database = actor.bot.corpus_path().join("host.sqlite");
+        actor.repository = SqliteRepository::open(&database).unwrap();
+        let connection = Connection::open(database).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_binding BEFORE UPDATE OF occupant_logical_id ON sessions
+            WHEN NEW.occupant_logical_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'proof failed binding'); END;").unwrap();
+        let waiter = kelpie.register_waiter().unwrap();
+        let trigger = work('a', "hello", None);
+        assert!(matches!(
+            actor.handle_trigger(&kelpie, &waiter, &trigger),
+            Err(ActorError::Repository(_))
+        ));
+        assert!(
+            !actor
+                .repository
+                .occupant_start("bot-foobar")
+                .unwrap()
+                .unwrap()
+                .completed
+        );
+        assert!(actor
+            .repository
+            .session(actor.bot.id(), &trigger.channel_id)
+            .unwrap()
+            .unwrap()
+            .occupant_logical_id
+            .is_none());
+        connection
+            .execute_batch("DROP TRIGGER reject_binding;")
+            .unwrap();
+        runner.outputs.lock().unwrap().extend([
+            start_report(actor.bot.corpus_path(), "ready"),
+            whoami(),
+            renewed(),
+            whoami(),
+            asked("ask-recovered-commit"),
+        ]);
+        actor
+            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id, "hello")
+            .unwrap();
+        assert_eq!(panes.calls.lock().unwrap().len(), 1);
+        assert!(
+            actor
+                .repository
+                .occupant_start("bot-foobar")
+                .unwrap()
+                .unwrap()
+                .completed
+        );
+    }
+
+    #[test]
+    fn proven_failed_start_continues_identity_and_retains_attempt_history() {
+        let (mut actor, kelpie, runner, panes) =
+            actor([adopt(), failure("rejected", "launch rejected")]);
+        let database = actor.bot.corpus_path().join("host.sqlite");
+        actor.repository = SqliteRepository::open(&database).unwrap();
+        runner
+            .outputs
+            .lock()
+            .unwrap()
+            .extend([start_report(actor.bot.corpus_path(), "failed"), start()]);
+        let waiter = kelpie.register_waiter().unwrap();
+        let trigger = work('a', "hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .unwrap_err();
+        let previous = actor
+            .repository
+            .occupant_start("bot-foobar")
+            .unwrap()
+            .unwrap();
+        assert!(previous.completed);
+        let mut session = actor
+            .repository
+            .session(actor.bot.id(), &trigger.channel_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.occupant_logical_id.as_deref(),
+            Some("occupant-agent")
+        );
+        actor
+            .start_occupant(
+                &kelpie,
+                &waiter,
+                &mut session,
+                "snapshot.md",
+                Some("occupant-agent"),
+            )
+            .unwrap();
+        assert_eq!(panes.calls.lock().unwrap().len(), 2);
+        let calls = runner.calls.lock().unwrap();
+        let args = &calls.last().unwrap().0;
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--logical-id", "occupant-agent"]));
+        let newest = actor
+            .repository
+            .occupant_start("bot-foobar")
+            .unwrap()
+            .unwrap();
+        assert_ne!(previous.key, newest.key);
+        let count: u32 = Connection::open(database)
+            .unwrap()
+            .query_row("SELECT count(*) FROM occupant_starts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]

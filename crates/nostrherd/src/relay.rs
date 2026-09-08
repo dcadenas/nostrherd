@@ -893,10 +893,27 @@ mod tests {
         pending: HashSet<EventId>,
         processed: HashSet<EventId>,
         active_event_id: Option<EventId>,
+        occupant_starts: std::collections::HashMap<String, crate::OccupantStartAttempt>,
     }
 
     impl HostRepository for FakeRepository {
         type Error = std::convert::Infallible;
+
+        fn occupant_start(
+            &self,
+            session_name: &str,
+        ) -> Result<Option<crate::OccupantStartAttempt>, Self::Error> {
+            Ok(self.occupant_starts.get(session_name).cloned())
+        }
+
+        fn save_occupant_start(
+            &mut self,
+            attempt: &crate::OccupantStartAttempt,
+        ) -> Result<(), Self::Error> {
+            self.occupant_starts
+                .insert(attempt.launch.name.clone(), attempt.clone());
+            Ok(())
+        }
 
         fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
             self.pending.remove(event_id);
@@ -1362,6 +1379,7 @@ mod tests {
             pending: HashSet::new(),
             processed: HashSet::new(),
             active_event_id: Some(target.clone()),
+            occupant_starts: std::collections::HashMap::new(),
         };
         let mut ingest = RelayIngest::new(&operator, relay_pubkey(), repository);
         let edit = event_with_keys(
@@ -1407,6 +1425,7 @@ mod tests {
             pending: HashSet::new(),
             processed: HashSet::new(),
             active_event_id: Some(target.clone()),
+            occupant_starts: std::collections::HashMap::new(),
         };
         let mut ingest = RelayIngest::new(operator, relay_pubkey(), repository);
         let edit = event_with_keys(
@@ -1435,6 +1454,7 @@ mod tests {
             pending: HashSet::new(),
             processed: HashSet::new(),
             active_event_id: Some(target.clone()),
+            occupant_starts: std::collections::HashMap::new(),
         };
         let mut ingest = RelayIngest::new(operator, relay_pubkey(), repository);
         let attacker = Keys::generate();
@@ -1474,6 +1494,7 @@ mod tests {
             pending: HashSet::new(),
             processed: HashSet::new(),
             active_event_id: Some(target.clone()),
+            occupant_starts: std::collections::HashMap::new(),
         };
         let mut ingest = RelayIngest::new("a".repeat(64), relay_pubkey(), repository);
         let delete = event_with_keys(
