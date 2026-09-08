@@ -18,6 +18,9 @@ in a child process and receives a synthetic final through the fallback Unix
 socket before ACKing. `reconnect_failures_are_visible_without_retry_spam`
 captures a missing-socket diagnostic across retries; receipt/error-body
 redaction is covered by `inbox_diagnostics_do_not_include_receipt_contents`.
+`outbound_cli_and_inbox_share_the_socket_override` verifies that a nondefault
+socket override also reaches the outbound CLI as `--socket`, even when a
+different runtime directory is set. Empty socket overrides use the fallback.
 These are synthetic socket proofs, not a live Kelpie or relay round trip.
 
 The ignored `live_fallback_socket_publishes_before_ack` adds a real local-relay

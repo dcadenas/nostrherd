@@ -190,7 +190,57 @@ fn reconnect_failures_are_visible_without_retry_spam() {
         .unwrap();
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stderr.matches("inbox connection/claim failed").count(), 1);
+    assert_eq!(stderr.matches("inbox receive/ack loop failed").count(), 1);
     assert!(stderr.contains("I/O NotFound"));
-    assert!(stderr.contains("retrying every second"));
+    assert!(stderr.contains("reconnecting every second"));
+}
+
+#[test]
+fn outbound_cli_and_inbox_share_the_socket_override() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(program) = std::env::var_os("NOSTRHERD_SOCKET_TEST_CLI") {
+        let expected = std::env::var_os("NOSTRHERD_SOCKET_TEST_EXPECTED").unwrap();
+        assert_eq!(default_socket(), std::path::PathBuf::from(expected));
+        let client = nostrherd::KelpieClient::new(program);
+        assert_eq!(
+            client
+                .register_waiter()
+                .unwrap()
+                .identity()
+                .logical_agent_id(),
+            "synthetic-waiter"
+        );
+        return;
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("nh83-cli-{nonce}"));
+    std::fs::create_dir(&root).unwrap();
+    let program = root.join("kelpie-fixture");
+    std::fs::write(&program, r#"#!/bin/sh
+test "$1" = --socket && test "$2" = "$NOSTRHERD_SOCKET_TEST_EXPECTED" || exit 1
+printf '%s\n' '{"result":{"logical_agent_id":"synthetic-waiter","delivery_transport":"socket_inbox"}}'
+"#).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "outbound_cli_and_inbox_share_the_socket_override",
+            "--nocapture",
+        ])
+        .env("NOSTRHERD_SOCKET_TEST_CLI", &program)
+        .env("NOSTRHERD_SOCKET_TEST_EXPECTED", root.join("override.sock"))
+        .env("KELPIE_SOCKET", root.join("override.sock"))
+        .env("XDG_RUNTIME_DIR", root.join("different-runtime"))
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

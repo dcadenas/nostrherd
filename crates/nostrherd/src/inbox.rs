@@ -106,7 +106,7 @@ fn socket_path(
     runtime: Option<std::ffi::OsString>,
     temp: &Path,
 ) -> PathBuf {
-    if let Some(path) = explicit {
+    if let Some(path) = explicit.filter(|value| !value.is_empty()) {
         return PathBuf::from(path);
     }
     // Match Kelpie's paths::runtime_root_with, including an empty XDG value.
@@ -285,7 +285,7 @@ pub fn spawn_inbox(socket: PathBuf, waiter_id: String) -> HostInbox {
             }
             if last_notice.is_none_or(|last| last.elapsed() >= RECONNECT_NOTICE_INTERVAL) {
                 eprintln!(
-                    "nostrherd: inbox connection/claim failed at {}: {}; retrying every second (notices limited to every 30 seconds)",
+                    "nostrherd: inbox receive/ack loop failed at {}: {}; reconnecting every second (notices limited to every 30 seconds)",
                     socket.to_string_lossy().escape_debug(),
                     inbox_error_summary(&error)
                 );
@@ -397,6 +397,10 @@ mod tests {
     #[test]
     fn socket_resolution_matches_kelpie_fallbacks() {
         let temp = std::path::Path::new("/custom-temp");
+        assert_eq!(
+            super::socket_path(Some("".into()), None, temp),
+            temp.join("kelpie-client/kelpie/kelpie.sock")
+        );
         for runtime in [None, Some("".into())] {
             assert_eq!(
                 super::socket_path(None, runtime, temp),
