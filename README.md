@@ -110,12 +110,18 @@ recent channel messages under `.nostrherd/places/`. Those place files
 are generated chat history, so keep them out of git — the template's
 `.gitignore` already does.
 
-nostrherd reads two environment variables, and nothing else:
+nostrherd requires two environment variables:
 
 | Variable | Value |
 | --- | --- |
 | `NOSTRHERD_PRIVATE_KEY` | the account's secret key, hex or nsec |
 | `NOSTRHERD_RELAY_URL` | the relay's websocket URL, such as `wss://relay.example` |
+
+Optional `KELPIE_SOCKET` selects the same socket for sending commands and
+receiving replies. If unset or empty, the host uses
+`$XDG_RUNTIME_DIR/kelpie/kelpie.sock`; without a nonempty runtime directory,
+it uses the OS temporary directory plus `kelpie-client/kelpie/kelpie.sock`,
+matching Kelpie. Persistent inbox failures are logged with the selected path.
 
 There is no flag that takes a key, and nostrherd never writes one to
 the database, the logs, or a process title. Supply the two however you
