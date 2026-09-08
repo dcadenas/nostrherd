@@ -42,26 +42,46 @@ current sources, and rebuild them together when you upgrade any of them.
 The occupant writes prose. The host stamps it and publishes it, so an
 agent never has to know anything about Nostr to answer a question.
 
-## Requirements
+## Setup
 
-- Rust (stable) to build.
-- [Herdr](https://github.com/herdrdev/herdr), a terminal multiplexer.
-  Occupants run in its workspaces.
-- [Kelpie](https://github.com/dcadenas/kelpie), a coordination daemon.
-  `kelpied` must be running.
-- An agent CLI that Herdr can launch, such as `claude` or `opencode`.
-- A NIP-29 relay and a Nostr key for it. Run against
-  [Buzz](https://github.com/block/buzz) or
-  [groups_relay](https://github.com/verse-pbc/groups_relay); both work.
-  For testing, build `buzz-relay` from the Buzz repository and run
-  `./tools/local-relay up`, which starts it against throwaway Postgres
-  and Redis containers; see `skills/local-relay/SKILL.md`. It needs
-  Docker.
-- [`envchain`](https://github.com/sorah/envchain) to hold the key.
+nostrherd is the last of three processes, and the two below it must
+already be running. Do them in this order.
+
+**1. Herdr.** A terminal multiplexer; each bot's agent runs in one of
+its workspaces. Install and start it from
+[herdrdev/herdr](https://github.com/herdrdev/herdr) and leave it
+running. nostrherd cannot start an agent while Herdr is stopped.
+
+**2. Kelpie.** A coordination daemon that carries messages between the
+host and the agents. Install it from
+[dcadenas/kelpie](https://github.com/dcadenas/kelpie) and leave
+`kelpied` running.
+
+**3. An agent CLI**, such as `claude` or `opencode`, installed and
+already logged in to its provider. Herdr launches it; nostrherd does
+not manage its credentials. Run it once by hand and confirm it answers
+before going further.
+
+**4. A NIP-29 relay and a Nostr account on it.** Any NIP-29 relay:
+[Buzz](https://github.com/block/buzz) and
+[groups_relay](https://github.com/verse-pbc/groups_relay) are both
+known to work. You need the account's secret key in hex or nsec form,
+and the relay's websocket URL. Bots post as this account, so use one
+you are willing to speak as.
+
+  For a throwaway local relay to try things against, build `buzz-relay`
+  from the Buzz repository and run `./tools/local-relay up`, which
+  starts it with Postgres and Redis in Docker; see
+  `skills/local-relay/SKILL.md`.
+
+**5. [`envchain`](https://github.com/sorah/envchain)** to hold the key,
+and Rust (stable) to build nostrherd.
 
 ## Build
 
 ```bash
+git clone https://github.com/dcadenas/nostrherd
+cd nostrherd
 cargo build --release
 ```
 
@@ -78,8 +98,11 @@ kind = "opencode"               # which agent CLI Herdr launches
 
 The corpus is an ordinary git repository holding the bot's personality.
 Copy `corpus/template-bot/` to start one; its `AGENTS.md` is the only
-file you write. The host writes a contract block into `startup.md` and
-never touches anything else in the tree.
+file you write. The host writes two things into the tree and leaves the
+rest alone: a contract block inside `startup.md`, and a rolling copy of
+recent channel messages under `.nostrherd/places/`. Those place files
+are generated chat history, so keep them out of git — the template's
+`.gitignore` already does.
 
 Then put the key and relay somewhere the process can read them:
 
@@ -103,9 +126,28 @@ envchain nostrherd ./target/release/nostrherd \
 `--check` loads the config and database and exits, without needing the
 key or Kelpie.
 
-Address the bot in a channel with `bot: hello` and a stamped reply
-should land. For running against your real relay and account, read
-`docs/operator-runbook.md` first.
+## First reply
+
+The bot has no account of its own. It speaks as the key you configured,
+so that account must already be a member of the channel with permission
+to post. Create or join a NIP-29 group with any Nostr client that
+supports them, then find the group's id, which is what goes in the
+channel your bot answers in.
+
+Now say `bot: hello` in that channel. Two cases differ:
+
+- **You, from the configured account.** The host sees your own message
+  and answers.
+- **Anyone else.** Their message must also `p`-tag your account, which
+  most clients do when you `@`-mention it. A plain `bot: hello` from
+  someone who has not mentioned you is ignored on purpose, so a bot is
+  never woken by a channel it happens to be reading.
+
+A stamped `[bot]:` reply should land in the thread. If nothing happens,
+check that Herdr and `kelpied` are running and that the host log shows
+the trigger being observed.
+
+`docs/operator-runbook.md` covers running as your real account.
 
 ## What a bot can do
 
