@@ -45,6 +45,8 @@ pub(crate) enum StartReconciliation {
     /// The recorded logical id is known but its binding ended; continuing it
     /// needs a fresh launch attempt, never a new identity.
     FailedStart { logical_agent_id: String },
+    /// No matching declaration is visible; retry only the original keyed request.
+    Missing,
     /// The attempt cannot be settled from available evidence; starting a
     /// replacement would risk a duplicate identity.
     Unsettled(String),
@@ -67,7 +69,10 @@ pub struct OccupantLaunch {
 pub struct OccupantStartAttempt {
     pub key: String,
     pub launch: OccupantLaunch,
+    pub bootstrap: String,
+    pub sender_id: String,
     pub receipt: Option<Value>,
+    pub start_error: Option<String>,
     pub diagnostic: Option<String>,
     pub completed: bool,
 }
@@ -485,11 +490,48 @@ impl KelpieClient {
         Ok(started)
     }
 
+    pub(crate) fn dispatch_occupant_start(
+        &self,
+        attempt: &mut OccupantStartAttempt,
+    ) -> Result<StartedOccupant, KelpieError> {
+        let mut receipt = None;
+        let result = self.start_occupant_with_receipt(
+            &attempt.launch,
+            &attempt.bootstrap,
+            Some(&attempt.sender_id),
+            Some(&attempt.key),
+            &mut receipt,
+        );
+        if attempt.receipt.is_none() {
+            attempt.receipt = receipt;
+        }
+        if let Err(error) = &result {
+            attempt.start_error.get_or_insert_with(|| error.to_string());
+        }
+        result
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(crate) fn reconcile_occupant_start(
         &self,
         launch: &mut OccupantLaunch,
+        receipt: Option<&Value>,
     ) -> Result<StartReconciliation, KelpieError> {
+        if let Some(recorded_id) = receipt
+            .and_then(|receipt| receipt.pointer("/result/logical_agent_id"))
+            .and_then(Value::as_str)
+        {
+            if launch
+                .logical_agent_id
+                .as_deref()
+                .is_some_and(|expected| expected != recorded_id)
+            {
+                return Ok(StartReconciliation::Unsettled(
+                    "start receipt contradicts the recorded logical identity".to_owned(),
+                ));
+            }
+            launch.logical_agent_id = Some(recorded_id.to_owned());
+        }
         let output = self.invoke(&["--json", "report"], &[])?;
         if !output.success {
             return Err(output.rejected());
@@ -515,10 +557,17 @@ impl KelpieClient {
                 }
             }
         }
+        if let Some(expected) = launch.logical_agent_id.as_deref() {
+            let seat_present = !matches.is_empty();
+            matches.retain(|(agent, _)| agent["agent_id"].as_str() == Some(expected));
+            if seat_present && matches.is_empty() {
+                return Ok(StartReconciliation::Unsettled(
+                    "recorded seat belongs to a different logical identity".to_owned(),
+                ));
+            }
+        }
         if matches.is_empty() {
-            return Ok(StartReconciliation::Unsettled(
-                "no recorded incarnation; absence does not settle an interrupted start".to_owned(),
-            ));
+            return Ok(StartReconciliation::Missing);
         }
         if matches.len() > 1 {
             let logical_id = field(matches[0].0, "agent_id")?;
@@ -576,7 +625,7 @@ impl KelpieClient {
             // A terminal state proves the recorded binding ended; continuing
             // the same logical id needs a fresh launch attempt (D20), never a
             // new identity.
-            "failed" => {
+            "failed" | "retired" | "superseded" => {
                 let has_other_runtime =
                     agent["incarnations"]
                         .as_array()
@@ -595,7 +644,7 @@ impl KelpieClient {
                 }
                 Ok(StartReconciliation::FailedStart { logical_agent_id })
             }
-            "starting" | "unknown" | "lost" => self
+            "declared" | "starting" | "unknown" | "lost" => self
                 .adopt_occupant(
                     &launch.pane_id,
                     &launch.terminal_id,

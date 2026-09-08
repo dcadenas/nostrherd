@@ -241,10 +241,16 @@ Implementation notes (issue 82): record launch coordinates and a stable start
 key before calling Kelpie, retaining each attempt's receipt and diagnostic.
 An ambiguous attempt is reconciled by its pane and terminal, with matching
 name, backend, corpus and any recorded logical id; a namesake is not evidence.
-Adopt a live unsettled seat under that same logical id. A decisively failed
-start may retry on a new pane under its recorded logical id. Missing or
-conflicting evidence keeps the attempt unsettled, without another allocation.
-Launch completion and the session binding are one SQLite transaction.
+Adopt a live unsettled seat under that same logical id. An ended incarnation
+may retry on a new pane under its recorded logical id when no other live or
+unsettled incarnation exists. With no visible declaration, replay the stored
+request on the same seat and key: Kelpie reserves start keys atomically with
+identity creation and refuses their reuse after any outcome. Never vary the key
+to bypass a refusal. Conflicting evidence keeps the attempt unsettled without
+another allocation. A receipt's logical id disambiguates a subsequently reused
+seat; ambiguous evidence without such an id is not a namesake-selection rule.
+Launch completion and the session binding are one SQLite transaction. Keep the
+first start error separately from the latest reconciliation diagnostic.
 
 An original open ask stays open. Its recovery MUST NOT send a second ask;
 Kelpie's reminder delivers the original question. Queued work has no prior

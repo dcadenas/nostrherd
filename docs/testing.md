@@ -175,6 +175,10 @@ injected faults separately from naturally occurring readiness conflicts.
 
 The unit tests listed under I23 exercise repeated readiness conflicts, exact
 adoption receipts, missing/mismatched evidence, SQLite rollback and disk reopen.
+`restart_replays_an_undeclared_start_with_the_original_key_and_preserves_io_error`
+also compares the complete start argv and stdin across restart, not merely the
+presence of a key flag. `terminal_starts_are_recoverable_and_a_receipt_disambiguates_reused_seats`
+covers ended states and identity evidence on a reused seat.
 
 Follow `skills/local-relay/SKILL.md`. Issues 17–20, 27, 34, 40, 41, 43, 48, and 60 require it.
 

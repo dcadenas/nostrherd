@@ -12,6 +12,26 @@ or standing pane-env.
 
 Do not point `NOSTRHERD_RELAY_URL` at a production relay.
 
+## Unsettled Occupant Starts
+
+The host retains start intent, its first error/receipt, and the latest
+reconciliation diagnostic in `occupant_starts`. A transport failure before
+declaration is retried with the same key and seat; a known live seat is adopted
+under the recorded logical identity. Neither path needs a database reset.
+
+If retries remain unsettled, inspect the matching host session, the latest
+attempt, `kelpie --json report`, and the exact recorded Herdr pane/terminal.
+Restore reachability to the same Kelpie store first. A reserved-key refusal
+names a prior operation; it is not permission to invent a new key or delete
+host intent. Conflicting identities, an ongoing retirement, or a known native
+start that cannot settle require reconciliation of that Kelpie/Herdr binding.
+Preserve the recorded logical id when recovering it. Do not clear the host's
+SQLite rows to make a namesake replacement possible.
+
+A rejected start alone does not prove the pane is empty (`agent_pane_busy`
+can mean a different occupant is there). The host leaves workspace reclamation
+to the operator, per D39; inspect ownership before closing any pane.
+
 ## Set the namespace
 
 `--set` prompts. It does not print values. `envchain --list nostrherd`
