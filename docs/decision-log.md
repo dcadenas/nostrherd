@@ -23,6 +23,15 @@ attribution only; the waiting agent stays `nostrherd`. Session occupants
 are `bot-<place>` (or `<botid>-<place>`). Receipts multiplex on ask id
 in SQLite.
 
+Implementation note (issue 83): the inbox honors nonempty `KELPIE_SOCKET`, otherwise
+uses nonempty `XDG_RUNTIME_DIR/kelpie/kelpie.sock`, otherwise
+`std::env::temp_dir()/kelpie-client/kelpie/kelpie.sock`, matching Kelpie's
+runtime fallback. Reconnect failures report the socket and a safe error
+category immediately, then at most once per 30 seconds while retrying each
+second. Receipt bodies are not diagnostic text. ACK ordering is unchanged.
+The host passes the same resolved path as `--socket` to its outbound Kelpie
+commands; `KELPIE_SOCKET` is a host setting, not a Kelpie CLI environment variable.
+
 ## D3. SQLite is host state, not the relay
 
 Status: accepted
@@ -1000,3 +1009,34 @@ loop starts with up to eight digits, lengthens by four when taken, and
 caps the suffix at the available room within Herdr's 32-character limit.
 This is a display-name tiebreak, not a collision-resistant identity.
 Stored session names remain unchanged. The domain gains no dependency.
+
+## D55. The host writes the occupant contract; corpus authors write personality
+
+Status: accepted (issue 79)
+
+On snapshot refresh before occupant start or a new turn, the host upserts a
+`nostrherd-contract` marker block alongside the snapshot block in `startup.md`.
+The contract covers final and progress replies, bot-initiated and scheduled
+tells, the host stamp, D51's direct-publish boundary, key custody and untrusted
+context. Bootstrap and renew direct the occupant to read `startup.md`.
+
+The host changes only its marked blocks and appends missing blocks. Malformed,
+duplicate or overlapping markers fail without rewriting the startup file.
+`AGENTS.md` and text outside host markers remain author-owned.
+
+The block names the running installation's `skills/bot-conduct/SKILL.md` as a
+file to read, not a harness skill to load. The runtime resolves it beside the
+executable, or in the source checkout above its Cargo `target/` directory.
+Relocated binaries ship that relative skills path beside the executable.
+No build-time absolute path or corpus copy is used. Missing or unreadable advice
+fails host startup before Kelpie or relay connection. Actors receive the resolved
+path explicitly; tests can supply a synthetic installation independent of the
+Cargo output directory. Updated startup files use a synced temporary file and
+atomic rename, preserving author text if a write is interrupted.
+Bot-specific handwritten advice can override shared advice, not the contract.
+
+`corpus/template-bot/` is the creation template; `corpus/example-bot/` remains
+a throwaway proof fixture. Removing copied protocol from existing live corpora
+is a separate operator-owned rollout, never an automatic host migration.
+Contract changes are not announced; the block regenerates on refresh and
+occupants read it on startup or renew. No announcement mechanism is added.

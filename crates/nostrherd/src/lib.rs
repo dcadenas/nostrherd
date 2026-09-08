@@ -73,7 +73,8 @@ pub struct OccupantStartAttempt {
 }
 
 /// Short trusted body used only to finish `kelpie start --tell`.
-pub const OCCUPANT_BOOTSTRAP: &str = "Wait for Kelpie asks from nostrherd.";
+pub const OCCUPANT_BOOTSTRAP: &str =
+    "Read startup.md before answering. Wait for Kelpie asks from nostrherd.";
 
 /// Wall-clock renew interval for a session occupant (D27).
 pub const OCCUPANT_RENEW_EVERY: &str = "45m";
@@ -236,19 +237,25 @@ pub(crate) trait CommandRunner: fmt::Debug + Send + Sync {
 #[derive(Debug)]
 pub(crate) struct ProcessRunner {
     program: PathBuf,
+    socket: Option<PathBuf>,
 }
 
 impl ProcessRunner {
     pub(crate) fn new(program: impl AsRef<Path>) -> Self {
         Self {
             program: program.as_ref().to_owned(),
+            socket: None,
         }
     }
 }
 
 impl CommandRunner for ProcessRunner {
     fn run(&self, arguments: &[String], stdin: &[u8]) -> io::Result<CommandOutput> {
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        if let Some(socket) = &self.socket {
+            command.arg("--socket").arg(socket);
+        }
+        let mut child = command
             .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -290,8 +297,10 @@ impl KelpieClient {
     /// Create a client backed by a Kelpie executable.
     #[must_use]
     pub fn new(program: impl AsRef<Path>) -> Self {
+        let mut runner = ProcessRunner::new(program);
+        runner.socket = Some(inbox::default_socket());
         Self {
-            runner: Box::new(ProcessRunner::new(program)),
+            runner: Box::new(runner),
         }
     }
 

@@ -252,6 +252,7 @@ impl Harness {
             self.bot.clone(),
             SqliteRepository::open(&self.db_path).expect("actor db"),
             Arc::clone(&self.panes),
+            PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
         )
     }
 
@@ -366,6 +367,100 @@ fn flow_02_first_call_starts_bot_foobar_and_asks() {
         .windows(2)
         .any(|pair| pair == ["--name", WAITER_NAME]));
     assert!(register.iter().any(|arg| arg == "waiter-register"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_relay_contract_before_synthetic_occupant() {
+    use crate::outbox::BuzzPublisher;
+    use nostr_sdk::prelude::{Filter, LocalRelay};
+    use std::time::Duration;
+
+    let relay = LocalRelay::new();
+    relay.run().await.expect("isolated local relay");
+    let client = Client::new();
+    let url = relay.url().await;
+    client.add_relay(&url).await.expect("relay");
+    client.connect().and_wait(Duration::from_secs(3)).await;
+    let keys = Keys::generate();
+    let mut harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    harness.operator = keys.public_key().to_hex();
+    let corpus = harness.bot.corpus_path();
+    let personality = "Answer briefly and keep the author's personality.\n";
+    std::fs::write(corpus.join("AGENTS.md"), personality).expect("personality");
+    std::fs::write(
+        corpus.join("startup.md"),
+        include_str!("../../../corpus/template-bot/startup.md"),
+    )
+    .expect("template");
+    let message = event_with_keys(
+        &keys,
+        CHANNEL_KIND,
+        "bot: contract proof",
+        [tag(&["h", FOOBAR])],
+    );
+    client.send_event(&message).await.expect("send trigger");
+    let received = client
+        .fetch_events(Filter::new().id(message.id))
+        .timeout(Duration::from_secs(3))
+        .await
+        .expect("fetch trigger");
+    let action = harness
+        .ingest(received.first().expect("relay stored trigger"))
+        .expect("trigger");
+    let mut actor = harness.actor();
+    let waiter = harness.kelpie.register_waiter().expect("synthetic waiter");
+    assert_eq!(
+        actor
+            .handle_ingest(&harness.kelpie, &waiter, &action, "Foobar")
+            .expect("handle"),
+        TriggerOutcome::Asked
+    );
+    let startup = std::fs::read_to_string(corpus.join("startup.md")).expect("written contract");
+    assert_eq!(startup.matches("<!-- nostrherd-contract -->").count(), 1);
+    assert!(startup.contains("The host stamps `[bot]:`"));
+    assert!(startup.contains("--final --stdin"));
+    assert!(startup.contains("skills/bot-conduct/SKILL.md"));
+    assert!(
+        std::fs::read_to_string(corpus.join(".nostrherd/places/bot-foobar.md"))
+            .expect("snapshot")
+            .contains("bot: contract proof")
+    );
+    assert_eq!(
+        std::fs::read_to_string(corpus.join("AGENTS.md")).expect("personality"),
+        personality
+    );
+    {
+        let calls = harness.runner.calls.lock().expect("calls");
+        let bootstrap = calls
+            .iter()
+            .find(|call| call.0[1] == "start")
+            .expect("synthetic start");
+        assert!(String::from_utf8_lossy(&bootstrap.1).contains("Read startup.md before answering"));
+    }
+    let publisher = BuzzPublisher::new(client.clone(), keys, url.to_string());
+    actor
+        .handle_occupant_delivery(
+            &harness.kelpie,
+            &waiter,
+            &publisher,
+            &occupant_reply("ask-1", "final", "contract proof complete"),
+        )
+        .expect("publish final");
+    let posts = client
+        .fetch_events(Filter::new().kind(Kind::Custom(CHANNEL_KIND)))
+        .timeout(Duration::from_secs(3))
+        .await
+        .expect("fetch published reply");
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|event| event.content == "[bot]: contract proof complete")
+            .count(),
+        1
+    );
+    assert_eq!(turns(&actor, FOOBAR)[0].state, TurnState::Posted);
+    client.disconnect().await;
+    relay.shutdown();
 }
 
 #[test]

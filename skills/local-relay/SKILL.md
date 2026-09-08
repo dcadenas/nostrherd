@@ -48,6 +48,12 @@ them if missing. `envchain --list` shows **names only**.
 
 ## Operator-facing smoke
 
+For the startup-contract proof without Docker or shared host resources, run
+`./tools/local-relay contract-proof`. It uses nostr-sdk LocalRelay on an
+OS-assigned loopback port and generates throwaway keys in memory. Occupant
+start and reply transport are synthetic; this is not live Herdr/Kelpie/Buzz
+proof. No credential namespace, corpus, or service outside the test is used.
+
 ```bash
 ./tools/local-relay up
 ./tools/local-relay smoke

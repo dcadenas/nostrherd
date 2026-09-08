@@ -2,6 +2,15 @@
 
 ## Unit
 
+Issue 79's snapshot tests cover idempotent contract and snapshot upserts,
+author-owned text and `AGENTS.md` preservation, template initialization,
+relocated installation paths, missing advice and malformed markers.
+The ordinary actor first-call test exercises the same writer before launch.
+`./tools/local-relay contract-proof` sends a trigger through nostr-sdk LocalRelay,
+exercises the host writer with synthetic occupant transport, and verifies the
+host's stamped final on that relay. It uses an OS-assigned loopback port and
+in-memory throwaway keys. No live Herdr/Kelpie/Buzz proof is performed.
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
@@ -10,6 +19,31 @@ cargo test --all-targets
 
 `crates/nostrherd/src/spec_flows.rs` is in-process acceptance of SPEC
 flows 1–12. It is not a live relay proof.
+
+Issue 83's `socket_resolution_matches_kelpie_fallbacks` covers the explicit
+socket override, nonempty/empty/unset runtime directory, and custom temporary
+root. `fallback_socket_receives_and_acks_a_reply` clears the real environment
+in a child process and receives a synthetic final through the fallback Unix
+socket before ACKing. `reconnect_failures_are_visible_without_retry_spam`
+captures a missing-socket diagnostic across retries; receipt/error-body
+redaction is covered by `inbox_diagnostics_do_not_include_receipt_contents`.
+`outbound_cli_and_inbox_share_the_socket_override` verifies that a nondefault
+socket override also reaches the outbound CLI as `--socket`, even when a
+different runtime directory is set. Empty socket overrides use the fallback.
+These are synthetic socket proofs, not a live Kelpie or relay round trip.
+
+The ignored `live_fallback_socket_publishes_before_ack` adds a real local-relay
+publish and fetch before the synthetic socket receives its ACK. It checks one
+`[bot]: synthetic final` with the real trigger's reply tag. Supply throwaway
+`NOSTRHERD_PRIVATE_KEY`, loopback `NOSTRHERD_RELAY_URL`, and a member channel in
+`BOTSERVER_LIVE_CHANNEL`, using the local-relay harness and a credential manager:
+
+```bash
+cargo test --test inbox_socket live_fallback_socket_publishes_before_ack -- --ignored --nocapture
+```
+
+This is a real relay plus synthetic Kelpie socket proof, not an occupant or
+live Kelpie daemon end-to-end proof. It does not claim a macOS reproduction.
 
 Issue 80 uses unit proof: `non_uuid_channel_starts_an_occupant_and_publishes_its_answer`
 covers ingest, session binding, occupant start/ask, and the stamped final
