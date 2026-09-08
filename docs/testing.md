@@ -2,6 +2,15 @@
 
 ## Unit
 
+Issue 79's snapshot tests cover idempotent contract and snapshot upserts,
+author-owned text and `AGENTS.md` preservation, template initialization,
+relocated installation paths, missing advice and malformed markers.
+The ordinary actor first-call test exercises the same writer before launch.
+`./tools/local-relay contract-proof` sends a trigger through nostr-sdk LocalRelay,
+exercises the host writer with synthetic occupant transport, and verifies the
+host's stamped final on that relay. It uses an OS-assigned loopback port and
+in-memory throwaway keys. No live Herdr/Kelpie/Buzz proof is performed.
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings

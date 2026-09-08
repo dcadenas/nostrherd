@@ -50,7 +50,8 @@ pub struct OccupantLaunch {
 }
 
 /// Short trusted body used only to finish `kelpie start --tell`.
-pub const OCCUPANT_BOOTSTRAP: &str = "Wait for Kelpie asks from nostrherd.";
+pub const OCCUPANT_BOOTSTRAP: &str =
+    "Read startup.md before answering. Wait for Kelpie asks from nostrherd.";
 
 /// Wall-clock renew interval for a session occupant (D27).
 pub const OCCUPANT_RENEW_EVERY: &str = "45m";

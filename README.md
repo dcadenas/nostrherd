@@ -84,6 +84,13 @@ cd nostrherd
 cargo build --release
 ```
 
+Keep `skills/bot-conduct/SKILL.md` with the installation. Binaries under the
+checkout's `target/` use that checkout's file. If you move the binary elsewhere,
+copy `skills/bot-conduct/SKILL.md` into a `skills/bot-conduct/` directory beside
+the binary. The host resolves this path at runtime, not from its build location
+or the corpus working directory. A missing or unreadable file stops the host
+before connecting to Kelpie or the relay (`--check` remains config/database only).
+
 ## Configure
 
 A bot is one entry in `bots.toml`:

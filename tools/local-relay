@@ -4,6 +4,10 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = contract-proof ]; then
+  exec cargo test --manifest-path "$ROOT/Cargo.toml" -p nostrherd --lib \
+    spec_flows::local_relay_contract_before_synthetic_occupant -- --exact --nocapture
+fi
 PROOF="${NOSTRHERD_PROOF_DIR:-$HOME/tmp-nostrherd-proof}"
 COMPOSE="$PROOF/docker-compose.yml"
 RELAY_BIN="${BUZZ_RELAY_BIN:-$HOME/code/buzz/target/release/buzz-relay}"
@@ -13,7 +17,7 @@ BIND=127.0.0.1:13001
 HEALTH=18081
 
 usage() {
-  echo "usage: $0 up|down|status|smoke|trigger [--content TEXT]" >&2
+  echo "usage: $0 up|down|status|smoke|trigger [--content TEXT]|contract-proof" >&2
   exit 2
 }
 
