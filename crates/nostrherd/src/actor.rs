@@ -1281,8 +1281,13 @@ where
             crate::unix_now().map_err(ActorError::Snapshot)?,
             &events,
         );
-        refresh_place_snapshot(self.bot.corpus_path(), &session.session_name, &markdown)
-            .map_err(ActorError::Snapshot)?;
+        refresh_place_snapshot(
+            self.bot.corpus_path(),
+            self.bot.id().as_str(),
+            &session.session_name,
+            &markdown,
+        )
+        .map_err(ActorError::Snapshot)?;
         Ok(relpath)
     }
 
@@ -1931,6 +1936,11 @@ mod tests {
             .corpus_path()
             .join(".nostrherd/places/bot-foobar.md");
         assert!(snapshot.exists());
+        let startup =
+            std::fs::read_to_string(actor.bot().corpus_path().join("startup.md")).expect("startup");
+        assert!(startup.contains("<!-- nostrherd-contract -->"));
+        assert!(startup.contains("The host stamps `[bot]:`"));
+        assert!(startup.contains("skills/bot-conduct/SKILL.md"));
         assert!(
             std::fs::read_to_string(actor.bot().corpus_path().join("startup.md"))
                 .expect("startup")
@@ -1938,6 +1948,7 @@ mod tests {
         );
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls[1].0[1], "start");
+        assert!(String::from_utf8_lossy(&calls[1].1).contains("Read startup.md before answering"));
         assert!(calls[1]
             .0
             .windows(2)

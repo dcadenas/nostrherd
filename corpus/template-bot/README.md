@@ -10,8 +10,8 @@ not a template.
 ## What the host does for you
 
 - Wakes you on a `{id}:` trigger and delivers the ask.
-- Publishes everything to Nostr as you and stamps `[{id}]:`. You never
-  touch the relay, keys, or `envchain`.
+- Publishes replies and tells to Nostr as the operator and stamps `[{id}]:`.
+  This template grants no direct relay access.
 - Writes the contract block (how to reply, what never to call) and the
   channel snapshot pointer into `startup.md`. It never touches
   `AGENTS.md`. Do not edit `startup.md` between the markers; do not

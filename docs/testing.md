@@ -2,6 +2,11 @@
 
 ## Unit
 
+Issue 79's snapshot tests cover idempotent contract and snapshot upserts,
+author-owned text and `AGENTS.md` preservation, template initialization,
+relocated installation paths, missing advice and malformed markers.
+The ordinary actor first-call test exercises the same writer before launch.
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
