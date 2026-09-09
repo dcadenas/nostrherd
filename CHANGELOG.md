@@ -6,6 +6,14 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.6
+
+- Pin Kelpie `0.2.0-alpha.5` in the README. crates.io `0.2.0-alpha.4` is the
+  older UUID-id build; alpha.5 is the integer-id one this host now speaks to.
+
+  **Action**: `cargo install kelpie-herdr --version 0.2.0-alpha.5`, then
+  restart `kelpied` and the host.
+
 ## 0.1.0-alpha.5
 
 - Send Kelpie ids as JSON numbers. Kelpie's ids are `serde(transparent)`
