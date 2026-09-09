@@ -39,7 +39,10 @@ const SUBSCRIPTION_FAILURE_NOTICE_INTERVAL: Duration = Duration::from_mins(5);
 const RESUME_QUEUED_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
-#[command(about = "Host occupant and per-bot actors")]
+// `version` reads CARGO_PKG_VERSION, so an operator can always say which build
+// they are running. Without it there is no way to tell a stale host from a
+// current one, which is how a bot kept publishing an outdated stamp unnoticed.
+#[command(version, about = "Host occupant and per-bot actors")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -1660,6 +1663,18 @@ mod tests {
         ]))
         .expect_err("invalid config");
         assert!(error.to_string().contains("invalid bot config"));
+    }
+
+    #[test]
+    fn version_reports_the_crate_version() {
+        // An operator must be able to say which build is running; a stale host
+        // is otherwise indistinguishable from a current one.
+        let error = Args::try_parse_from(["nostrherd", "--version"]).expect_err("version exits");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(
+            error.to_string().contains(env!("CARGO_PKG_VERSION")),
+            "{error}"
+        );
     }
 
     #[test]
