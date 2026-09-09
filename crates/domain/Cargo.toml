@@ -1,0 +1,10 @@
+[package]
+name = "nostrherd-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Domain types for the personal Nostr bot host"
+
+[lints]
+workspace = true

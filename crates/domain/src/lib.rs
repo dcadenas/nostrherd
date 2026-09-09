@@ -1,0 +1,1005 @@
+//! Domain types for the personal Nostr bot host.
+//!
+//! No I/O. `SQLite`, Kelpie, Herdr, and the relay live in adapters.
+
+pub mod buzz;
+pub mod progress;
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+/// Stable configured bot slug, e.g. `bot`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BotId(String);
+
+impl BotId {
+    /// Parse a non-empty slug of `[a-z][a-z0-9-]*`.
+    #[must_use]
+    pub fn new(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let mut chars = trimmed.chars();
+        let first = chars.next()?;
+        if !first.is_ascii_lowercase() {
+            return None;
+        }
+        if chars.any(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-') {
+            return None;
+        }
+        Some(Self(trimmed.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Inbound trigger token for the example bot id `bot` (`{id}:`).
+pub const INBOUND_TRIGGER: &str = "bot:";
+
+/// Inbound trigger token for a bot id, e.g. `bot` → `bot:`.
+#[must_use]
+pub fn inbound_trigger_for(id: &BotId) -> String {
+    format!("{}:", id.as_str())
+}
+
+/// Outbound stamp for the example bot id `bot` (`[{id}]:`).
+pub const OUTBOUND_PREFIX: &str = "[bot]:";
+
+/// Outbound stamp for a bot id, e.g. `bot` → `[bot]:`.
+#[must_use]
+pub fn outbound_prefix_for(id: &BotId) -> String {
+    format!("[{}]:", id.as_str())
+}
+
+/// Prefix occupant prose with the given stamp once.
+#[must_use]
+pub fn stamp_outbound(body: &str, prefix: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.starts_with(prefix) {
+        trimmed.to_owned()
+    } else if trimmed.is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix} {trimmed}")
+    }
+}
+
+/// Configured personality mapped to one in-process actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bot {
+    id: BotId,
+    corpus_path: PathBuf,
+    inbound_trigger: String,
+    outbound_prefix: String,
+    occupant_kind: String,
+    allowed_requesters: Vec<String>,
+}
+
+impl Bot {
+    /// Construct a bot with inbound token `{id}:` and stamp `[{id}]:`.
+    #[must_use]
+    pub fn new(id: BotId, corpus_path: PathBuf, occupant_kind: impl Into<String>) -> Option<Self> {
+        let occupant_kind = occupant_kind.into();
+        if occupant_kind.is_empty() || occupant_kind.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let inbound_trigger = inbound_trigger_for(&id);
+        let outbound_prefix = outbound_prefix_for(&id);
+        Some(Self {
+            id,
+            corpus_path,
+            inbound_trigger,
+            outbound_prefix,
+            occupant_kind,
+            allowed_requesters: Vec::new(),
+        })
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &BotId {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn corpus_path(&self) -> &Path {
+        &self.corpus_path
+    }
+
+    #[must_use]
+    pub fn inbound_trigger(&self) -> &str {
+        &self.inbound_trigger
+    }
+
+    #[must_use]
+    pub fn outbound_prefix(&self) -> &str {
+        &self.outbound_prefix
+    }
+
+    #[must_use]
+    pub fn occupant_kind(&self) -> &str {
+        &self.occupant_kind
+    }
+
+    /// Configure additional requester public keys as normalized hex.
+    #[must_use]
+    pub fn with_allowed_requesters(mut self, keys: Vec<String>) -> Self {
+        self.allowed_requesters = keys;
+        self
+    }
+
+    #[must_use]
+    pub fn allowed_requesters(&self) -> &[String] {
+        &self.allowed_requesters
+    }
+
+    /// Authorize the operator or an explicitly allowlisted requester.
+    #[must_use]
+    pub fn authorizes(&self, operator: &str, author: &str) -> bool {
+        requester_authorized(operator, author, &self.allowed_requesters)
+    }
+}
+
+/// Authorize an effective author against the operator and additional requester keys.
+#[must_use]
+pub fn requester_authorized(operator: &str, author: &str, allowed: &[String]) -> bool {
+    author.eq_ignore_ascii_case(operator)
+        || allowed.iter().any(|key| key.eq_ignore_ascii_case(author))
+}
+
+/// Public Herdr/Kelpie name for one bot in one place.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionName(String);
+
+impl SessionName {
+    /// Derive a unique name from a bot and an opaque channel ID.
+    ///
+    /// The readable `bot-foobar` form is preferred. If `is_taken` reports that
+    /// candidate is bound to another channel, a stable ID suffix is added.
+    /// UUIDs retain their hex compaction; other IDs use 64-bit FNV-1a.
+    /// Every candidate passed to `is_taken` is at most 32 bytes.
+    #[must_use]
+    pub fn from_bot_and_channel(
+        bot: &BotId,
+        channel_id: &str,
+        channel_display: &str,
+        mut is_taken: impl FnMut(&str) -> bool,
+    ) -> Option<Self> {
+        let display_slug = slugify(channel_display);
+        let base = session_candidate(bot.as_str(), &display_slug, None)?;
+        if !is_taken(&base) {
+            return Some(Self(base));
+        }
+
+        let compact_id = compact_uuid(channel_id).unwrap_or_else(|| {
+            // FNV-1a's fixed offset basis and prime keep persisted names stable.
+            let digest = channel_id
+                .bytes()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+                });
+            format!("{digest:016x}")
+        });
+        let maximum_suffix_len = 32_usize.checked_sub(bot.as_str().len() + 1)?;
+        let maximum_suffix_len = compact_id.len().min(maximum_suffix_len);
+        let mut suffix_len = 8.min(maximum_suffix_len);
+        while suffix_len <= maximum_suffix_len {
+            if suffix_len == 0 {
+                break;
+            }
+            let candidate =
+                session_candidate(bot.as_str(), &display_slug, Some(&compact_id[..suffix_len]))?;
+            if !is_taken(&candidate) {
+                return Some(Self(candidate));
+            }
+            if suffix_len == maximum_suffix_len {
+                break;
+            }
+            suffix_len = (suffix_len + 4).min(maximum_suffix_len);
+        }
+
+        None
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// True when a Buzz 1-1 DM title is not a human name.
+#[must_use]
+pub fn is_generic_dm_title(display: &str) -> bool {
+    display.trim().eq_ignore_ascii_case("dm")
+}
+
+/// Choose the occupant place label from channel metadata.
+///
+/// Stream titles win. A generic `DM` title uses the peer display instead.
+///
+/// # Examples
+///
+/// ```
+/// use nostrherd_domain::place_display;
+///
+/// assert_eq!(place_display("#eng", None), "#eng");
+/// assert_eq!(place_display("DM", Some("Sebastian")), "Sebastian");
+/// ```
+#[must_use]
+pub fn place_display(channel_display: &str, peer_display: Option<&str>) -> String {
+    let channel = channel_display.trim();
+    if !channel.is_empty() && !is_generic_dm_title(channel) {
+        return channel.to_owned();
+    }
+    if let Some(peer) = peer_display.map(str::trim).filter(|peer| !peer.is_empty()) {
+        return peer.to_owned();
+    }
+    channel.to_owned()
+}
+
+fn slugify(display: &str) -> String {
+    let mut slug = String::new();
+    let mut separator_pending = false;
+
+    for character in display.chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator_pending && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character.to_ascii_lowercase());
+            separator_pending = false;
+        } else if !slug.is_empty() {
+            separator_pending = true;
+        }
+    }
+
+    if slug.is_empty() {
+        "channel".to_owned()
+    } else {
+        slug
+    }
+}
+
+fn compact_uuid(raw: &str) -> Option<String> {
+    if raw.len() != 36
+        || raw.char_indices().any(|(index, character)| match index {
+            8 | 13 | 18 | 23 => character != '-',
+            _ => !character.is_ascii_hexdigit(),
+        })
+    {
+        return None;
+    }
+
+    Some(
+        raw.chars()
+            .filter(|character| *character != '-')
+            .map(|character| character.to_ascii_lowercase())
+            .collect(),
+    )
+}
+
+fn session_candidate(bot: &str, display: &str, suffix: Option<&str>) -> Option<String> {
+    let candidate = if let Some(suffix) = suffix {
+        let fixed_len = bot.len() + 1 + suffix.len();
+        let display_len = 32_usize.saturating_sub(fixed_len.saturating_add(1));
+        let display = display
+            .get(..display.len().min(display_len))?
+            .trim_end_matches('-');
+        if display.is_empty() {
+            format!("{bot}-{suffix}")
+        } else {
+            format!("{bot}-{display}-{suffix}")
+        }
+    } else {
+        let display_len = 32_usize.checked_sub(bot.len() + 1)?;
+        let display = display
+            .get(..display.len().min(display_len))?
+            .trim_end_matches('-');
+        if display.is_empty() {
+            return None;
+        }
+        format!("{bot}-{display}")
+    };
+    (candidate.len() <= 32).then_some(candidate)
+}
+
+/// A body accepted by the configured inbound trigger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerMatch {
+    request: String,
+}
+
+impl TriggerMatch {
+    /// Match an operator-authored or operator-mentioned `{id}:` body.
+    ///
+    /// `inbound_trigger` is `{bot-id}:` (D9). Other authors MUST `p`-tag the
+    /// operator. The operator's own `{id}:` body is a trigger even when Buzz
+    /// only `p`-tags the DM peer (D11, D34). One leading `@mention` token is
+    /// allowed. The returned request excludes both the mention and trigger
+    /// tokens.
+    #[must_use]
+    pub fn parse<I, S>(
+        operator_pubkey: &str,
+        author_pubkey: &str,
+        p_tags: I,
+        inbound_trigger: &str,
+        body: &str,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let from_operator = author_pubkey.eq_ignore_ascii_case(operator_pubkey);
+        let mentioned = p_tags
+            .into_iter()
+            .any(|pubkey| pubkey.as_ref().eq_ignore_ascii_case(operator_pubkey));
+        if !from_operator && !mentioned {
+            return None;
+        }
+        Self::from_body(body, inbound_trigger)
+    }
+
+    /// Parse the inbound trigger token without checking `p`-tags.
+    ///
+    /// Use this on already-classified trigger text, such as a stored channel
+    /// body being replayed as an ask. `inbound_trigger` is `{bot-id}:`.
+    #[must_use]
+    pub fn from_body(body: &str, inbound_trigger: &str) -> Option<Self> {
+        if inbound_trigger.is_empty() {
+            return None;
+        }
+        let body = body.trim_start();
+        let (first, remainder) = split_first_token(body)?;
+        let request = if first == inbound_trigger {
+            remainder
+        } else if first.starts_with('@') && first.len() > 1 {
+            let (trigger, remainder) = split_first_token(remainder)?;
+            (trigger == inbound_trigger).then_some(remainder)?
+        } else {
+            return None;
+        };
+
+        Some(Self {
+            request: request.trim().to_owned(),
+        })
+    }
+
+    /// Return the text after the trigger token.
+    #[must_use]
+    pub fn request(&self) -> &str {
+        &self.request
+    }
+}
+
+fn split_first_token(input: &str) -> Option<(&str, &str)> {
+    if input.is_empty() {
+        return None;
+    }
+
+    match input.find(char::is_whitespace) {
+        Some(index) => Some((&input[..index], input[index..].trim_start())),
+        None => Some((input, "")),
+    }
+}
+
+/// Opaque relay event id (32-byte hex).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EventId(String);
+
+impl EventId {
+    #[must_use]
+    pub fn parse_hex(raw: &str) -> Option<Self> {
+        let t = raw.trim();
+        if t.len() != 64 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(Self(t.to_ascii_lowercase()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Lifecycle state of one triggered turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnState {
+    Queued,
+    Open,
+    Posted,
+    Failed,
+    Cancelled,
+}
+
+impl TurnState {
+    /// Parse a stored turn-state token.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "queued" => Some(Self::Queued),
+            "open" => Some(Self::Open),
+            "posted" => Some(Self::Posted),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
+    /// Return the stored token for this state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Open => "open",
+            Self::Posted => "posted",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl fmt::Display for TurnState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Legal change from one turn state to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnTransition {
+    from: TurnState,
+    to: TurnState,
+}
+
+impl TurnTransition {
+    /// Parse a legal turn-state change.
+    ///
+    /// Queued work may open or cancel. Open work may post, fail, or cancel.
+    /// Terminal states have no outgoing transition. There is no `publishing`
+    /// state.
+    #[must_use]
+    pub fn parse(from: TurnState, to: TurnState) -> Option<Self> {
+        let allowed = matches!(
+            (from, to),
+            (TurnState::Queued, TurnState::Open | TurnState::Cancelled)
+                | (
+                    TurnState::Open,
+                    TurnState::Posted | TurnState::Failed | TurnState::Cancelled
+                )
+        );
+        allowed.then_some(Self { from, to })
+    }
+
+    #[must_use]
+    pub fn from_state(self) -> TurnState {
+        self.from
+    }
+
+    #[must_use]
+    pub fn to_state(self) -> TurnState {
+        self.to
+    }
+}
+
+/// Parse an occupant tell body into the text to publish.
+///
+/// The whole body is published, trimmed. Empty or whitespace-only is
+/// `None` and publishes nothing.
+///
+/// # Examples
+///
+/// ```
+/// use nostrherd_domain::parse_occupant_tell;
+///
+/// assert_eq!(parse_occupant_tell("  queue is clear  "), Some("queue is clear".to_owned()));
+/// assert_eq!(parse_occupant_tell("   "), None);
+/// ```
+#[must_use]
+pub fn parse_occupant_tell(raw: &str) -> Option<String> {
+    let body = raw.trim();
+    (!body.is_empty()).then(|| body.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bot_id_rejects_empty_and_uppercase() {
+        assert!(BotId::new("").is_none());
+        assert!(BotId::new("Bot").is_none());
+        assert_eq!(BotId::new("bot").map(|b| b.to_string()), Some("bot".into()));
+    }
+
+    #[test]
+    fn bot_uses_id_as_inbound_trigger_and_rejects_empty_kind() {
+        let id = BotId::new("bot").expect("bot");
+        assert!(Bot::new(id.clone(), PathBuf::from("/corpus"), "").is_none());
+        assert!(Bot::new(id.clone(), PathBuf::from("/corpus"), "open code").is_none());
+        let bot = Bot::new(id, PathBuf::from("/corpus"), "opencode").expect("bot");
+        assert_eq!(bot.inbound_trigger(), INBOUND_TRIGGER);
+        assert_eq!(bot.outbound_prefix(), OUTBOUND_PREFIX);
+        assert_eq!(bot.occupant_kind(), "opencode");
+        assert_eq!(bot.corpus_path(), Path::new("/corpus"));
+        let review = Bot::new(
+            BotId::new("review").expect("id"),
+            PathBuf::from("/corpus"),
+            "opencode",
+        )
+        .expect("bot");
+        assert_eq!(review.inbound_trigger(), "review:");
+        assert_eq!(review.outbound_prefix(), "[review]:");
+        assert_ne!(review.inbound_trigger(), INBOUND_TRIGGER);
+        assert_ne!(review.outbound_prefix(), OUTBOUND_PREFIX);
+    }
+
+    #[test]
+    fn session_name_prefers_readable_channel_display() {
+        let bot = BotId::new("bot").expect("bot");
+        let name = SessionName::from_bot_and_channel(
+            &bot,
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+            "#Foobar",
+            |_| false,
+        )
+        .expect("name");
+        assert_eq!(name.as_str(), "bot-foobar");
+    }
+
+    #[test]
+    fn session_name_uses_uuid_to_disambiguate_and_stays_bounded() {
+        let bot = BotId::new("review").expect("bot");
+        let mut first_candidate = true;
+        let name = SessionName::from_bot_and_channel(
+            &bot,
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+            "A channel display name that is much too long",
+            |_| std::mem::replace(&mut first_candidate, false),
+        )
+        .expect("name");
+
+        assert_eq!(name.as_str(), "review-a-channel-displa-ab12cd34");
+        assert!(name.as_str().len() <= 32);
+    }
+
+    #[test]
+    fn session_name_tries_more_of_uuid_after_a_prefix_collision() {
+        let bot = BotId::new("bot").expect("bot");
+        let name = SessionName::from_bot_and_channel(
+            &bot,
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+            "foobar",
+            |candidate| matches!(candidate, "bot-foobar" | "bot-foobar-ab12cd34"),
+        )
+        .expect("name");
+
+        assert_eq!(name.as_str(), "bot-foobar-ab12cd345678");
+    }
+
+    #[test]
+    fn session_name_shortens_uuid_suffix_for_a_long_bot_id() {
+        let bot_id = "a".repeat(28);
+        let bot = BotId::new(&bot_id).expect("bot");
+        let mut first_candidate = true;
+        let name = SessionName::from_bot_and_channel(
+            &bot,
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+            "foo",
+            |_| std::mem::replace(&mut first_candidate, false),
+        )
+        .expect("name");
+
+        assert_eq!(name.as_str(), format!("{bot_id}-ab1"));
+        assert_eq!(name.as_str().len(), 32);
+    }
+
+    #[test]
+    fn session_name_accepts_opaque_ids_without_a_suffix_unless_taken() {
+        let bot = BotId::new("bot").expect("bot");
+        for id in ["not-a-uuid", "", "group/with spaces", "非UUID"] {
+            let mut candidates = Vec::new();
+            let name = SessionName::from_bot_and_channel(&bot, id, "Foobar", |candidate| {
+                candidates.push(candidate.to_owned());
+                false
+            })
+            .expect("name");
+            assert_eq!(name.as_str(), "bot-foobar");
+            assert_eq!(candidates, ["bot-foobar"]);
+        }
+    }
+
+    #[test]
+    fn opaque_ids_disambiguate_identical_display_slugs() {
+        let bot = BotId::new("bot").expect("bot");
+        let mut taken = std::collections::HashSet::new();
+        for (id, display, expected) in [
+            ("other", "#Eng", "bot-eng"),
+            ("hello", "ENG!", "bot-eng-a430d846"),
+            ("", "eng", "bot-eng-cbf29ce4"),
+        ] {
+            let name = SessionName::from_bot_and_channel(&bot, id, display, |candidate| {
+                taken.contains(candidate)
+            })
+            .expect("name");
+            assert_eq!(name.as_str(), expected);
+            assert!(taken.insert(name.as_str().to_owned()));
+        }
+    }
+
+    #[test]
+    fn opaque_id_suffix_lengthens_until_available_or_exhausted() {
+        let bot = BotId::new("bot").expect("bot");
+        let expected = [
+            "bot-eng",
+            "bot-eng-a430d846",
+            "bot-eng-a430d84680aa",
+            "bot-eng-a430d84680aabd0b",
+        ];
+        for available in 0..=expected.len() {
+            let mut candidates = Vec::new();
+            let result = SessionName::from_bot_and_channel(&bot, "hello", "eng", |candidate| {
+                candidates.push(candidate.to_owned());
+                candidates.len() <= available
+            });
+            assert_eq!(
+                result.as_ref().map(SessionName::as_str),
+                expected.get(available).copied()
+            );
+            assert_eq!(candidates, expected[..(available + 1).min(expected.len())]);
+        }
+    }
+
+    #[test]
+    fn all_session_candidates_obey_herdr_grammar_and_length() {
+        for bot_len in 1..=33 {
+            let bot = BotId::new(&"a".repeat(bot_len)).expect("bot");
+            for id in [
+                "hello",
+                "",
+                "非UUID",
+                "AB12CD34-5678-90AB-CDEF-0123456789AB",
+            ] {
+                for display in [
+                    "",
+                    "!!!",
+                    "9 !!!",
+                    "A channel display name that is much too long",
+                ] {
+                    let mut candidates = Vec::new();
+                    assert!(
+                        SessionName::from_bot_and_channel(&bot, id, display, |candidate| {
+                            assert!(candidate.len() <= 32);
+                            assert!(candidate.as_bytes()[0].is_ascii_lowercase());
+                            assert!(candidate.bytes().all(|byte| byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'-' | b'_')));
+                            candidates.push(candidate.to_owned());
+                            true
+                        })
+                        .is_none()
+                    );
+                    assert_eq!(candidates.is_empty(), bot_len > 30);
+                }
+            }
+        }
+        let bot = BotId::new(&"a".repeat(28)).expect("bot");
+        let name = SessionName::from_bot_and_channel(&bot, "hello", "eng", |candidate| {
+            candidate.ends_with("eng")
+        })
+        .expect("shortened suffix");
+        assert_eq!(name.as_str(), format!("{}-a43", bot.as_str()));
+    }
+
+    #[test]
+    fn session_names_include_the_bot_id() {
+        let bot = BotId::new("bot").expect("bot");
+        let review = BotId::new("review").expect("bot");
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let bot_name =
+            SessionName::from_bot_and_channel(&bot, channel, "foobar", |_| false).expect("bot");
+        let review_name = SessionName::from_bot_and_channel(&review, channel, "foobar", |_| false)
+            .expect("review");
+        assert_eq!(bot_name.as_str(), "bot-foobar");
+        assert_eq!(review_name.as_str(), "review-foobar");
+        assert_ne!(bot_name.as_str(), review_name.as_str());
+    }
+
+    #[test]
+    fn session_names_disambiguate_when_bot_and_display_collide() {
+        let first = BotId::new("a").expect("bot");
+        let second = BotId::new("a-b").expect("bot");
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let mut taken = std::collections::HashSet::new();
+        let first_name = SessionName::from_bot_and_channel(&first, channel, "b-c", |candidate| {
+            taken.contains(candidate)
+        })
+        .expect("first");
+        taken.insert(first_name.as_str().to_owned());
+        let second_name = SessionName::from_bot_and_channel(&second, channel, "c", |candidate| {
+            taken.contains(candidate)
+        })
+        .expect("second");
+        assert_eq!(first_name.as_str(), "a-b-c");
+        assert_ne!(first_name.as_str(), second_name.as_str());
+        assert!(second_name.as_str().starts_with("a-b-c-"));
+    }
+
+    #[test]
+    fn place_display_keeps_a_usable_stream_title() {
+        assert_eq!(place_display("#eng", Some("Sebastian")), "#eng");
+        assert!(!is_generic_dm_title("#eng"));
+    }
+
+    #[test]
+    fn place_display_uses_peer_when_the_channel_title_is_generic_dm() {
+        assert!(is_generic_dm_title("DM"));
+        assert!(is_generic_dm_title(" dm "));
+        assert_eq!(place_display("DM", Some("Sebastian")), "Sebastian");
+        assert_eq!(place_display("DM", None), "DM");
+        let bot = BotId::new("bot").expect("bot");
+        let name = SessionName::from_bot_and_channel(
+            &bot,
+            "ab12cd34-5678-90ab-cdef-0123456789ab",
+            &place_display("DM", Some("Sebastian")),
+            |_| false,
+        )
+        .expect("name");
+        assert_eq!(name.as_str(), "bot-sebastian");
+    }
+
+    #[test]
+    fn trigger_requires_operator_p_tag_unless_operator_authored() {
+        assert!(TriggerMatch::parse(
+            "operator",
+            "someone-else",
+            ["someone-else"],
+            INBOUND_TRIGGER,
+            "bot: hello"
+        )
+        .is_none());
+        assert_eq!(
+            TriggerMatch::parse(
+                "operator",
+                "someone-else",
+                ["someone-else", "operator"],
+                INBOUND_TRIGGER,
+                "bot: hello"
+            )
+            .map(|matched| matched.request),
+            Some("hello".to_owned())
+        );
+        assert_eq!(
+            TriggerMatch::parse(
+                "operator",
+                "operator",
+                ["someone-else"],
+                INBOUND_TRIGGER,
+                "bot: hello"
+            )
+            .map(|matched| matched.request),
+            Some("hello".to_owned())
+        );
+        assert_eq!(
+            TriggerMatch::parse(
+                "operator",
+                "operator",
+                ["someone-else"],
+                INBOUND_TRIGGER,
+                "@daniel bot: testing"
+            )
+            .map(|matched| matched.request),
+            Some("testing".to_owned())
+        );
+        assert!(TriggerMatch::parse(
+            "operator",
+            "operator",
+            ["someone-else"],
+            INBOUND_TRIGGER,
+            "[bot]: pong"
+        )
+        .is_none());
+        assert!(TriggerMatch::parse(
+            "operator",
+            "operator",
+            ["someone-else"],
+            "pr:",
+            "[pr]: pong"
+        )
+        .is_none());
+        assert!(TriggerMatch::parse(
+            "operator",
+            "operator",
+            ["someone-else"],
+            "pr:",
+            "[pr]: hello"
+        )
+        .is_none());
+        assert_eq!(
+            TriggerMatch::parse(
+                "operator",
+                "operator",
+                ["someone-else"],
+                "review:",
+                "review: hello"
+            )
+            .map(|matched| matched.request),
+            Some("hello".to_owned())
+        );
+        assert!(TriggerMatch::parse(
+            "operator",
+            "operator",
+            ["someone-else"],
+            "review:",
+            "bot: hello"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn trigger_allows_one_leading_mention() {
+        let matched = TriggerMatch::parse(
+            "operator",
+            "someone-else",
+            ["operator"],
+            INBOUND_TRIGGER,
+            "  @daniel\n bot:   review the PR  ",
+        )
+        .expect("trigger");
+
+        assert_eq!(matched.request(), "review the PR");
+        assert_eq!(
+            TriggerMatch::from_body("@daniel bot: review the PR", INBOUND_TRIGGER)
+                .expect("body")
+                .request(),
+            "review the PR"
+        );
+        assert_eq!(
+            TriggerMatch::from_body("bot:", INBOUND_TRIGGER)
+                .expect("empty")
+                .request(),
+            ""
+        );
+    }
+
+    #[test]
+    fn trigger_rejects_non_prefix_and_inexact_tokens() {
+        for body in [
+            "and the PR?",
+            "@daniel and the PR?",
+            "please bot: help",
+            "bot:help",
+            "@daniel bot:help",
+            "@daniel @bot bot: help",
+            "[bot]: bot: help",
+        ] {
+            assert!(
+                TriggerMatch::parse(
+                    "operator",
+                    "someone-else",
+                    ["operator"],
+                    INBOUND_TRIGGER,
+                    body
+                )
+                .is_none(),
+                "unexpected trigger: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn stamp_outbound_prefixes_once() {
+        assert_eq!(stamp_outbound("hello", OUTBOUND_PREFIX), "[bot]: hello");
+        assert_eq!(
+            stamp_outbound("  [bot]: already  ", OUTBOUND_PREFIX),
+            "[bot]: already"
+        );
+        assert_eq!(
+            stamp_outbound("[bot]:already", OUTBOUND_PREFIX),
+            "[bot]:already"
+        );
+        assert_eq!(stamp_outbound("hello", "[pr]:"), "[pr]: hello");
+        assert_eq!(
+            stamp_outbound("  [pr]: already  ", "[pr]:"),
+            "[pr]: already"
+        );
+        assert_eq!(stamp_outbound("[pr]:already", "[pr]:"), "[pr]:already");
+        assert_eq!(
+            stamp_outbound("[bot]: leftover", "[pr]:"),
+            "[pr]: [bot]: leftover"
+        );
+        let pr = BotId::new("pr").expect("id");
+        assert_eq!(outbound_prefix_for(&pr), "[pr]:");
+        assert_eq!(
+            outbound_prefix_for(&BotId::new("bot").expect("id")),
+            OUTBOUND_PREFIX
+        );
+    }
+
+    #[test]
+    fn event_id_is_64_hex() {
+        assert!(EventId::parse_hex("ab").is_none());
+        let hex = "a".repeat(64);
+        assert_eq!(EventId::parse_hex(&hex).map(|e| e.as_str().len()), Some(64));
+    }
+
+    #[test]
+    fn turn_state_parses_known_tokens_only() {
+        assert_eq!(TurnState::parse("queued"), Some(TurnState::Queued));
+        assert_eq!(TurnState::parse("open"), Some(TurnState::Open));
+        assert_eq!(TurnState::parse("posted"), Some(TurnState::Posted));
+        assert_eq!(TurnState::parse("failed"), Some(TurnState::Failed));
+        assert_eq!(TurnState::parse("cancelled"), Some(TurnState::Cancelled));
+        assert!(TurnState::parse("publishing").is_none());
+        assert!(TurnState::parse("Open").is_none());
+        assert_eq!(TurnState::Open.to_string(), "open");
+    }
+
+    #[test]
+    fn turn_transition_parses_legal_changes_only() {
+        let allowed = [
+            (TurnState::Queued, TurnState::Open),
+            (TurnState::Queued, TurnState::Cancelled),
+            (TurnState::Open, TurnState::Posted),
+            (TurnState::Open, TurnState::Failed),
+            (TurnState::Open, TurnState::Cancelled),
+        ];
+        for (from, to) in allowed {
+            let transition = TurnTransition::parse(from, to).expect("legal");
+            assert_eq!(transition.from_state(), from);
+            assert_eq!(transition.to_state(), to);
+        }
+        for from in [
+            TurnState::Queued,
+            TurnState::Open,
+            TurnState::Posted,
+            TurnState::Failed,
+            TurnState::Cancelled,
+        ] {
+            for to in [
+                TurnState::Queued,
+                TurnState::Open,
+                TurnState::Posted,
+                TurnState::Failed,
+                TurnState::Cancelled,
+            ] {
+                if allowed.contains(&(from, to)) {
+                    continue;
+                }
+                assert!(
+                    TurnTransition::parse(from, to).is_none(),
+                    "unexpected {from} -> {to}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn occupant_tell_posts_the_whole_trimmed_body() {
+        assert_eq!(
+            parse_occupant_tell("  queue is clear  "),
+            Some("queue is clear".to_owned())
+        );
+    }
+
+    #[test]
+    fn occupant_tell_publishes_any_text_including_angle_brackets() {
+        let raw = "the <nostrherd to=\"eng\"> tag, explained";
+        assert_eq!(parse_occupant_tell(raw), Some(raw.to_owned()));
+    }
+
+    #[test]
+    fn occupant_tell_rejects_empty_bodies() {
+        assert!(parse_occupant_tell("").is_none());
+        assert!(parse_occupant_tell("   ").is_none());
+    }
+}

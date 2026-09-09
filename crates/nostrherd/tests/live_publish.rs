@@ -1,0 +1,458 @@
+//! Live publish and subscription-refresh proofs for issues 54 and 57
+//! against the throwaway local Buzz relay. Skipped unless explicitly
+//! requested; run it with the local-relay harness up (see
+//! `skills/local-relay/SKILL.md` and `docs/testing.md`):
+//!
+//! ```bash
+//! ./tools/local-relay up
+//! env -u BUZZ_AUTH_TAG envchain nostrherd-proof \
+//!   cargo test --test live_publish -- --ignored --nocapture
+//! ```
+
+use std::time::Duration;
+
+use futures::StreamExt;
+use nostr_sdk::prelude::{
+    Client, ClientNotification, Filter, Keys, SignerAuthenticator, SubscriptionId, Timestamp,
+};
+use nostrherd::outbox::{BuzzPublisher, OutboundAttempt, OutboundPublisher};
+use nostrherd_domain::{buzz, stamp_outbound, EventId};
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn relay_url() -> String {
+    std::env::var("NOSTRHERD_RELAY_URL").expect("NOSTRHERD_RELAY_URL (local relay)")
+}
+
+fn operator_keys() -> Keys {
+    let secret = std::env::var("NOSTRHERD_PRIVATE_KEY").expect("NOSTRHERD_PRIVATE_KEY");
+    Keys::parse(&secret).expect("operator key")
+}
+
+async fn connect(keys: Keys, relay_url: &str) -> Client {
+    let client = Client::builder()
+        .authenticator(SignerAuthenticator::new(keys))
+        .build();
+    client.add_relay(relay_url).await.expect("add relay");
+    client.connect().and_wait(CONNECT_TIMEOUT).await;
+    client
+}
+
+async fn fetch_one(client: &Client, event_id: &str) -> Option<nostr_sdk::prelude::Event> {
+    let filter = Filter::new()
+        .id(nostr_sdk::prelude::EventId::from_hex(event_id).expect("event id"))
+        .limit(1);
+    let events = client
+        .fetch_events(filter)
+        .timeout(FETCH_TIMEOUT)
+        .await
+        .expect("fetch");
+    events.into_iter().next()
+}
+
+fn tag_values(event: &nostr_sdk::prelude::Event, name: &str) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| match tag.as_slice() {
+            [tag_name, value, ..] if tag_name == name => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn attempt_for(channel: &str, trigger: &EventId, body: &str) -> OutboundAttempt {
+    OutboundAttempt {
+        reply_to_event_id: Some(trigger.clone()),
+        ..OutboundAttempt::new(format!("live-{}", trigger.as_str()), body, channel)
+    }
+}
+
+async fn assert_refresh_filters(client: &Client, channel: &str, trigger: &EventId) {
+    let subscriptions = client.subscriptions().await;
+    let channel_filter = subscriptions
+        .get(&SubscriptionId::new("nostrherd-channels"))
+        .and_then(|relays| relays.values().next())
+        .and_then(|filters| filters.first())
+        .expect("channel subscription");
+    let mutation_filter = subscriptions
+        .get(&SubscriptionId::new("nostrherd-mutations"))
+        .and_then(|relays| relays.values().next())
+        .and_then(|filters| filters.first())
+        .expect("mutation subscription");
+    assert_eq!(
+        serde_json::to_value(channel_filter).expect("channel filter json")["#h"],
+        serde_json::json!([channel])
+    );
+    assert_eq!(
+        serde_json::to_value(mutation_filter).expect("mutation filter json")["#e"],
+        serde_json::json!([trigger.as_str()])
+    );
+}
+
+/// One event of each kind (9, 40003, 9005, 7 plus the kind-5 removal),
+/// then the relay-dedup retry proof: disconnect before re-publish and
+/// the relay still holds exactly one event with the same id.
+///
+/// Requires `BOTSERVER_LIVE_CHANNEL`: a channel UUID the operator is a
+/// member of, since the Buzz relay restricts channel writes to members.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live proof; run against tools/local-relay (see docs/testing.md)"]
+async fn live_publishes_each_kind_and_dedups_a_redelivery() {
+    let relay_url = relay_url();
+    let keys = operator_keys();
+    let channel = std::env::var("BOTSERVER_LIVE_CHANNEL").expect(
+        "BOTSERVER_LIVE_CHANNEL (a channel UUID the operator is a member of, \
+         created by the docs/testing.md recipe)",
+    );
+    let client = connect(keys.clone(), &relay_url).await;
+    let publisher = BuzzPublisher::new(client.clone(), keys.clone(), relay_url.clone());
+
+    // A real trigger on the channel: the operator posts a plain kind 9.
+    let trigger_message = buzz::channel_message(&channel, "live trigger", &[], None);
+    let trigger_id = publisher
+        .send_buzz(&trigger_message)
+        .await
+        .expect("trigger post");
+    let trigger = EventId::parse_hex(&trigger_id).expect("trigger id");
+
+    // Kind 9 through the OutboundPublisher path: prepare gives the id
+    // before send, and the accepted id is the prepared id. The
+    // markerless trigger replies with a reply marker only.
+    let stamped = stamp_outbound("live kind 9 body", "[bot]:");
+    let attempt = attempt_for(&channel, &trigger, &stamped);
+    let prepared = publisher.prepare(&attempt).expect("prepare");
+    let accepted = publisher.publish(&prepared).expect("publish");
+    assert_eq!(accepted, prepared.event_id());
+
+    let event = fetch_one(&client, &accepted)
+        .await
+        .expect("kind 9 on the relay");
+    assert_eq!(event.kind.as_u16(), buzz::CHANNEL_MESSAGE_KIND);
+    assert_eq!(event.content, stamped);
+    assert_eq!(tag_values(&event, "h"), vec![channel.clone()]);
+    assert_eq!(
+        tag_values(&event, "e"),
+        vec![trigger.as_str().to_owned()],
+        "markerless trigger replies with a reply marker only"
+    );
+
+    // Relay-dedup retry proof: drop the connection, reconnect, and
+    // republish the identical prepared event. The relay dedups; exactly
+    // one event with this id exists.
+    client.disconnect().await;
+    client.connect().and_wait(CONNECT_TIMEOUT).await;
+    let redelivered = publisher.publish(&prepared).expect("republish");
+    assert_eq!(redelivered, accepted);
+    let filter = Filter::new()
+        .id(nostr_sdk::prelude::EventId::from_hex(&accepted).expect("event id"))
+        .limit(10);
+    let events_after_redelivery = client
+        .fetch_events(filter)
+        .timeout(FETCH_TIMEOUT)
+        .await
+        .expect("fetch after redelivery")
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events_after_redelivery.len(),
+        1,
+        "a redelivered event is relay-deduped to one event"
+    );
+
+    // Kind 40003 edit of the kind-9 post.
+    let target = EventId::parse_hex(&accepted).expect("target");
+    let edited = buzz::message_edit(&channel, &target, "live kind 40003 body");
+    let edit_id = publisher.send_buzz(&edited).await.expect("edit");
+    let edit_event = fetch_one(&client, &edit_id)
+        .await
+        .expect("kind 40003 on the relay");
+    assert_eq!(edit_event.kind.as_u16(), buzz::MESSAGE_EDIT_KIND);
+    assert_eq!(edit_event.content, "live kind 40003 body");
+    assert_eq!(tag_values(&edit_event, "e"), vec![accepted.clone()]);
+
+    // Kind 9005 delete of the kind-9 post.
+    let deleted = buzz::message_delete(&channel, &target);
+    let delete_id = publisher.send_buzz(&deleted).await.expect("delete");
+    let delete_event = fetch_one(&client, &delete_id)
+        .await
+        .expect("kind 9005 on the relay");
+    assert_eq!(delete_event.kind.as_u16(), buzz::MESSAGE_DELETE_KIND);
+    assert_eq!(tag_values(&delete_event, "e"), vec![accepted]);
+
+    // Kind 7 reaction and its kind-5 removal. The host marks the
+    // trigger, which still exists (the reply above was deleted, and a
+    // deleted event cannot take a reaction).
+    let reaction = buzz::reaction(&trigger, nostrherd::outbox::IN_FLIGHT_REACTION);
+    let reaction_id = publisher.send_buzz(&reaction).await.expect("reaction");
+    let reaction_event = fetch_one(&client, &reaction_id)
+        .await
+        .expect("kind 7 on the relay");
+    assert_eq!(reaction_event.kind.as_u16(), buzz::REACTION_KIND);
+    assert_eq!(
+        reaction_event.content,
+        nostrherd::outbox::IN_FLIGHT_REACTION
+    );
+    assert_eq!(
+        tag_values(&reaction_event, "e"),
+        vec![trigger.as_str().to_owned()]
+    );
+
+    let reaction_event_id = EventId::parse_hex(&reaction_id).expect("reaction id");
+    let removal = buzz::reaction_removal(&reaction_event_id);
+    let removal_id = publisher
+        .send_buzz(&removal)
+        .await
+        .expect("reaction removal");
+    let removal_event = fetch_one(&client, &removal_id)
+        .await
+        .expect("kind 5 on the relay");
+    assert_eq!(removal_event.kind.as_u16(), buzz::REACTION_REMOVAL_KIND);
+    assert_eq!(tag_values(&removal_event, "e"), vec![reaction_id]);
+
+    client.disconnect().await;
+    println!("live publish proof complete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live proof; run against tools/local-relay (see docs/testing.md)"]
+async fn live_refresh_replaces_channel_and_active_turn_filters() {
+    let relay_url = relay_url();
+    let keys = operator_keys();
+    let operator = keys.public_key().to_hex();
+    let channel = std::env::var("BOTSERVER_LIVE_CHANNEL").expect(
+        "BOTSERVER_LIVE_CHANNEL (a channel UUID the operator is a member of, \
+         created by the docs/testing.md recipe)",
+    );
+    let client = connect(keys.clone(), &relay_url).await;
+    let publisher = BuzzPublisher::new(client.clone(), keys, relay_url);
+    let subscriber = nostrherd::relay::RelaySubscriber::new(client.clone());
+    let mut notifications = subscriber.notifications();
+
+    subscriber
+        .subscribe(&operator, &[], &[], &[], Timestamp::now())
+        .await
+        .expect("initial subscriptions");
+
+    let trigger_id = publisher
+        .send_buzz(&buzz::channel_message(
+            &channel,
+            "subscription refresh trigger",
+            &[],
+            None,
+        ))
+        .await
+        .expect("trigger post");
+    let trigger = EventId::parse_hex(&trigger_id).expect("trigger id");
+
+    subscriber
+        .subscribe(
+            &operator,
+            std::slice::from_ref(&channel),
+            std::slice::from_ref(&trigger),
+            &[],
+            Timestamp::now(),
+        )
+        .await
+        .expect("refreshed subscriptions");
+    assert_refresh_filters(&client, &channel, &trigger).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let channel_event = publisher
+        .send_buzz(&buzz::channel_message(
+            &channel,
+            "event after subscription refresh",
+            &[],
+            None,
+        ))
+        .await
+        .expect("channel post");
+    let mutation_event = publisher
+        .send_buzz(&buzz::message_edit(
+            &channel,
+            &trigger,
+            "edit after subscription refresh",
+        ))
+        .await
+        .expect("mutation post");
+
+    let mut channel_received = false;
+    let received = tokio::time::timeout(FETCH_TIMEOUT, async {
+        while !channel_received {
+            let Some(notification) = notifications.next().await else {
+                panic!("relay notifications ended");
+            };
+            if let ClientNotification::Event {
+                subscription_id,
+                event,
+                ..
+            } = notification
+            {
+                channel_received |= subscription_id == SubscriptionId::new("nostrherd-channels")
+                    && event.id.to_hex() == channel_event;
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_ok(),
+        "refreshed channel filter did not receive its matching event"
+    );
+    let stored_mutations = subscriber
+        .fetch_mutations(std::slice::from_ref(&trigger), Timestamp::zero())
+        .await
+        .expect("fetch mutations");
+    assert!(
+        stored_mutations
+            .iter()
+            .any(|event| event.id.to_hex() == mutation_event),
+        "changed active-turn scope did not match the stored mutation"
+    );
+
+    client.disconnect().await;
+}
+
+fn proof_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").expect("HOME")).join("tmp-nostrherd-proof")
+}
+
+fn port_open() -> bool {
+    std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:13001".parse().expect("addr"),
+        Duration::from_millis(200),
+    )
+    .is_ok()
+}
+
+fn stop_throwaway_relay() {
+    let pid = std::fs::read_to_string(proof_dir().join("relay.pid")).expect("relay pid");
+    let status = std::process::Command::new("kill")
+        .args(["-KILL", pid.trim()])
+        .status()
+        .expect("kill");
+    assert!(status.success(), "kill throwaway relay");
+    let _ = std::process::Command::new("fuser")
+        .args(["-k", "-KILL", "13001/tcp"])
+        .status();
+    std::fs::remove_file(proof_dir().join("relay.pid")).ok();
+    for _ in 0..50 {
+        if !port_open() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("throwaway relay still listening after kill");
+}
+
+fn start_throwaway_relay() {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let status = std::process::Command::new(repo.join("tools/local-relay"))
+        .arg("up")
+        .current_dir(&repo)
+        .status()
+        .expect("local-relay up");
+    assert!(status.success(), "restart throwaway relay");
+}
+
+/// Genuine publish timeout: the throwaway relay is killed mid-send, then
+/// the tick drain resends the same prepared id once the relay is back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live proof; run against tools/local-relay (see docs/testing.md)"]
+async fn live_retry_after_a_real_relay_drop() {
+    use nostrherd::outbox::{retry_undispatched, NoopInFlightReaction};
+    use nostrherd::sqlite::SqliteRepository;
+    use nostrherd::HostRepository;
+    use nostrherd_domain::BotId;
+    use rusqlite::Connection;
+
+    let relay_url = relay_url();
+    let keys = operator_keys();
+    let channel = std::env::var("BOTSERVER_LIVE_CHANNEL").expect("BOTSERVER_LIVE_CHANNEL");
+    let client = connect(keys.clone(), &relay_url).await;
+    let publisher = BuzzPublisher::new(client.clone(), keys.clone(), relay_url.clone());
+    let mut repository =
+        SqliteRepository::from_connection(Connection::open_in_memory().expect("sqlite"))
+            .expect("repository");
+    let bot_id = BotId::new("bot").expect("bot");
+    let trigger_id = publisher
+        .send_buzz(&buzz::channel_message(
+            &channel,
+            "live retry trigger",
+            &[],
+            None,
+        ))
+        .await
+        .expect("trigger post");
+    let trigger = EventId::parse_hex(&trigger_id).expect("trigger id");
+    let stamped = stamp_outbound("live retry after drop", "[bot]:");
+    let attempt = OutboundAttempt {
+        bot_id: Some(bot_id.clone()),
+        ..attempt_for(&channel, &trigger, &stamped)
+    };
+    repository.save_outbound_attempt(&attempt).expect("save");
+
+    stop_throwaway_relay();
+    let pending = repository
+        .outbound_attempt(&attempt.ask_id)
+        .unwrap()
+        .expect("pending");
+    let first = retry_undispatched(
+        &mut repository,
+        &publisher,
+        &mut |_| {},
+        &NoopInFlightReaction,
+        &pending,
+        &bot_id,
+        1,
+    );
+    assert!(
+        matches!(first, Err(nostrherd::outbox::OutboxError::Publish(_))),
+        "killed relay must be a retryable publish failure, got {first:?}"
+    );
+    let stranded = repository
+        .outbound_attempt(&attempt.ask_id)
+        .unwrap()
+        .expect("stranded");
+    let prepared = stranded.prepared_event_id.clone().expect("prepared");
+    assert!(stranded.outbound_event_id.is_none());
+
+    start_throwaway_relay();
+    client.disconnect().await;
+    let client = connect(keys.clone(), &relay_url).await;
+    let publisher = BuzzPublisher::new(client.clone(), keys, relay_url);
+    let mut notices = Vec::new();
+    let retried = retry_undispatched(
+        &mut repository,
+        &publisher,
+        &mut |notice| notices.push(notice.to_owned()),
+        &NoopInFlightReaction,
+        &stranded,
+        &bot_id,
+        100,
+    )
+    .expect("drain retry");
+    assert_eq!(
+        retried,
+        nostrherd::outbox::InboxAction::Ack,
+        "notices={notices:?}"
+    );
+    let accepted = repository
+        .outbound_attempt(&attempt.ask_id)
+        .unwrap()
+        .expect("accepted");
+    assert_eq!(
+        accepted.prepared_event_id.as_deref(),
+        Some(prepared.as_str())
+    );
+    assert_eq!(
+        accepted.outbound_event_id.as_deref(),
+        Some(prepared.as_str())
+    );
+    let event = fetch_one(&client, &prepared)
+        .await
+        .expect("one event on the relay");
+    assert_eq!(event.content, stamped);
+    client.disconnect().await;
+    println!("live retry-after-drop proof complete prepared={prepared}");
+}

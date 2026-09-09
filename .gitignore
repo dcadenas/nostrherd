@@ -1,0 +1,17 @@
+/target/
+/dist/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.log
+.DS_Store
+/var/
+
+# Host-written corpus state: place snapshots and per-session checkpoints.
+# The host owns these; only the corpus author's own files are tracked.
+.nostrherd/
+
+# Pre-rename layouts left in corpora that predate the current one.
+.botserver/
+corpus/*/progress.md
+corpus/*/progress-*.md
