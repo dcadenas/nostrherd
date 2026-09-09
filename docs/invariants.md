@@ -30,6 +30,14 @@ this file and SPEC disagree.
 
 SPEC user-visible flows are the product matrix in `docs/testing.md`.
 
+D57 narrows I5: additional requesters MUST be allowlisted for that bot.
+`requester_allowlist_defaults_to_operator_only_and_normalizes_keys` and
+`requester_authorization_is_per_bot_and_requires_peer_mention` prove admission.
+`requester_stamp_uses_host_identity_not_request_text` proves prefix origin.
+`queued_requester_checks_cover_legacy_rows_revocation_and_missing_identity`
+proves queued dispatch fails closed; `local_relay_contract_before_synthetic_occupant`
+proves refusal, operator/peer stamps and peer queue/restart on an isolated relay.
+
 The host contract and snapshot blocks MUST be idempotent and MUST preserve
 author-owned text and `AGENTS.md` (D55):
 `startup_contract_preserves_author_text_and_refreshes_both_blocks_idempotently`,

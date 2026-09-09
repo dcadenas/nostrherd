@@ -11,7 +11,8 @@ in `nostrherd`.
 
 Configured personality. Identity is `BotId` (stable slug, e.g. `bot`).
 Holds: corpus repo path, inbound trigger, outbound prefix, occupant
-kind. Does not hold live Kelpie ids (those are session runtime).
+kind and additional allowed requester public keys (empty means operator-only).
+Does not hold live Kelpie ids (those are session runtime).
 
 One actor in the host process maps 1:1 to one `Bot`.
 
@@ -28,6 +29,9 @@ created_at).
 
 Work owed for one triggering Nostr event. Holds: event id, Kelpie ask
 id, `TurnState` (`queued`, `open`, `posted`, `failed`, `cancelled`).
+Trigger turns persist the effective requester public key and request in
+`ask_body` (D57); host wakes instead store their typed body. A non-null
+publish reply target distinguishes trigger turns from host wakes.
 Completing a turn is occupant `kelpie reply --final`, then host
 publish, then `inbox.ack`, not cancel. An occupant tell is not a turn
 (D38): it is a bot-initiated post on a known session channel. Publish reservation is a claim,
@@ -60,7 +64,8 @@ timer ledger (D44, D45).
 - `EventId`, `Pubkey` — relay coordinates, opaque hex.
 - `Place` — `Channel(id)` | `Dm(pubkey)` | `GroupDm(id)` (shape TBD).
 - `TriggerMatch` — first token `{bot-id}:` after an optional mention,
-  plus either an operator `p`-tag or operator authorship (D8, D9, D34).
+  plus either operator authorship or an operator `p`-tag from a requester
+  allowlisted for that bot (D8, D9, D34, D57).
   A non-prefix reply in an open thread is not a match.
 - `TurnState` / `TurnTransition` — parsed tokens. Illegal changes are
   `None`.

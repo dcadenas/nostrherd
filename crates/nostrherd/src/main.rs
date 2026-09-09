@@ -615,6 +615,7 @@ async fn poll_relay(
 
 fn start_actors(
     bots: Vec<Bot>,
+    operator_pubkey: &str,
     conduct_path: &Path,
     database: &Path,
     kelpie: &KelpieClient,
@@ -633,6 +634,7 @@ fn start_actors(
                     repository,
                     HerdrPaneAllocator::default(),
                     conduct_path.to_path_buf(),
+                    operator_pubkey.to_owned(),
                 )
                 .with_reactions(Arc::clone(&reactions))
                 .with_progress_relay(Arc::clone(&progress_relay))
@@ -712,15 +714,18 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
         operator.keys.clone(),
         operator.relay_url.clone(),
     );
-    let mut actors = start_actors(bots, &conduct_path, database, &kelpie, &waiter, &publisher)?;
-    let inbound_triggers = actors
+    let mut actors = start_actors(
+        bots,
+        &operator_pubkey,
+        &conduct_path,
+        database,
+        &kelpie,
+        &waiter,
+        &publisher,
+    )?;
+    let bots = actors
         .iter()
-        .map(|actor| {
-            (
-                actor.bot().id().clone(),
-                actor.bot().inbound_trigger().to_owned(),
-            )
-        })
+        .map(|actor| actor.bot().clone())
         .collect::<Vec<_>>();
     let subscriber = RelaySubscriber::new(client);
     let mut notifications = pin!(subscriber.notifications());
@@ -729,7 +734,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
         String::new(),
         SqliteRepository::open(database)?,
     )
-    .with_inbound_triggers(inbound_triggers);
+    .with_bots(&bots);
     let mut refresh = tokio::time::interval(SUBSCRIPTION_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut poll = RelayPoll {
@@ -1017,6 +1022,35 @@ mod tests {
         }
     }
 
+    fn dispatch_ingest(
+        bots: &[Bot],
+        repository: &mut SqliteRepository,
+        action: &IngestAction,
+    ) -> Result<TriggerOutcome, HostError> {
+        if let IngestAction::TurnCandidate {
+            event_id,
+            channel_id,
+            trigger,
+            ..
+        } = action
+        {
+            repository.index_event(
+                &nostrherd::IndexedRelayEvent {
+                    event_id: event_id.clone(),
+                    author_pubkey: "a".repeat(64),
+                    created_at: 1,
+                    kind: 9,
+                    content: trigger.request().to_owned(),
+                    tags_json: "[]".to_owned(),
+                    channel_id: Some(channel_id.clone()),
+                    target_event_id: None,
+                },
+                true,
+            )?;
+        }
+        super::dispatch_ingest(bots, repository, action)
+    }
+
     #[test]
     fn trigger_dispatch_queues_one_turn_for_the_first_bot() {
         let config = write_config("bot");
@@ -1136,6 +1170,7 @@ mod tests {
                     SqliteRepository::open(&database).expect("db"),
                     HerdrPaneAllocator::default(),
                     PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
+                    "a".repeat(64),
                 )
             })
             .collect::<Vec<_>>();

@@ -141,6 +141,7 @@ pub struct RelayIngest<R> {
     operator_pubkey: String,
     relay_pubkey: String,
     inbound_triggers: Vec<(BotId, String)>,
+    allowed_requesters: Vec<(BotId, Vec<String>)>,
     repository: R,
 }
 
@@ -156,6 +157,7 @@ impl<R: HostRepository> RelayIngest<R> {
             operator_pubkey: operator_pubkey.into().to_ascii_lowercase(),
             relay_pubkey: relay_pubkey.into().to_ascii_lowercase(),
             inbound_triggers: default_inbound_triggers(),
+            allowed_requesters: Vec::new(),
             repository,
         }
     }
@@ -181,6 +183,29 @@ impl<R: HostRepository> RelayIngest<R> {
             .filter(|(_, token)| !token.is_empty())
             .collect();
         self
+    }
+
+    /// Use each configured bot's trigger and requester allowlist.
+    #[must_use]
+    pub fn with_bots(mut self, bots: &[nostrherd_domain::Bot]) -> Self {
+        self.inbound_triggers = bots
+            .iter()
+            .map(|bot| (bot.id().clone(), bot.inbound_trigger().to_owned()))
+            .collect();
+        self.allowed_requesters = bots
+            .iter()
+            .map(|bot| (bot.id().clone(), bot.allowed_requesters().to_vec()))
+            .collect();
+        self
+    }
+
+    fn authorizes(&self, bot_id: &BotId, author: &str) -> bool {
+        let allowed = self
+            .allowed_requesters
+            .iter()
+            .find(|(id, _)| id == bot_id)
+            .map_or(&[][..], |(_, keys)| keys.as_slice());
+        nostrherd_domain::requester_authorized(&self.operator_pubkey, author, allowed)
     }
 
     /// Index one verified Nostr event and return an actor action when needed.
@@ -222,7 +247,6 @@ impl<R: HostRepository> RelayIngest<R> {
                 event_id.clone(),
                 channel_id.clone(),
                 &tags,
-                &event.pubkey.to_hex(),
                 &author,
                 &event.content,
             )),
@@ -318,6 +342,9 @@ impl<R: HostRepository> RelayIngest<R> {
         content: &str,
     ) -> Option<(BotId, TriggerMatch)> {
         self.inbound_triggers.iter().find_map(|(bot_id, token)| {
+            if !self.authorizes(bot_id, signing_pubkey) {
+                return None;
+            }
             TriggerMatch::parse(
                 &self.operator_pubkey,
                 signing_pubkey,
@@ -334,7 +361,6 @@ impl<R: HostRepository> RelayIngest<R> {
         event_id: EventId,
         channel_id: Option<String>,
         tags: &[Vec<String>],
-        signing_pubkey: &str,
         author: &EffectiveAuthor,
         content: &str,
     ) -> Option<IngestAction> {
@@ -354,7 +380,7 @@ impl<R: HostRepository> RelayIngest<R> {
             }
         });
         let p_tags = p_tags.map(str::to_ascii_lowercase).collect::<Vec<_>>();
-        let (bot_id, trigger) = self.match_trigger(signing_pubkey, &p_tags, content)?;
+        let (bot_id, trigger) = self.match_trigger(&author.pubkey, &p_tags, content)?;
         Some(IngestAction::TurnCandidate {
             bot_id,
             event_id,
@@ -393,6 +419,9 @@ impl<R: HostRepository> RelayIngest<R> {
         };
         // An active target already proved the original event p-tagged the operator.
         let replacement = self.trigger_token(&active.bot_id).and_then(|token| {
+            if !self.authorizes(&active.bot_id, author_pubkey) {
+                return None;
+            }
             TriggerMatch::parse(
                 &self.operator_pubkey,
                 author_pubkey,
@@ -1234,6 +1263,43 @@ mod tests {
     }
 
     #[test]
+    fn requester_authorization_is_per_bot_and_requires_peer_mention() {
+        let operator = Keys::generate();
+        let peer = Keys::generate();
+        let stranger = Keys::generate();
+        let op = operator.public_key().to_hex();
+        let bot =
+            nostrherd_domain::Bot::new(BotId::new("bot").unwrap(), "/unused".into(), "opencode")
+                .unwrap();
+        let pr =
+            nostrherd_domain::Bot::new(BotId::new("pr").unwrap(), "/unused".into(), "opencode")
+                .unwrap()
+                .with_allowed_requesters(vec![peer.public_key().to_hex()]);
+        let mut ingest =
+            RelayIngest::new(&op, relay_pubkey(), FakeRepository::default()).with_bots(&[bot, pr]);
+        for (keys, token, mention, allowed) in [
+            (&operator, "bot:", false, true),
+            (&operator, "pr:", false, true),
+            (&peer, "bot:", true, false),
+            (&peer, "pr:", true, true),
+            (&peer, "pr:", false, false),
+            (&stranger, "pr:", true, false),
+        ] {
+            let mut tags = vec![tag(&["h", "channel"])];
+            if mention {
+                tags.push(tag(&["p", &op]));
+            }
+            let message = event_with_keys(keys, 9, &format!("{token} hello"), tags);
+            assert_eq!(ingest.ingest(&message).unwrap().is_some(), allowed);
+            assert!(ingest
+                .repository
+                .indexed
+                .iter()
+                .any(|event| event.event_id.as_str() == message.id.to_hex()));
+        }
+    }
+
+    #[test]
     fn ordinary_messages_are_indexed_without_emitting() {
         let mut ingest =
             RelayIngest::new("a".repeat(64), relay_pubkey(), FakeRepository::default());
@@ -1254,6 +1320,8 @@ mod tests {
             "bot: rich message",
             [tag(&["h", "channel"]), tag(&["p", &operator])],
         );
+        ingest.allowed_requesters =
+            vec![(BotId::new("bot").unwrap(), vec![message.pubkey.to_hex()])];
 
         assert!(matches!(
             ingest.ingest(&message).unwrap(),
@@ -1286,6 +1354,8 @@ mod tests {
             ],
         );
 
+        ingest.allowed_requesters =
+            vec![(BotId::new("bot").unwrap(), vec![message.pubkey.to_hex()])];
         let action = ingest.ingest(&message).unwrap().expect("trigger");
         let IngestAction::TurnCandidate {
             channel_id,
@@ -1315,6 +1385,7 @@ mod tests {
         let relay = Keys::generate();
         let relay_pubkey = relay.public_key().to_hex();
         let mut ingest = RelayIngest::new(&operator, relay_pubkey, FakeRepository::default());
+        ingest.allowed_requesters = vec![(BotId::new("bot").unwrap(), vec![actor_pubkey.clone()])];
         let message = event_with_keys(
             &relay,
             CHANNEL_MESSAGE_KIND,
@@ -1354,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_attribution_p_tag_is_not_an_operator_mention() {
+    fn relay_attributed_operator_can_trigger_without_a_separate_mention() {
         let operator = "a".repeat(64);
         let relay = Keys::generate();
         let relay_pubkey = relay.public_key().to_hex();
@@ -1366,7 +1437,44 @@ mod tests {
             [tag(&["h", "channel"]), tag(&["p", &operator])],
         );
 
-        assert_eq!(ingest.ingest(&message).unwrap(), None);
+        assert!(matches!(
+            ingest.ingest(&message).unwrap(),
+            Some(IngestAction::TurnCandidate { .. })
+        ));
+    }
+
+    #[test]
+    fn only_the_configured_relay_can_assert_requester_authorship() {
+        let operator = "a".repeat(64);
+        let relay = Keys::generate();
+        let other = Keys::generate();
+        let mut ingest = RelayIngest::new(
+            &operator,
+            relay.public_key().to_hex(),
+            FakeRepository::default(),
+        );
+        let impersonated = event_with_keys(
+            &other,
+            9,
+            "bot: hello",
+            [
+                tag(&["h", "channel"]),
+                tag(&["actor", &operator]),
+                tag(&["p", &operator]),
+            ],
+        );
+        assert!(ingest.ingest(&impersonated).unwrap().is_none());
+        let non_operator = event_with_keys(
+            &relay,
+            9,
+            "bot: hello",
+            [
+                tag(&["h", "channel"]),
+                tag(&["actor", &other.public_key().to_hex()]),
+                tag(&["p", &operator]),
+            ],
+        );
+        assert!(ingest.ingest(&non_operator).unwrap().is_none());
     }
 
     #[test]
@@ -1382,6 +1490,10 @@ mod tests {
             occupant_starts: std::collections::HashMap::new(),
         };
         let mut ingest = RelayIngest::new(&operator, relay_pubkey(), repository);
+        ingest.allowed_requesters = vec![(
+            BotId::new("bot").unwrap(),
+            vec![author.public_key().to_hex()],
+        )];
         let edit = event_with_keys(
             &author,
             MESSAGE_EDIT_KIND,

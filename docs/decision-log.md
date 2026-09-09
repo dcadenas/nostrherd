@@ -1059,3 +1059,38 @@ a throwaway proof fixture. Removing copied protocol from existing live corpora
 is a separate operator-owned rollout, never an automatic host migration.
 Contract changes are not announced; the block regenerates on refresh and
 occupants read it on startup or renew. No announcement mechanism is added.
+
+## D57. Operator-only default and host-stamped requester identity
+
+Status: accepted (issue 87)
+
+Amends D5, D9, D11, D34 and D55. Each bot has an `allowed_requesters` list
+of full hex public keys or npubs. Absent or empty means operator-only. The
+operator remains authorized without a self mention. An additional requester
+must be allowlisted for that bot and p-tag the operator. The indexed effective
+author is the identity, including trusted-relay attribution, not the raw signer.
+For a configured trusted relay, D23's legacy first-p-tag fallback is an author
+assertion, not a mention: an operator assertion therefore receives `self:`.
+This trusts that relay to assert authorship, just as edit/delete ownership does;
+arbitrary event signers cannot supply such attribution. Without a configured
+trusted relay key, only the event signer supplies the effective author.
+
+The host prefixes the trigger request with `self: ` for the operator or
+`[<full npub>]: ` for an allowlisted author. Kelpie's envelope is unchanged:
+`from=nostrherd` remains the waiter. Request text and channel Context cannot
+override the initial prefix. Watch wakes keep their typed body, without a
+requester stamp.
+
+Trigger turns store the author public key and request as JSON in `ask_body`;
+`publish_reply_to_event_id` distinguishes them from typed host wakes. The
+existing reply coordinates, dedup ledger and host-wake schema are unchanged.
+Edits retain the original requester. Dispatch rechecks the current allowlist.
+Legacy queued turns reconstruct identity from the indexed author and text from
+the latest indexed body; missing identity or denied authorization cancels them
+without occupant start. Already-open asks keep their existing lifecycle.
+
+The allowlist enforces who may wake a bot. Non-self conduct is guidance, not a
+sandbox: answer questions, do not write, do not read outside the bot's working
+repositories, and do not disclose private information. Generated corpus conduct
+distinguishes that remote requester from the operator working in the pane and
+from a host-stamped `self:` request. Init implementation is separate.

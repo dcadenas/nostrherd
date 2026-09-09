@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use nostr_sdk::prelude::PublicKey;
 use nostrherd_domain::{Bot, BotId};
 use serde::Deserialize;
 
@@ -24,6 +25,8 @@ struct FileBot {
     id: String,
     corpus: PathBuf,
     kind: String,
+    #[serde(default)]
+    allowed_requesters: Vec<String>,
 }
 
 /// Failure while reading bot configuration.
@@ -84,7 +87,18 @@ impl BotRegistry {
             let bot_id =
                 BotId::new(&record.id).ok_or_else(|| ConfigError::InvalidBot { id: id.clone() })?;
             let bot = Bot::new(bot_id, record.corpus, record.kind)
-                .ok_or(ConfigError::InvalidBot { id: id.clone() })?;
+                .ok_or(ConfigError::InvalidBot { id: id.clone() })?
+                .with_allowed_requesters(
+                    record
+                        .allowed_requesters
+                        .iter()
+                        .map(|key| {
+                            PublicKey::parse(key)
+                                .map(|key| key.to_hex())
+                                .map_err(|_| ConfigError::InvalidBot { id: id.clone() })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
             if bots.iter().any(|existing: &Bot| existing.id() == bot.id()) {
                 return Err(ConfigError::DuplicateBot { id });
             }
@@ -109,6 +123,35 @@ impl BotRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requester_allowlist_defaults_to_operator_only_and_normalizes_keys() {
+        use nostr_sdk::prelude::ToBech32;
+        let prefix = "[[bots]]\nid = 'bot'\ncorpus = '/corpus/bot'\nkind = 'opencode'\n";
+        let operator = "a".repeat(64);
+        let peer = "b".repeat(64);
+        for suffix in ["", "allowed_requesters = []"] {
+            let registry = BotRegistry::from_toml(&format!("{prefix}{suffix}")).unwrap();
+            assert!(registry.bots()[0].authorizes(&operator, &operator));
+            assert!(!registry.bots()[0].authorizes(&operator, &peer));
+        }
+        let npub = PublicKey::parse(&peer).unwrap().to_bech32().unwrap();
+        for key in [peer.to_ascii_uppercase(), npub] {
+            let registry =
+                BotRegistry::from_toml(&format!("{prefix}allowed_requesters = ['{key}']")).unwrap();
+            assert_eq!(
+                registry.bots()[0].allowed_requesters(),
+                std::slice::from_ref(&peer)
+            );
+            assert!(registry.bots()[0].authorizes(&operator, &peer));
+            assert!(registry.bots()[0].authorizes(&operator, &operator));
+        }
+        for value in ["['not-a-public-key']", "['']", "'all'", "[7]"] {
+            assert!(
+                BotRegistry::from_toml(&format!("{prefix}allowed_requesters = {value}")).is_err()
+            );
+        }
+    }
 
     #[test]
     fn registry_loads_bots_with_corpus_and_kind() {
