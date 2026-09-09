@@ -46,9 +46,9 @@ kept on final, Buzz-deleted (kind 9005) on cancel, excluded from
 snapshots and ask Context — with its own durable progress row (D28).
 A host-initiated Turn persists its typed ask body and has no relay reply target
 or mention. Its final still uses the same stamped publish attempt and terminal
-Turn transition (D45, D46). Unprompted publishes are counted per bot per
-channel in a rolling 24-hour ledger and may be dropped for the ceiling or
-quiet hours (D47); trigger answers are not.
+Turn transition (D45, D46). Unprompted publishes are not counted or rate
+limited by the host; how often a bot speaks is its own judgement, written
+in its corpus (D52).
 
 ### Watch
 

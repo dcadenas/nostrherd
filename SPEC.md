@@ -164,11 +164,10 @@ A known-occupant tell (D38) MUST stamp the same way and MUST NOT pass
 bodies MUST NOT post. Tells MUST NOT close a trigger turn.
 
 A host-initiated post (occupant tell, scheduled firing, or wake final)
-MUST NOT publish when that bot's per-channel rolling 24-hour ceiling is
-reached or when the host's local clock is inside that bot's quiet-hours
-window (D47). The suppressed post is dropped and the operator is told.
-A reply to a trigger MUST publish regardless of either limit. Progress
-edits keep the D42 cap and are not counted here.
+MUST publish. The host applies no rate limit: it enforces neither a
+per-channel ceiling nor a quiet-hours window (D52). How often a bot
+speaks is its own judgement, written in its corpus. Progress edits keep
+the D42 cap.
 
 The host MUST `--mention` the indexed event's effective author (not the
 raw relay signer, not an arbitrary `p` tag), including operator-authored
