@@ -120,7 +120,7 @@ async fn live_publishes_each_kind_and_dedups_a_redelivery() {
     // Kind 9 through the OutboundPublisher path: prepare gives the id
     // before send, and the accepted id is the prepared id. The
     // markerless trigger replies with a reply marker only.
-    let stamped = stamp_outbound("live kind 9 body", "[bot]:");
+    let stamped = stamp_outbound("live kind 9 body", "**[bot]**:");
     let attempt = attempt_for(&channel, &trigger, &stamped);
     let prepared = publisher.prepare(&attempt).expect("prepare");
     let accepted = publisher.publish(&prepared).expect("publish");
@@ -385,7 +385,7 @@ async fn live_retry_after_a_real_relay_drop() {
         .await
         .expect("trigger post");
     let trigger = EventId::parse_hex(&trigger_id).expect("trigger id");
-    let stamped = stamp_outbound("live retry after drop", "[bot]:");
+    let stamped = stamp_outbound("live retry after drop", "**[bot]**:");
     let attempt = OutboundAttempt {
         bot_id: Some(bot_id.clone()),
         ..attempt_for(&channel, &trigger, &stamped)

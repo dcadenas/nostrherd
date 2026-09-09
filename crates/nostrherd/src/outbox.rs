@@ -1352,7 +1352,7 @@ mod tests {
         .expect("final");
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: done".to_owned()]
+            &["**[bot]**: done".to_owned()]
         );
         let post = repository
             .progress_post("ask-1")
@@ -1423,7 +1423,7 @@ mod tests {
         assert_eq!(action, InboxAction::Ack);
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: hello".to_owned()]
+            &["**[bot]**: hello".to_owned()]
         );
         let turn = repository.turn_by_ask_id("ask-1").unwrap().unwrap();
         assert_eq!(turn.state, TurnState::Posted);
@@ -1438,7 +1438,7 @@ mod tests {
         assert_eq!(attempt.reply_to_event_id, Some(event_id('a')));
         assert_eq!(attempt.mention, "c".repeat(64));
         assert_eq!(
-            attempt.body, "[bot]: hello",
+            attempt.body, "**[bot]**: hello",
             "the row records the stamped body the prepared id signed"
         );
     }
@@ -1461,7 +1461,7 @@ mod tests {
 
         assert_eq!(action, InboxAction::Ack);
         let attempt = repository.outbound_attempt("ask-1").unwrap().unwrap();
-        assert_eq!(attempt.body, "[bot]: watched author posted");
+        assert_eq!(attempt.body, "**[bot]**: watched author posted");
         assert!(attempt.reply_to_event_id.is_none());
         assert!(attempt.mention.is_empty());
     }
@@ -1474,7 +1474,7 @@ mod tests {
         let mut attempt = OutboundAttempt {
             reply_to_event_id: Some(event_id('a')),
             mention: keys.public_key().to_hex(),
-            ..OutboundAttempt::new("ask-1", "[bot]: hello", crate::test_support::CHANNEL)
+            ..OutboundAttempt::new("ask-1", "**[bot]**: hello", crate::test_support::CHANNEL)
         };
 
         attempt.prepared_created_at = Some(1_700_000_000);
@@ -1547,19 +1547,19 @@ mod tests {
         assert_eq!(action, InboxAction::Ack);
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["[pr]: hello".to_owned()]
+            &["**[pr]**: hello".to_owned()]
         );
         let (mut repository, publisher) = open_repo_for("pr");
         handle_delivery(
             &mut repository,
             &publisher,
             &mut notices(),
-            &delivery("final", "ask-1", "  [pr]: already  "),
+            &delivery("final", "ask-1", "  **[pr]**: already  "),
         )
         .expect("handle");
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["[pr]: already".to_owned()]
+            &["**[pr]**: already".to_owned()]
         );
     }
 
@@ -1682,7 +1682,7 @@ mod tests {
         .expect("handle");
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: both fields".to_owned()]
+            &["**[bot]**: both fields".to_owned()]
         );
     }
 
@@ -1701,7 +1701,7 @@ mod tests {
         assert_eq!(action, InboxAction::Ack);
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: queue is clear".to_owned()]
+            &["**[bot]**: queue is clear".to_owned()]
         );
         assert_eq!(
             publisher.reply_to.lock().expect("reply_to").as_slice(),
@@ -1763,7 +1763,7 @@ mod tests {
         .expect("handle");
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["[bot]: from id".to_owned()]
+            &["**[bot]**: from id".to_owned()]
         );
     }
 
@@ -2102,7 +2102,7 @@ mod tests {
             bot_id: Some(BotId::new("bot").expect("bot")),
             retry_count: OUTBOUND_RETRY_CAP,
             last_retry_at: Some(1),
-            ..OutboundAttempt::new("ask-1", "[bot]: hello", crate::test_support::CHANNEL)
+            ..OutboundAttempt::new("ask-1", "**[bot]**: hello", crate::test_support::CHANNEL)
         };
         repository.save_outbound_attempt(&attempt).unwrap();
         let mut notices = Vec::new();

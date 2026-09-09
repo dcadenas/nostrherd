@@ -52,13 +52,19 @@ pub fn inbound_trigger_for(id: &BotId) -> String {
     format!("{}:", id.as_str())
 }
 
-/// Outbound stamp for the example bot id `bot` (`[{id}]:`).
-pub const OUTBOUND_PREFIX: &str = "[bot]:";
+/// Outbound stamp for the example bot id `bot` (`**[{id}]**:`).
+pub const OUTBOUND_PREFIX: &str = "**[bot]**:";
 
-/// Outbound stamp for a bot id, e.g. `bot` → `[bot]:`.
+/// Outbound stamp for a bot id, e.g. `bot` → `**[bot]**:`.
+///
+/// The bold markers are load-bearing, not decoration. A chat line of the form
+/// `[label]: value` is a `CommonMark` link reference definition, which renders
+/// as nothing at all, so a plain `[bot]: pong` arrives in a Markdown client as
+/// an empty message. Opening the line with `**` makes a definition impossible to
+/// start, so the whole line renders as ordinary text (D61).
 #[must_use]
 pub fn outbound_prefix_for(id: &BotId) -> String {
-    format!("[{}]:", id.as_str())
+    format!("**[{}]**:", id.as_str())
 }
 
 /// Prefix occupant prose with the given stamp once.
@@ -86,7 +92,7 @@ pub struct Bot {
 }
 
 impl Bot {
-    /// Construct a bot with inbound token `{id}:` and stamp `[{id}]:`.
+    /// Construct a bot with inbound token `{id}:` and stamp `**[{id}]**:`.
     #[must_use]
     pub fn new(id: BotId, corpus_path: PathBuf, occupant_kind: impl Into<String>) -> Option<Self> {
         let occupant_kind = occupant_kind.into();
@@ -538,9 +544,37 @@ mod tests {
         )
         .expect("bot");
         assert_eq!(review.inbound_trigger(), "review:");
-        assert_eq!(review.outbound_prefix(), "[review]:");
+        assert_eq!(review.outbound_prefix(), "**[review]**:");
         assert_ne!(review.inbound_trigger(), INBOUND_TRIGGER);
         assert_ne!(review.outbound_prefix(), OUTBOUND_PREFIX);
+    }
+
+    #[test]
+    fn the_stamp_cannot_open_a_commonmark_link_reference_definition() {
+        // `[label]: destination` on its own line is a link reference
+        // definition, which renders as nothing. A one-word answer completes
+        // exactly that shape, so an unbolded stamp made `[bot]: pong` arrive
+        // as an empty message. The leading `**` is what prevents it (D61).
+        let stamped = stamp_outbound(
+            "pong",
+            &outbound_prefix_for(&BotId::new("bot").expect("id")),
+        );
+        assert_eq!(stamped, "**[bot]**: pong");
+        assert!(
+            !stamped.starts_with('['),
+            "a body opening with `[` can begin a link reference definition"
+        );
+        assert!(stamped.starts_with("**"));
+    }
+
+    #[test]
+    fn a_stamped_body_is_never_a_trigger_for_its_own_bot() {
+        // Self-recognition rests on the stamp differing from the trigger in
+        // the first whitespace token. Bolding must not weaken that.
+        let bot = BotId::new("bot").expect("id");
+        let stamped = stamp_outbound("bot: loop", &outbound_prefix_for(&bot));
+        assert_eq!(stamped, "**[bot]**: bot: loop");
+        assert!(TriggerMatch::from_body(&stamped, &inbound_trigger_for(&bot)).is_none());
     }
 
     #[test]
@@ -805,7 +839,7 @@ mod tests {
             "operator",
             ["someone-else"],
             INBOUND_TRIGGER,
-            "[bot]: pong"
+            "**[bot]**: pong"
         )
         .is_none());
         assert!(TriggerMatch::parse(
@@ -813,7 +847,7 @@ mod tests {
             "operator",
             ["someone-else"],
             "pr:",
-            "[pr]: pong"
+            "**[pr]**: pong"
         )
         .is_none());
         assert!(TriggerMatch::parse(
@@ -821,7 +855,7 @@ mod tests {
             "operator",
             ["someone-else"],
             "pr:",
-            "[pr]: hello"
+            "**[pr]**: hello"
         )
         .is_none());
         assert_eq!(
@@ -880,7 +914,7 @@ mod tests {
             "bot:help",
             "@daniel bot:help",
             "@daniel @bot bot: help",
-            "[bot]: bot: help",
+            "**[bot]**: bot: help",
         ] {
             assert!(
                 TriggerMatch::parse(
@@ -898,27 +932,30 @@ mod tests {
 
     #[test]
     fn stamp_outbound_prefixes_once() {
-        assert_eq!(stamp_outbound("hello", OUTBOUND_PREFIX), "[bot]: hello");
+        assert_eq!(stamp_outbound("hello", OUTBOUND_PREFIX), "**[bot]**: hello");
         assert_eq!(
-            stamp_outbound("  [bot]: already  ", OUTBOUND_PREFIX),
-            "[bot]: already"
+            stamp_outbound("  **[bot]**: already  ", OUTBOUND_PREFIX),
+            "**[bot]**: already"
         );
         assert_eq!(
-            stamp_outbound("[bot]:already", OUTBOUND_PREFIX),
-            "[bot]:already"
+            stamp_outbound("**[bot]**:already", OUTBOUND_PREFIX),
+            "**[bot]**:already"
         );
-        assert_eq!(stamp_outbound("hello", "[pr]:"), "[pr]: hello");
+        assert_eq!(stamp_outbound("hello", "**[pr]**:"), "**[pr]**: hello");
         assert_eq!(
-            stamp_outbound("  [pr]: already  ", "[pr]:"),
-            "[pr]: already"
+            stamp_outbound("  **[pr]**: already  ", "**[pr]**:"),
+            "**[pr]**: already"
         );
-        assert_eq!(stamp_outbound("[pr]:already", "[pr]:"), "[pr]:already");
         assert_eq!(
-            stamp_outbound("[bot]: leftover", "[pr]:"),
-            "[pr]: [bot]: leftover"
+            stamp_outbound("**[pr]**:already", "**[pr]**:"),
+            "**[pr]**:already"
+        );
+        assert_eq!(
+            stamp_outbound("**[bot]**: leftover", "**[pr]**:"),
+            "**[pr]**: **[bot]**: leftover"
         );
         let pr = BotId::new("pr").expect("id");
-        assert_eq!(outbound_prefix_for(&pr), "[pr]:");
+        assert_eq!(outbound_prefix_for(&pr), "**[pr]**:");
         assert_eq!(
             outbound_prefix_for(&BotId::new("bot").expect("id")),
             OUTBOUND_PREFIX

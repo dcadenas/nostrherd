@@ -9,7 +9,7 @@ your reply
 EOF
 ```
 
-Do not stamp `[{id}]:`. Do not call the relay.
+Do not stamp `**[{id}]**:`. Do not call the relay.
 
 For long work, send progress first: `kelpie reply <ask-id> --progress
 --stdin` with the full current status; it resets the reply reminder.

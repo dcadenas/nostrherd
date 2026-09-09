@@ -60,7 +60,7 @@ proof. No credential namespace, corpus, or service outside the test is used.
 ```
 
 `smoke` posts a throwaway operator message with `buzz messages send`
-and checks the channel body is present. It does not stamp `[{id}]:`
+and checks the channel body is present. It does not stamp `**[{id}]**:`
 and does not invoke a send crate.
 
 ## Trigger as the peer
@@ -76,7 +76,7 @@ request. A refused peer message is indexed without an occupant wake or reaction.
 
 That posts `@<operator> bot: hello from peer` with a `p` tag. Use this
 to exercise ingest once `nostrherd` is running. Occupant answers use
-`kelpie reply --final`; the host stamps `[{id}]:`. Issue 34 live proof
+`kelpie reply --final`; the host stamps `**[{id}]**:`. Issue 34 live proof
 is recorded in `docs/testing.md`.
 
 ## Secrets in commands

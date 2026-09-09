@@ -14,7 +14,7 @@ had the shipped conduct skill beside it; generated `AGENTS.md` was unchanged.
 
 With Herdr 0.9.0, Kelpie 0.2.0-alpha.4, Pi 0.85.1 and Ollama 0.32.15's local
 Qwen3.6 35B Q4 model, `mybot: hello, reply with the single word pong` produced
-exactly one `[mybot]: pong` in 35.5 seconds. The model executed `kelpie reply
+exactly one `**[mybot]**: pong` in 35.5 seconds. The model executed `kelpie reply
 --final`; the proof verified the operator signature, trigger reference, relay
 refetch and resolved obligation. Signing keys existed only in memory and child
 environments. No external model credentials were used for this run.
@@ -81,7 +81,7 @@ These are synthetic socket proofs, not a live Kelpie or relay round trip.
 
 The ignored `live_fallback_socket_publishes_before_ack` adds a real local-relay
 publish and fetch before the synthetic socket receives its ACK. It checks one
-`[bot]: synthetic final` with the real trigger's reply tag. Supply throwaway
+`**[bot]**: synthetic final` with the real trigger's reply tag. Supply throwaway
 `NOSTRHERD_PRIVATE_KEY`, loopback `NOSTRHERD_RELAY_URL`, and a member channel in
 `BOTSERVER_LIVE_CHANNEL`, using the local-relay harness and a credential manager:
 
@@ -181,9 +181,9 @@ Invariants and their tests: `docs/invariants.md`.
 Live columns are issues 18–20. Occupant start/ask from the running host
 (`dcadenas/nostrherd#17`) uses the local relay; it is not the flow 2 live
 proof. Issue 18 is the live proof of flows 1–2: silence until a trigger,
-then a `[bot]:` body. Issue 19 is the live proof of flows 3–5 and 7–8.
+then a `**[bot]**:` body. Issue 19 is the live proof of flows 3–5 and 7–8.
 Issue 34 is the live E2E that the occupant only `kelpie reply --final`
-and the host stamps `[{id}]:` (D31, D37). Issues 18–20 and 27 were live-proved
+and the host stamps `**[{id}]**:` (D31, D37). Issues 18–20 and 27 were live-proved
 with leftover `botcli`. Occupant steps below match the current path
 (`kelpie reply --final`); do not invoke a send crate.
 
@@ -286,7 +286,7 @@ envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   --config "$PROOF/bots.toml" --database "$PROOF/host.sqlite"
 
 # Flow 1: ordinary channel text (no bot: prefix, no operator mention).
-# Expect: no session/turn for this channel, no body starting with [bot]:
+# Expect: no session/turn for this channel, no body starting with **[bot]**:
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --content 'ordinary hello from the channel'
 sqlite3 "$PROOF/host.sqlite" \
@@ -295,7 +295,7 @@ sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$CHANNEL';"
 
 # Flow 2: peer trigger, then occupant kelpie reply --final.
-# Expect: one open turn, host stamps [bot]:, ask resolved.
+# Expect: one open turn, host stamps **[bot]**:, ask resolved.
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$CHANNEL" --mention "$OPERATOR_PUB" --content 'bot: hello'
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
@@ -564,7 +564,7 @@ bot_stamped() {
   env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$1" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
-print(sum(1 for it in items if str(it.get("content","")).startswith("[bot]:")))'
+print(sum(1 for it in items if str(it.get("content","")).startswith("**[bot]**:")))'
 }
 
 # Flow 6: DM trigger, then an unprefixed DM line that still mentions so the
@@ -586,7 +586,7 @@ dm hello from example-bot
 EOF
 
 # Flow 9: close the occupant pane with the ask still open, recover, wait
-# for resume. Expect: same logical id, new pane, still one ask; one [bot]:.
+# for resume. Expect: same logical id, new pane, still one ask; one **[bot]**:.
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$RECOVER" --mention "$OPERATOR_PUB" --content 'bot: recover me'
 ASK_ID=$(sqlite3 "$PROOF/host.sqlite" \
@@ -615,7 +615,7 @@ EOF
 bot_stamped "$RECOVER"
 
 # Flow 10 edit: wait until open, then edit the trigger to bot: latest.
-# Expect: cancelled then open; one [bot]: answering latest.
+# Expect: cancelled then open; one **[bot]**: answering latest.
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$EDIT" --mention "$OPERATOR_PUB" --content 'bot: hello' \
   > "$PROOF/edit-trigger.json"
@@ -638,7 +638,7 @@ latest from example-bot
 EOF
 bot_stamped "$EDIT"
 
-# Flow 10 delete before publish: no [bot]:.
+# Flow 10 delete before publish: no **[bot]**:.
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$DELETE" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
   > "$PROOF/delete-trigger.json"
@@ -706,7 +706,7 @@ raise SystemExit(0 if a==b else 1)' \
 
 ### Socket waiter (issue 27)
 
-Host waiter is pane-less. First `bot:` still yields one `[bot]:`. Occupant
+Host waiter is pane-less. First `bot:` still yields one `**[bot]**:`. Occupant
 envelopes use `from=nostrherd`. The ask stays open until `inbox.ack`.
 Killing the host before ACK leaves the obligation open. Do not print
 pubkeys or event ids. Live proof landed: no waiter pane, one stamped
@@ -775,7 +775,7 @@ HERDR_PANE_ID="$OCCUPANT_PANE" env -u NOSTRHERD_PRIVATE_KEY -u NOSTRHERD_RELAY_U
   kelpie reply "$ASK_ID" --final --stdin <<'EOF'
 hello from example-bot
 EOF
-# Expect: one [bot]: body. kelpie pending "$SNAME" is empty after ACK.
+# Expect: one **[bot]**: body. kelpie pending "$SNAME" is empty after ACK.
 # Expect: renew armed (1). D27: a failed arm does not block the ask.
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT renew_id IS NOT NULL FROM sessions WHERE channel_id='$CHANNEL';"
@@ -835,10 +835,10 @@ not print nsecs, pubkeys, or event ids. Host waiter is pane-less. If a
 leftover socket waiter named `nostrherd` blocks `waiter.register`,
 `kelpie waiter-retire --logical-id` that waiter.
 
-Live proof landed: one `[bot]:` whose `e` tag is the trigger and whose
+Live proof landed: one `**[bot]**:` whose `e` tag is the trigger and whose
 `p` tag is the peer; unprefixed follow-up did not post; edit of an
-unposted trigger yielded one `[bot]:` for the latest text; delete before
-publish yielded no `[bot]:`, and a late final did not post. Poll until
+unposted trigger yielded one `**[bot]**:` for the latest text; delete before
+publish yielded no `**[bot]**:`, and a late final did not post. Poll until
 the host opens a turn before reading `ask_id`. Check relay tags, not
 only sqlite. Wait for cancelled-then-open before answering an edit.
 
@@ -911,7 +911,7 @@ bot_stamped() {
   env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$1" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
-print(sum(1 for it in items if str(it.get("content","")).startswith("[bot]:")))'
+print(sum(1 for it in items if str(it.get("content","")).startswith("**[bot]**:")))'
 }
 
 wait_sql() {
@@ -975,7 +975,7 @@ items=json.load(sys.stdin)
 trigger=open(sys.argv[1]).read().strip()
 peer=open(sys.argv[2]).read().strip()
 needle=sys.argv[3]
-bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+bots=[it for it in items if str(it.get("content","")).startswith("**[bot]**:")]
 print("posted_count", len(bots))
 if len(bots)!=1:
     raise SystemExit(1)
@@ -995,7 +995,7 @@ if not (e_ok and p_ok and body_ok):
 
 # First call: peer p-tags the operator with bot: hello.
 # Occupant answers with kelpie reply --final only (no envchain, no botcli).
-# Expect: one [bot]: body, e tag is the trigger, p tag is the peer (0/1).
+# Expect: one **[bot]**: body, e tag is the trigger, p tag is the peer (0/1).
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$FIRST" --mention "$OPERATOR_PUB" --content 'bot: hello' \
   > "$PROOF/first-trigger.json"
@@ -1014,7 +1014,7 @@ for _ in $(seq 1 40); do
 done
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT a.reply_to_event_id = '$TRIGGER', a.mention = '$PEER_PUB',
-          a.body NOT LIKE '[bot]:%' FROM outbound_attempts a
+          a.body NOT LIKE '**[bot]**:%' FROM outbound_attempts a
    JOIN turns t ON t.ask_id=a.ask_id JOIN sessions s ON s.id=t.session_id
    WHERE s.channel_id='$FIRST';"
 check_posted "$FIRST" "$PROOF/first-trigger.id" "$KEYS/peer.pub" 'hello from example-bot'
@@ -1028,7 +1028,7 @@ bot_stamped "$FIRST"
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT count(*) FROM turns t JOIN sessions s ON s.id=t.session_id WHERE s.channel_id='$FIRST';"
 
-# Edit of an unposted trigger: one [bot]: for the latest text.
+# Edit of an unposted trigger: one **[bot]**: for the latest text.
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$EDIT" --mention "$OPERATOR_PUB" --content 'bot: hello' \
   > "$PROOF/edit-trigger.json"
@@ -1053,13 +1053,13 @@ done
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
   --channel "$EDIT" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
-bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+bots=[it for it in items if str(it.get("content","")).startswith("**[bot]**:")]
 print("edit_posted_count", len(bots))
 if len(bots)!=1 or "latest from example-bot" not in str(bots[0].get("content","")):
     raise SystemExit(1)
 '
 
-# Delete before publish: no [bot]:. Late final does not post.
+# Delete before publish: no **[bot]**:. Late final does not post.
 env -u BUZZ_AUTH_TAG envchain nostrherd-proof-peer buzz messages send \
   --channel "$DELETE" --mention "$OPERATOR_PUB" --content 'bot: delete me' \
   > "$PROOF/delete-trigger.json"
@@ -1182,12 +1182,12 @@ wait "$HOST_PID" 2>/dev/null || true
 ```
 
 Expect two session rows (`bot` and `pr`). Occupants still MUST NOT get
-the nsec. Outbound stamp is `[{id}]:` (issue 48).
+the nsec. Outbound stamp is `**[{id}]**:` (issue 48).
 
 ### Per-bot outbound stamp (issue 48)
 
 Same two-bot channel as issue 43. Occupant finals MUST publish
-`[bot]: …` for `bot:` and `[pr]: …` for `pr:`. Own stamped posts MUST
+`**[bot]**: …` for `bot:` and `**[pr]**: …` for `pr:`. Own stamped posts MUST
 NOT open a turn. Unit proof: `stamp_outbound_prefixes_once`,
 `pr_bot_final_publishes_pr_stamp_once`,
 `stamped_self_posts_do_not_emit_triggers`.
@@ -1304,8 +1304,8 @@ stamp_counts() {
   env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$CHANNEL" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
-bot=sum(1 for it in items if str(it.get("content","")).startswith("[bot]:"))
-pr=sum(1 for it in items if str(it.get("content","")).startswith("[pr]:"))
+bot=sum(1 for it in items if str(it.get("content","")).startswith("**[bot]**:"))
+pr=sum(1 for it in items if str(it.get("content","")).startswith("**[pr]**:"))
 print(bot, pr)
 if bot!=1 or pr!=1:
     raise SystemExit(1)'
@@ -1321,8 +1321,8 @@ kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
 
-Expect two session rows, two turns, then one `[bot]:` body and one
-`[pr]:` body. The published stamps MUST NOT open a third turn.
+Expect two session rows, two turns, then one `**[bot]**:` body and one
+`**[pr]**:` body. The published stamps MUST NOT open a third turn.
 Occupants still MUST NOT get the nsec. The host waiter name is
 `nostrherd`; a standing personal waiter blocks this recipe until that
 process is not holding the name.
@@ -1392,7 +1392,7 @@ stamped_posts() {
   env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
     --channel "$1" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
-bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+bots=[it for it in items if str(it.get("content","")).startswith("**[bot]**:")]
 for it in bots:
     print(len(str(it.get("event_id") or it.get("id") or "")), it.get("content"))
 print("count", len(bots))'
@@ -1434,7 +1434,7 @@ env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
   --channel "$PROGRESS" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 trigger=open(sys.argv[1]).read().strip()
-bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+bots=[it for it in items if str(it.get("content","")).startswith("**[bot]**:")]
 assert len(bots)==1, len(bots)
 tags=bots[0].get("tags") or []
 print("e_tag_is_trigger", int(any(t and t[0]=="e" and len(t)>1 and t[1]==trigger for t in tags)))
@@ -1452,7 +1452,7 @@ env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get \
   --channel "$PROGRESS" --limit 50 | python3 -c 'import json,sys
 items=json.load(sys.stdin)
 post=open(sys.argv[1]).read().strip()
-bots=[it for it in items if str(it.get("content","")).startswith("[bot]:")]
+bots=[it for it in items if str(it.get("content","")).startswith("**[bot]**:")]
 assert len(bots)==1, len(bots)
 print("same_event_id", int(str(bots[0].get("event_id") or bots[0].get("id"))==post))
 print("edited_content", int("polishing the answer" in str(bots[0].get("content"))))
@@ -1492,10 +1492,10 @@ kill "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 ```
 
-Expect after step 2 one `[bot]: reading the repo` whose `e` tag is the
+Expect after step 2 one `**[bot]**: reading the repo` whose `e` tag is the
 trigger and which has no `p` tag; after step 3 still one post, same
-event id, content `[bot]: polishing the answer`, `edit_count` 1; after
-step 4 two stamped posts (progress plus `[bot]: long job done`); after
+event id, content `**[bot]**: polishing the answer`, `edit_count` 1; after
+step 4 two stamped posts (progress plus `**[bot]**: long job done`); after
 step 5 the delete channel's count goes from 1 to 0 and the row is
 `ended`. The host log (`$PROOF/host.log`) carries an `operator notice`
 line only when a relay step failed.
@@ -1548,7 +1548,7 @@ env -u HERDR_PANE_ID envchain nostrherd-proof "$ROOT/target/debug/nostrherd" \
   >"$PROOF/host.log" 2>&1 &
 HOST_PID=$!
 # …trigger with the issue-34 recipe, occupant `kelpie reply --final`…
-# Expect: one [bot]: body via `buzz messages get` (peer verification),
+# Expect: one **[bot]**: body via `buzz messages get` (peer verification),
 # and outbound_attempts.prepared_event_id equals outbound_event_id:
 sqlite3 "$PROOF/host.sqlite" \
   "SELECT prepared_event_id = outbound_event_id,

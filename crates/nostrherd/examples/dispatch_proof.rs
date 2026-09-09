@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await?;
         let finals: Vec<_> = events
             .iter()
-            .filter(|event| event.content.starts_with("[bot]:"))
+            .filter(|event| event.content.starts_with("**[bot]**:"))
             .collect();
         if !finals.is_empty() {
             if finals.len() != 1 || !finals[0].content.to_lowercase().contains("pong") {

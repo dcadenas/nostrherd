@@ -488,7 +488,7 @@ async fn local_relay_contract_before_synthetic_occupant() {
     let mut actor = harness.actor();
     let startup = std::fs::read_to_string(corpus.join("startup.md")).expect("written contract");
     assert_eq!(startup.matches("<!-- nostrherd-contract -->").count(), 1);
-    assert!(startup.contains("The host stamps `[bot]:`"));
+    assert!(startup.contains("The host stamps `**[bot]**:`"));
     assert!(startup.contains("--final --stdin"));
     assert!(startup.contains("skills/bot-conduct/SKILL.md"));
     assert!(
@@ -537,7 +537,7 @@ async fn local_relay_contract_before_synthetic_occupant() {
     assert_eq!(
         posts
             .iter()
-            .filter(|event| event.content == "[bot]: contract proof complete")
+            .filter(|event| event.content == "**[bot]**: contract proof complete")
             .count(),
         1
     );
@@ -561,7 +561,7 @@ async fn local_relay_contract_before_synthetic_occupant() {
         .unwrap();
     let replies: Vec<_> = posts
         .iter()
-        .filter(|event| event.content == "[bot]: peer proof complete")
+        .filter(|event| event.content == "**[bot]**: peer proof complete")
         .collect();
     assert_eq!(replies.len(), 1);
     assert!(replies[0]
@@ -618,7 +618,7 @@ fn non_uuid_channel_starts_an_occupant_and_publishes_its_answer() {
     let prepared = publisher.prepared.lock().expect("prepared");
     assert_eq!(prepared.len(), 1);
     assert_eq!(prepared[0].channel_id, channel);
-    assert_eq!(prepared[0].body, "[bot]: hello from the occupant");
+    assert_eq!(prepared[0].body, "**[bot]**: hello from the occupant");
     assert_eq!(
         prepared[0].reply_to_event_id.as_ref().map(EventId::as_str),
         Some(message.id.to_hex().as_str())
@@ -1270,7 +1270,7 @@ fn flow_11_progress_is_one_edited_post_then_a_final() {
         .expect("flush after hold");
     let prepared = publisher.prepared.lock().expect("prepared").clone();
     assert_eq!(prepared.len(), 1);
-    assert_eq!(prepared[0].body, "[bot]: reading the repo");
+    assert_eq!(prepared[0].body, "**[bot]**: reading the repo");
     assert_eq!(prepared[0].reply_to_event_id.as_ref(), Some(&trigger_id));
     assert!(prepared[0].mention.is_empty());
     let post_id = actor
@@ -1297,7 +1297,7 @@ fn flow_11_progress_is_one_edited_post_then_a_final() {
         [(
             FOOBAR.to_owned(),
             post_id.clone(),
-            "[bot]: drafting the answer".to_owned()
+            "**[bot]**: drafting the answer".to_owned()
         )]
     );
     assert_eq!(
@@ -1317,7 +1317,7 @@ fn flow_11_progress_is_one_edited_post_then_a_final() {
         .expect("final");
     let prepared = publisher.prepared.lock().expect("prepared").clone();
     assert_eq!(prepared.len(), 2);
-    assert_eq!(prepared[1].body, "[bot]: long job done");
+    assert_eq!(prepared[1].body, "**[bot]**: long job done");
     assert_eq!(turns(&actor, FOOBAR)[0].state, TurnState::Posted);
     assert!(relay.deletes.lock().expect("deletes").is_empty());
     assert_eq!(

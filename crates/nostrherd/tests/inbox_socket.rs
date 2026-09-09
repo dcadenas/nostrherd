@@ -141,8 +141,11 @@ fn publish_live_final(body: &str) {
             ))
             .await
             .unwrap();
-        let mut attempt =
-            OutboundAttempt::new("synthetic-ask", stamp_outbound(body, "[bot]:"), &channel);
+        let mut attempt = OutboundAttempt::new(
+            "synthetic-ask",
+            stamp_outbound(body, "**[bot]**:"),
+            &channel,
+        );
         attempt.reply_to_event_id = Some(EventId::parse_hex(&trigger).unwrap());
         let prepared = publisher.prepare(&attempt).unwrap();
         let event_id = publisher.publish(&prepared).unwrap();
@@ -155,7 +158,7 @@ fn publish_live_final(body: &str) {
             .unwrap();
         assert_eq!(events.len(), 1);
         let event = events.into_iter().next().unwrap();
-        assert_eq!(event.content, "[bot]: synthetic final");
+        assert_eq!(event.content, "**[bot]**: synthetic final");
         assert!(event.tags.iter().any(|tag| tag
             .as_slice()
             .first()

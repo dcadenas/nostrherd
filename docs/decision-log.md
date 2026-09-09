@@ -1195,3 +1195,46 @@ and `kelpied` are reminders, not claims of reachability. `--print-only` makes
 registration a prerequisite to those commands and keeps all guidance on stderr.
 The scaffold README holds the optional `allowed_requesters` instructions;
 the short init output points there. Actionable setup errors name a next step.
+
+## D61. The outbound stamp is bold: `**[{bot-id}]**:`
+
+Status: accepted
+
+Amends D37, which set the stamp to `[{bot-id}]:` per bot and itself amended
+D9. Inbound is unchanged: the trigger token is still `{bot-id}:` with no
+brackets, so the stamp and the trigger stay distinguishable on the first
+whitespace token, which is what keeps a stamped post from re-triggering.
+
+A chat line of the form `[label]: destination` is a CommonMark link reference
+definition (spec 4.7). Definitions are metadata, so a conforming renderer emits
+no HTML for them. A one-token answer completes exactly that shape, so
+`[bot]: pong` arrived in a Markdown client as a correctly timestamped, entirely
+empty message. `[bot]: pong`, `[bot]: ok`, `[bot]: 13:44` were all invisible;
+`[bot]: hello world` rendered, because a second word makes the definition
+invalid and the line falls back to a paragraph.
+
+Observed in Buzz desktop 0.5.23, and confirmed against a CommonMark parser
+directly. The renderer is not at fault in any way we can reach: the body reaches
+it intact and it applies the spec correctly.
+
+Opening the line with `**` makes a definition impossible to start, so the whole
+line renders as ordinary text. It also reads better, which is why it is
+preferred over the alternatives of dropping the brackets or padding short
+answers to two words.
+
+Self-recognition is unaffected and was verified, not assumed. It rests on the
+stamp differing from the trigger in the first whitespace-delimited token:
+`**[bot]**:` is not `bot:`, exactly as `[bot]:` was not. `TriggerMatch::from_body`
+compares that token for equality and reads no markup.
+
+One spelling only. There is no compatibility path for the unbolded stamp,
+because nostrherd has no users yet; posts already on a relay keep the old form
+and the host does not read them back as its own.
+
+Consequence for corpora: an occupant granted relay access (D51) must
+self-prefix with the bold form. The host-managed contract block in `startup.md`
+carries the current spelling, so a corpus that reads it each ask stays correct
+without edits.
+
+This does not fix the renderer hole. Any client applying CommonMark to chat
+still blanks a human's `[note]: draft`. That belongs in the client.

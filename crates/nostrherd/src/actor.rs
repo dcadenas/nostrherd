@@ -2889,7 +2889,7 @@ mod tests {
         let startup =
             std::fs::read_to_string(actor.bot().corpus_path().join("startup.md")).expect("startup");
         assert!(startup.contains("<!-- nostrherd-contract -->"));
-        assert!(startup.contains("The host stamps `[bot]:`"));
+        assert!(startup.contains("The host stamps `**[bot]**:`"));
         assert!(startup.contains("skills/bot-conduct/SKILL.md"));
         assert!(
             std::fs::read_to_string(actor.bot().corpus_path().join("startup.md"))
@@ -4805,7 +4805,7 @@ mod tests {
         let now = open_turn_with_progress_post(&mut actor, &kelpie, &waiter, &trigger, &post_id);
         // The host indexes its own stamped kind 9 (first body, never the edits).
         for (id, content) in [
-            (post_id.clone(), "[bot]: working on it".to_owned()),
+            (post_id.clone(), "**[bot]**: working on it".to_owned()),
             ("b".repeat(64), "human line stays".to_owned()),
         ] {
             actor
@@ -4860,7 +4860,7 @@ mod tests {
         let post_id = "e".repeat(64);
         let now = open_turn_with_progress_post(&mut actor, &kelpie, &waiter, &trigger, &post_id);
         for (id, content) in [
-            (post_id.clone(), "[bot]: working on it".to_owned()),
+            (post_id.clone(), "**[bot]**: working on it".to_owned()),
             ("b".repeat(64), "and the PR?".to_owned()),
         ] {
             actor

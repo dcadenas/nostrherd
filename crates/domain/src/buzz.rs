@@ -217,9 +217,14 @@ mod tests {
         let trigger = event_id('a');
         let root = event_id('b');
         let thread = reply_thread_tags(&trigger, Some(&root));
-        let event = channel_message("ch-1", "[bot]: hi", &thread, Some("C".repeat(64).as_str()));
+        let event = channel_message(
+            "ch-1",
+            "**[bot]**: hi",
+            &thread,
+            Some("C".repeat(64).as_str()),
+        );
         assert_eq!(event.kind(), CHANNEL_MESSAGE_KIND);
-        assert_eq!(event.content(), "[bot]: hi");
+        assert_eq!(event.content(), "**[bot]**: hi");
         assert_eq!(
             event.tags(),
             &[

@@ -1058,7 +1058,7 @@ mod tests {
         );
         let prepared = publisher.prepared.lock().unwrap();
         assert_eq!(prepared.len(), 1);
-        assert_eq!(prepared[0].body, "[bot]: working");
+        assert_eq!(prepared[0].body, "**[bot]**: working");
         assert_eq!(prepared[0].reply_to_event_id, Some(event_id('a')));
         assert_eq!(prepared[0].channel_id, CHANNEL);
         assert!(prepared[0].mention.is_empty(), "no --mention on progress");
@@ -1068,7 +1068,7 @@ mod tests {
         let post = repository.progress_post("ask-1").unwrap().unwrap();
         assert_eq!(post.post_event_id.as_deref(), Some(sends[0].as_str()));
         assert_eq!(post.prepared_event_id.as_deref(), Some(sends[0].as_str()));
-        assert_eq!(post.post_body.as_deref(), Some("[bot]: working"));
+        assert_eq!(post.post_body.as_deref(), Some("**[bot]**: working"));
         assert_eq!(post.last_send_at, Some(now));
         assert_eq!(post.edit_count, 0);
         assert!(post.pending_body.is_none());
@@ -1147,7 +1147,7 @@ mod tests {
             vec![(
                 CHANNEL.to_owned(),
                 post_id.clone(),
-                "[bot]: step 3".to_owned()
+                "**[bot]**: step 3".to_owned()
             )]
         );
         assert_eq!(publisher.sends.lock().unwrap().len(), 1, "no second post");
@@ -1418,7 +1418,7 @@ mod tests {
             .clone()
             .expect("recorded before send");
         assert!(post.pending_body.is_none(), "body moved to post_body");
-        assert_eq!(post.post_body.as_deref(), Some("[bot]: working"));
+        assert_eq!(post.post_body.as_deref(), Some("**[bot]**: working"));
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("retrying"));
         // The dispatched-without-accept row is redelivered next tick.
@@ -1560,7 +1560,7 @@ mod tests {
         );
         let edits = relay.edits.lock().unwrap();
         assert_eq!(edits.len(), 2);
-        assert_eq!(edits[1].2, "[bot]: three");
+        assert_eq!(edits[1].2, "**[bot]**: three");
         assert_eq!(
             repository
                 .progress_post("ask-1")
@@ -1950,7 +1950,7 @@ mod tests {
             prepared_event_id: Some("e".repeat(64)),
             prepared_created_at: Some(1_700_000_000),
             bot_id: Some(BotId::new("bot").expect("bot")),
-            ..OutboundAttempt::new("ask-1", "[bot]: done", CHANNEL)
+            ..OutboundAttempt::new("ask-1", "**[bot]**: done", CHANNEL)
         }
     }
 

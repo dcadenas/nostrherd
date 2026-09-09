@@ -1763,7 +1763,7 @@ mod tests {
                  INSERT INTO progress_posts VALUES (
                      'ask-legacy', 'channel',
                      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                     NULL, 1000, 'next', '[bot]: previous', NULL, NULL, 1,
+                     NULL, 1000, 'next', '**[bot]**: previous', NULL, NULL, 1,
                      NULL, 0, NULL, 0, 0
                  );",
             )

@@ -7,7 +7,7 @@ Works on any NIP-29 relay.
 
 ```text
 you   bot: how is the deploy looking?
-bot   [bot]: green. 14 minutes since the last failure.
+bot   **[bot]**: green. 14 minutes since the last failure.
 ```
 
 The host watches the relay, wakes an agent when someone addresses it,
@@ -34,7 +34,7 @@ upgrading either dependency.
   that bot answers.
 - **A bot** is an id plus a corpus repository. The id is the address:
   `bot:` reaches the bot with id `bot`, and its posts are stamped
-  `[bot]:`. A second bot with id `pr` answers `pr:` and stamps `[pr]:`.
+  `**[bot]**:`. A second bot with id `pr` answers `pr:` and stamps `**[pr]**:`.
 - **An occupant** is the agent itself, running in its own Herdr
   workspace with the corpus as its working directory. One per bot per
   channel, so a bot in two channels holds two separate conversations.
@@ -267,7 +267,7 @@ person. Default non-self conduct allows answering questions, but not writes,
 reads outside the bot's working repositories, or disclosure of private information.
 That conduct is guidance, not a sandbox; the host enforces the requester allowlist.
 
-A stamped `[mybot]:` reply should land in the thread. If nothing happens,
+A stamped `**[mybot]**:` reply should land in the thread. If nothing happens,
 check that Herdr and `kelpied` are running and that the host log shows
 the trigger being observed.
 
@@ -280,7 +280,7 @@ does about it.
 
 | What you type | What happens |
 | --- | --- |
-| `bot: how is the deploy looking?` | Answers in that thread, stamped `[bot]:` |
+| `bot: how is the deploy looking?` | Answers in that thread, stamped `**[bot]**:` |
 | `pr: status of 123` | A different bot answers. The prefix picks the bot |
 | `how is it going?` | Nothing. A bot stays silent unless addressed |
 | `bot: in 10 minutes give me the status of pr 123` | Confirms now, posts the answer ten minutes later on its own |

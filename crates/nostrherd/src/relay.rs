@@ -1626,7 +1626,7 @@ mod tests {
         let message = event_with_keys(
             &Keys::generate(),
             CHANNEL_MESSAGE_KIND,
-            "[bot]: bot: loop",
+            "**[bot]**: bot: loop",
             [tag(&["h", "channel"]), tag(&["p", &operator])],
         );
 
@@ -1637,7 +1637,7 @@ mod tests {
         let message = event_with_keys(
             &Keys::generate(),
             CHANNEL_MESSAGE_KIND,
-            "[pr]: pr: loop",
+            "**[pr]**: pr: loop",
             [tag(&["h", "channel"]), tag(&["p", &operator])],
         );
         assert_eq!(ingest.ingest(&message).unwrap(), None);
