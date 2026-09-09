@@ -200,10 +200,12 @@ impl<R: HostRepository> RelayIngest<R> {
     }
 
     fn authorizes(&self, bot_id: &BotId, author: &str) -> bool {
-        author.eq_ignore_ascii_case(&self.operator_pubkey)
-            || self.allowed_requesters.iter().any(|(id, keys)| {
-                id == bot_id && keys.iter().any(|key| key.eq_ignore_ascii_case(author))
-            })
+        let allowed = self
+            .allowed_requesters
+            .iter()
+            .find(|(id, _)| id == bot_id)
+            .map_or(&[][..], |(_, keys)| keys.as_slice());
+        nostrherd_domain::requester_authorized(&self.operator_pubkey, author, allowed)
     }
 
     /// Index one verified Nostr event and return an actor action when needed.
@@ -1439,6 +1441,40 @@ mod tests {
             ingest.ingest(&message).unwrap(),
             Some(IngestAction::TurnCandidate { .. })
         ));
+    }
+
+    #[test]
+    fn only_the_configured_relay_can_assert_requester_authorship() {
+        let operator = "a".repeat(64);
+        let relay = Keys::generate();
+        let other = Keys::generate();
+        let mut ingest = RelayIngest::new(
+            &operator,
+            relay.public_key().to_hex(),
+            FakeRepository::default(),
+        );
+        let impersonated = event_with_keys(
+            &other,
+            9,
+            "bot: hello",
+            [
+                tag(&["h", "channel"]),
+                tag(&["actor", &operator]),
+                tag(&["p", &operator]),
+            ],
+        );
+        assert!(ingest.ingest(&impersonated).unwrap().is_none());
+        let non_operator = event_with_keys(
+            &relay,
+            9,
+            "bot: hello",
+            [
+                tag(&["h", "channel"]),
+                tag(&["actor", &other.public_key().to_hex()]),
+                tag(&["p", &operator]),
+            ],
+        );
+        assert!(ingest.ingest(&non_operator).unwrap().is_none());
     }
 
     #[test]

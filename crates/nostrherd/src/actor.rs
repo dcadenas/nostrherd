@@ -338,6 +338,9 @@ where
             request: work.nostr_body.clone(),
         };
         if request.stamped(&self.operator_pubkey).is_none() {
+            self.repository
+                .mark_event_processed(&work.event_id)
+                .map_err(ActorError::Repository)?;
             return Ok(TriggerOutcome::Declined);
         }
         let display = if work.channel_display.is_empty() {
@@ -1944,6 +1947,23 @@ mod tests {
                 TurnState::Cancelled
             );
         }
+    }
+
+    #[test]
+    fn invalid_requester_decline_is_acknowledged_without_a_wake() {
+        let (mut actor, kelpie, _runner, panes) = actor([adopt()]);
+        actor.operator_pubkey = "invalid".to_owned();
+        let work = TriggerWork {
+            author_pubkey: "invalid".to_owned(),
+            ..work('c', "status", None)
+        };
+        let waiter = kelpie.register_waiter().unwrap();
+        assert_eq!(
+            actor.handle_trigger(&kelpie, &waiter, &work).unwrap(),
+            TriggerOutcome::Declined
+        );
+        assert!(actor.repository.event_processed(&work.event_id).unwrap());
+        assert!(panes.calls.lock().unwrap().is_empty());
     }
 
     fn actor(

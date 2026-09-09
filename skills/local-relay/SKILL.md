@@ -65,6 +65,11 @@ and does not invoke a send crate.
 
 ## Trigger as the peer
 
+Before starting the host, put the throwaway peer's full public key or npub in
+that bot's `allowed_requesters` array in `bots.toml`. An absent or empty list
+allows only the operator (D57). Channel membership alone does not authorize a
+request. A refused peer message is indexed without an occupant wake or reaction.
+
 ```bash
 ./tools/local-relay trigger --content 'hello from peer'
 ```

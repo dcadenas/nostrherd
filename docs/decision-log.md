@@ -1069,6 +1069,11 @@ of full hex public keys or npubs. Absent or empty means operator-only. The
 operator remains authorized without a self mention. An additional requester
 must be allowlisted for that bot and p-tag the operator. The indexed effective
 author is the identity, including trusted-relay attribution, not the raw signer.
+For a configured trusted relay, D23's legacy first-p-tag fallback is an author
+assertion, not a mention: an operator assertion therefore receives `self:`.
+This trusts that relay to assert authorship, just as edit/delete ownership does;
+arbitrary event signers cannot supply such attribution. Without a configured
+trusted relay key, only the event signer supplies the effective author.
 
 The host prefixes the trigger request with `self: ` for the operator or
 `[<full npub>]: ` for an allowlisted author. Kelpie's envelope is unchanged:

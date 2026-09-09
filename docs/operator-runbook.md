@@ -69,7 +69,16 @@ envchain nostrherd nostrherd \
 id = "bot"
 corpus = "/path/to/corpus-repo"
 kind = "opencode"
+allowed_requesters = [] # operator-only
 ```
+
+To accept another person's requests, add their full hex public key or npub to
+that bot's `allowed_requesters` array and restart the host. They must also
+p-tag the operator. Absent or empty lists permit only the operator; invalid
+keys reject configuration. Refused requesters create no turn or reaction.
+Queued work is rechecked against the current list before dispatch; already-open
+asks retain their lifecycle. The occupant sees `self:` for the operator and a
+full npub prefix for an allowlisted requester (D57).
 
 `--check` loads config and database, then exits. It needs neither the
 envchain wrap nor Kelpie.

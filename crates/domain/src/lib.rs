@@ -145,12 +145,15 @@ impl Bot {
     /// Authorize the operator or an explicitly allowlisted requester.
     #[must_use]
     pub fn authorizes(&self, operator: &str, author: &str) -> bool {
-        author.eq_ignore_ascii_case(operator)
-            || self
-                .allowed_requesters
-                .iter()
-                .any(|key| key.eq_ignore_ascii_case(author))
+        requester_authorized(operator, author, &self.allowed_requesters)
     }
+}
+
+/// Authorize an effective author against the operator and additional requester keys.
+#[must_use]
+pub fn requester_authorized(operator: &str, author: &str, allowed: &[String]) -> bool {
+    author.eq_ignore_ascii_case(operator)
+        || allowed.iter().any(|key| key.eq_ignore_ascii_case(author))
 }
 
 /// Public Herdr/Kelpie name for one bot in one place.
