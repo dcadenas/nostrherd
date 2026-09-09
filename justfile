@@ -28,8 +28,28 @@ version:
     @grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/'
 
 # Consistency checks that no compiler or test catches.
-verify: _verify-license _verify-stamp _verify-kelpie-pin
+verify: _verify-license _verify-stamp _verify-kelpie-pin _verify-version-unreleased
     @echo "verify: ok"
+
+# A released version must identify exactly one build. Once `vX` is tagged,
+# further commits carrying X make `--version` a lie: two different binaries
+# answer the same. This happened once, and `--version` was the feature it hid.
+_verify-version-unreleased:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+    tag="v${v}"
+    if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+        exit 0
+    fi
+    tagged=$(git rev-list -n1 "${tag}")
+    head=$(git rev-parse HEAD)
+    if [[ "${tagged}" != "${head}" ]]; then
+        echo "verify: ${tag} is already released at ${tagged:0:7}, but HEAD is ${head:0:7}." >&2
+        echo "        Two builds would report ${v}. Cut the next one with:" >&2
+        echo "          just release <next-version>" >&2
+        exit 1
+    fi
 
 # The manifest's license must match the LICENSE file. These disagreed once:
 # the manifest said UNLICENSED while LICENSE and the README said MIT, which
