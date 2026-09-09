@@ -27,6 +27,13 @@ exercises the host writer with synthetic occupant transport, and verifies the
 host's stamped final on that relay. It uses an OS-assigned loopback port and
 in-memory throwaway keys. No live Herdr/Kelpie/Buzz proof is performed.
 
+D56's `flow_05_another_channel_is_an_independent_occupant` checks two channels
+sharing a corpus: separate checkpoint directories, independent prepare/resume
+paths, matching snapshots, and byte-identical channel-neutral root startup.
+`refresh_rejects_unsafe_session_names` also checks checkpoint path validation.
+The local-relay contract proof checks the scoped renew prompts before the
+synthetic occupant answers; it does not execute a model's renew cycle.
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings

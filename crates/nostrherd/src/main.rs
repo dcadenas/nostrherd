@@ -2,13 +2,14 @@
 
 use std::fmt;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use futures::StreamExt;
 use nostr_sdk::prelude::{Client, ClientNotification, Event, Keys, SignerAuthenticator, Timestamp};
 #[cfg(test)]
@@ -39,17 +40,40 @@ const RESUME_QUEUED_EVERY: Duration = Duration::from_secs(30);
 #[derive(Debug, Parser)]
 #[command(about = "Host occupant and per-bot actors")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to the bot registry TOML.
     #[arg(long)]
-    config: PathBuf,
+    config: Option<PathBuf>,
 
     /// Path to the host `SQLite` database.
     #[arg(long)]
-    database: PathBuf,
+    database: Option<PathBuf>,
 
     /// Load config and database, then exit.
     #[arg(long)]
     check: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Scaffold a new bot corpus in a directory.
+    Init(InitArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+struct InitArgs {
+    /// Directory to create the corpus in. It must not already hold files.
+    dir: PathBuf,
+
+    /// Bot id, which is also its `{id}:` trigger. Prompted when omitted.
+    #[arg(long)]
+    id: Option<String>,
+
+    /// Agent CLI Herdr launches for it, such as `opencode`. Prompted when omitted.
+    #[arg(long)]
+    kind: Option<String>,
 }
 
 struct OperatorEnv {
@@ -92,12 +116,28 @@ enum HostError {
     Conduct(std::io::Error),
     NotificationClosed,
     InboxClosed,
+    MissingHostArgs,
+    MissingInitArg(String),
+    Init(nostrherd::init::InitError),
+    Prompt(std::io::Error),
 }
 
 impl fmt::Display for HostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Config(error) => write!(formatter, "{error}"),
+            Self::MissingHostArgs => {
+                formatter.write_str("--config and --database are required to run the host")
+            }
+            Self::MissingInitArg(label) => {
+                write!(
+                    formatter,
+                    "--{} is required without a terminal to prompt on",
+                    label.replace(' ', "-")
+                )
+            }
+            Self::Init(error) => write!(formatter, "{error}"),
+            Self::Prompt(error) => write!(formatter, "{error}"),
             Self::Database(error) => write!(formatter, "failed to open host database: {error}"),
             Self::MissingEnv(name) => write!(formatter, "missing {name}"),
             Self::InvalidOperatorKey => formatter.write_str("invalid NOSTRHERD_PRIVATE_KEY"),
@@ -129,7 +169,10 @@ impl std::error::Error for HostError {
         match self {
             Self::Config(error) => Some(error),
             Self::Database(error) => Some(error),
-            Self::Runtime(error) | Self::WaiterKey(error) | Self::Conduct(error) => Some(error),
+            Self::Runtime(error)
+            | Self::WaiterKey(error)
+            | Self::Conduct(error)
+            | Self::Prompt(error) => Some(error),
             Self::Relay(error) => Some(error),
             Self::Subscribe(error) => Some(error),
             Self::Ingest(error) => Some(error),
@@ -140,7 +183,10 @@ impl std::error::Error for HostError {
             | Self::InvalidOperatorKey
             | Self::NoBots
             | Self::NotificationClosed
-            | Self::InboxClosed => None,
+            | Self::InboxClosed
+            | Self::MissingHostArgs
+            | Self::MissingInitArg(_)
+            | Self::Init(_) => None,
         }
     }
 }
@@ -803,7 +849,15 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
 }
 
 fn run(args: &Args) -> Result<(), HostError> {
-    let (registry, repository) = load_host(&args.config, &args.database)?;
+    if let Some(Command::Init(init)) = &args.command {
+        return run_init(init);
+    }
+    // `init` scaffolds without a host, so these are optional at the parser and
+    // required here.
+    let (Some(config), Some(database)) = (args.config.as_ref(), args.database.as_ref()) else {
+        return Err(HostError::MissingHostArgs);
+    };
+    let (registry, repository) = load_host(config, database)?;
     if args.check {
         return Ok(());
     }
@@ -817,7 +871,72 @@ fn run(args: &Args) -> Result<(), HostError> {
         .enable_all()
         .build()
         .map_err(HostError::Runtime)?
-        .block_on(serve(operator, bots, &args.database))
+        .block_on(serve(operator, bots, database))
+}
+
+/// Scaffold a corpus, printing the registry entry to stdout and the rest to
+/// stderr so `nostrherd init ... >> bots.toml` works.
+fn run_init(args: &InitArgs) -> Result<(), HostError> {
+    let default_id = args
+        .dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned);
+    let id = match args.id.as_deref() {
+        Some(id) => id.to_owned(),
+        None => prompt("bot id", default_id.as_deref())?,
+    };
+    let kind = match args.kind.as_deref() {
+        Some(kind) => kind.to_owned(),
+        None => prompt("agent kind", Some("opencode"))?,
+    };
+    let scaffold = nostrherd::init::write(&args.dir, &id, &kind).map_err(HostError::Init)?;
+    eprintln!(
+        "Wrote {} files to {}",
+        scaffold.files.len(),
+        args.dir.display()
+    );
+    eprintln!();
+    eprintln!(
+        "Next: describe the bot in {}/AGENTS.md,",
+        args.dir.display()
+    );
+    eprintln!("then add this entry to the registry TOML the host runs with:");
+    eprintln!();
+    print!("{}", scaffold.registry_entry);
+    eprintln!();
+    eprintln!("Then say \"{id}: hello\" in a channel your account can post in.");
+    Ok(())
+}
+
+/// Ask for one value on a terminal. Without a terminal the flag is required,
+/// so scripted use fails loudly instead of blocking on a prompt nobody sees.
+fn prompt(label: &str, default: Option<&str>) -> Result<String, HostError> {
+    if !io::stdin().is_terminal() {
+        return Err(HostError::MissingInitArg(label.to_owned()));
+    }
+    loop {
+        match default {
+            Some(default) => eprint!("{label} [{default}]: "),
+            None => eprint!("{label}: "),
+        }
+        io::stderr().flush().map_err(HostError::Prompt)?;
+        let mut line = String::new();
+        if io::stdin()
+            .read_line(&mut line)
+            .map_err(HostError::Prompt)?
+            == 0
+        {
+            return Err(HostError::MissingInitArg(label.to_owned()));
+        }
+        let line = line.trim();
+        if !line.is_empty() {
+            return Ok(line.to_owned());
+        }
+        if let Some(default) = default {
+            return Ok(default.to_owned());
+        }
+    }
 }
 
 fn main() -> ExitCode {

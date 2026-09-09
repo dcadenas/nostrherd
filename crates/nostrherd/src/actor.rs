@@ -1492,9 +1492,19 @@ where
         snapshot_relpath: &str,
         session: &mut SessionRecord,
     ) -> Result<(), ActorError<R::Error>> {
-        if let Ok(renew_id) =
-            kelpie.arm_occupant_renew(logical_id, incarnation_id, snapshot_relpath)
-        {
+        let progress_relpath = crate::snapshot::session_progress_relpath(&session.session_name)
+            .ok_or_else(|| {
+                ActorError::Snapshot(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "session name is not a safe checkpoint path",
+                ))
+            })?;
+        if let Ok(renew_id) = kelpie.arm_occupant_renew(
+            logical_id,
+            incarnation_id,
+            snapshot_relpath,
+            &progress_relpath,
+        ) {
             session.renew_id = Some(renew_id);
             self.repository
                 .save_session(session)

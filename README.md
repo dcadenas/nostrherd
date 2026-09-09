@@ -111,9 +111,10 @@ The corpus is an ordinary git repository holding the bot's personality.
 Copy `corpus/template-bot/` to start one; its `AGENTS.md` is the only
 file you write. The host writes two things into the tree and leaves the
 rest alone: a contract block inside `startup.md`, and a rolling copy of
-recent channel messages under `.nostrherd/places/`. Those place files
-are generated chat history, so keep them out of git — the template's
-`.gitignore` already does.
+recent channel messages under `.nostrherd/places/`. Root `startup.md` stays
+channel-neutral. Occupants keep channel-specific state and renew checkpoints
+under `.nostrherd/sessions/<session-name>/`, with `progress.md` as the checkpoint.
+Keep all of `.nostrherd/` out of git; the template's `.gitignore` already does.
 
 nostrherd requires two environment variables:
 

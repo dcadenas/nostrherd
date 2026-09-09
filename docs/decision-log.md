@@ -356,7 +356,7 @@ upper slack is Buzz's accepted clock drift from D24). Corpus
 Occupant start and each new Turn refresh that file. The occupant
 self-renews (`kelpie renew --every 45m --on-timeout abort` on its own
 incarnation). The host MUST NOT arm occupant renew with `--sender-id`
-of waiter `nostrherd` (D32). Prepare writes `progress.md`. Resume reads
+of waiter `nostrherd` (D32). Prepare writes the session checkpoint (D56). Resume reads
 `startup.md` and the snapshot. D19's MUST is the file contents, not
 occupant filesystem isolation: occupants share the corpus cwd (D7).
 Token-count renew remains later (Q6).
@@ -1059,7 +1059,28 @@ a throwaway proof fixture. Removing copied protocol from existing live corpora
 is a separate operator-owned rollout, never an automatic host migration.
 Contract changes are not announced; the block regenerates on refresh and
 occupants read it on startup or renew. No announcement mechanism is added.
+## D56. Shared corpus instructions; channel-local continuation state
 
+Status: accepted
+
+Amends D27 and D55. Occupants sharing a corpus keep the same channel-neutral
+root `startup.md` and fixed corpus instructions. Channel work and continuation
+instructions MUST NOT be written into that shared startup file.
+
+The renew checkpoint is `.nostrherd/sessions/<session-name>/progress.md`.
+The key is the existing stored, filesystem-safe session name (D10, D54), not
+a channel ID, pane, incarnation or ask id. The host creates the directory;
+the occupant writes the checkpoint. Prepare and resume prompts name that exact
+path, and resume also names the existing `.nostrherd/places/<session-name>.md`
+snapshot. No additional continuation file is needed. All channel-specific
+occupant state belongs under that session directory. Keep `.nostrherd/` ignored
+in corpus git, as the creation template already does.
+
+Root `progress.md` and other sessions' checkpoints MUST NOT be read or written
+for continuation. Existing shared checkpoints are not migrated automatically:
+their channel ownership is ambiguous. Existing renew policies receive the new
+prompts when armed again; this change does not mutate running policies or
+restart occupants.
 ## D57. Operator-only default and host-stamped requester identity
 
 Status: accepted (issue 87)
@@ -1094,3 +1115,34 @@ sandbox: answer questions, do not write, do not read outside the bot's working
 repositories, and do not disclose private information. Generated corpus conduct
 distinguishes that remote requester from the operator working in the pane and
 from a host-stamped `self:` request. Init implementation is separate.
+
+## D58. `nostrherd init` scaffolds a corpus from templates in the binary
+
+Status: accepted
+
+The host scaffolds a bot corpus with `nostrherd init <dir> --id <id> --kind
+<kind>`. The templates are the files under `corpus/template-bot/`, embedded
+with `include_str!`, so a released binary scaffolds with no checkout and no
+network, and the shipped templates cannot drift from the binary that writes
+them. `corpus/template-bot/` stays the single source; there is no second set
+of string literals and no separate example repository to keep in sync.
+
+`init` refuses a destination that already holds entries, so an existing corpus
+is never overwritten. It validates the id with `BotId` and rejects an empty
+kind before touching the disk. It runs `git init` in the new directory and
+reports failure rather than continuing silently.
+
+The registry entry goes to stdout and everything else to stderr, so
+`nostrherd init ./bot --id bot --kind opencode >> bots.toml` is a complete
+registration. Missing `--id` or `--kind` are prompted for on a terminal and
+are a hard error without one, so scripted use fails loudly instead of blocking
+on an invisible prompt.
+
+`init` needs no config, database, credentials, Herdr or Kelpie, so `--config`
+and `--database` are optional at the parser and required only for the run path.
+
+The generated `AGENTS.md` tells the occupant to read `startup.md` on every
+Kelpie ask. The host writes its contract there (D55), but nothing auto-loads
+that file, while agent CLIs load `AGENTS.md` every turn and the host never
+writes `AGENTS.md`. Without that pointer an occupant answers in prose and never
+calls `kelpie reply`, so the reply is never published.

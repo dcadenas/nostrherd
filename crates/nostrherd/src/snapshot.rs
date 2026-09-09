@@ -20,6 +20,7 @@ const CONTRACT_BEGIN: &str = "<!-- nostrherd-contract -->";
 const CONTRACT_END: &str = "<!-- /nostrherd-contract -->";
 const STARTUP_BLOCK: &str = "<!-- nostrherd-place-snapshots -->
 Read `.nostrherd/places/<your public Kelpie name>.md` for the last 7 days in this channel. Do not read other place files.
+Keep channel-specific state in `.nostrherd/sessions/<your public Kelpie name>/`. The renew checkpoint is `progress.md` inside that directory. Read only your own checkpoint, never root `progress.md` or another session's state. Keep root `startup.md` channel-neutral; do not put channel work or continuation instructions there.
 <!-- /nostrherd-place-snapshots -->
 ";
 
@@ -27,6 +28,12 @@ Read `.nostrherd/places/<your public Kelpie name>.md` for the last 7 days in thi
 #[must_use]
 pub fn place_snapshot_relpath(session_name: &str) -> Option<String> {
     snapshot_file_stem(session_name).map(|name| format!(".nostrherd/places/{name}.md"))
+}
+
+/// Relative corpus path of one session's renew checkpoint.
+#[must_use]
+pub fn session_progress_relpath(session_name: &str) -> Option<String> {
+    snapshot_file_stem(session_name).map(|name| format!(".nostrherd/sessions/{name}/progress.md"))
 }
 
 /// One indexed event as a snapshot or ask-context line.
@@ -97,6 +104,7 @@ pub fn refresh_place_snapshot(
         fs::create_dir_all(parent)?;
     }
     atomic_write(&path, markdown)?;
+    fs::create_dir_all(corpus.join(".nostrherd/sessions").join(session_name))?;
     point_startup_at_snapshots(corpus, bot_id, conduct)?;
     Ok(path)
 }
@@ -364,6 +372,18 @@ mod tests {
 
     #[test]
     fn refresh_rejects_unsafe_session_names() {
+        for name in [
+            "",
+            "../other",
+            "a/b",
+            "a\\b",
+            "/absolute",
+            ".",
+            "..",
+            "two words",
+        ] {
+            assert!(session_progress_relpath(name).is_none(), "{name}");
+        }
         let corpus = temp_corpus();
         let error = refresh_place_snapshot(
             &corpus,

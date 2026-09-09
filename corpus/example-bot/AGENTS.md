@@ -15,4 +15,4 @@ For long work, MAY send `kelpie reply <ask-id> --progress --stdin` with
 the full current status (not a delta), unstamped; the host edits one
 stamped progress post in the thread. A progress reply also resets
 Kelpie's reply reminder. Always end with `--final`. Do not confuse
-progress replies with the renew checkpoint file `progress.md`.
+progress replies with the session-specific renew checkpoint named in the prepare prompt.
