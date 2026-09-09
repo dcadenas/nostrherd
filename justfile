@@ -28,8 +28,20 @@ version:
     @grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/'
 
 # Consistency checks that no compiler or test catches.
-verify: _verify-license _verify-stamp _verify-kelpie-pin _verify-version-unreleased
+verify: _verify-license _verify-stamp _verify-kelpie-pin _verify-version-unreleased _verify-changelog
     @echo "verify: ok"
+
+# Every released version needs an entry someone can read to decide whether to
+# upgrade and what it costs them. A version with no section is a release nobody
+# outside this machine can act on.
+_verify-changelog:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+    if ! grep -q "^## ${v}\$" CHANGELOG.md; then
+        echo "verify: CHANGELOG.md has no '## ${v}' section" >&2
+        exit 1
+    fi
 
 # A released version must identify exactly one build. Once `vX` is tagged,
 # further commits carrying X make `--version` a lie: two different binaries
@@ -47,9 +59,13 @@ _verify-version-unreleased:
     if [[ "${tagged}" == "${head}" ]]; then
         exit 0
     fi
-    # Only what goes into the binary counts. A justfile or docs change since the
-    # tag leaves every build reporting ${v} identical, so it needs no bump.
-    changed=$(git diff --name-only "${tag}..HEAD" -- crates Cargo.toml Cargo.lock)
+    # Only what ships counts. A justfile or docs change since the tag leaves
+    # every build reporting ${v} identical, so it needs no bump.
+    # `corpus/template-bot` is `include_str!`d into the binary by init.rs, and
+    # the conduct skill is read at runtime from beside the binary, so both are
+    # part of the artifact even though neither lives under crates/.
+    changed=$(git diff --name-only "${tag}..HEAD" -- \
+        crates Cargo.toml Cargo.lock corpus/template-bot skills/bot-conduct)
     if [[ -n "${changed}" ]]; then
         echo "verify: ${tag} is already released at ${tagged:0:7}, but these changed since:" >&2
         echo "${changed}" | sed 's/^/          /' >&2
@@ -121,6 +137,13 @@ release new_version:
     fi
     if git rev-parse -q --verify "refs/tags/v{{new_version}}" >/dev/null; then
         echo "release: tag v{{new_version}} already exists" >&2
+        exit 1
+    fi
+    # Checked before the bump so a missing entry leaves the tree untouched
+    # rather than half-released.
+    if ! grep -q "^## {{new_version}}\$" CHANGELOG.md; then
+        echo "release: add a '## {{new_version}}' section to CHANGELOG.md first." >&2
+        echo "         Say what an operator has to do, not what changed in git." >&2
         exit 1
     fi
     sed -i '0,/^version = ".*"/s//version = "{{new_version}}"/' Cargo.toml
