@@ -138,7 +138,7 @@ impl InboxConn {
         let request = serde_json::json!({
             "id": "claim",
             "method": "inbox.claim",
-            "params": {"logical_agent_id": waiter_id},
+            "params": {"logical_agent_id": id_json(waiter_id)},
         });
         write_json(&mut stream, &request)?;
         let reader = BufReader::new(stream.try_clone().map_err(KelpieError::from)?);
@@ -189,7 +189,7 @@ impl InboxConn {
         let request = serde_json::json!({
             "id": id,
             "method": "inbox.ack",
-            "params": {"message_id": message_id},
+            "params": {"message_id": id_json(message_id)},
         });
         write_json(&mut self.stream, &request)?;
         loop {
@@ -327,6 +327,17 @@ fn drain_inbox(
             return Ok(());
         }
     }
+}
+
+/// One id as Kelpie's socket protocol wants it on the wire.
+///
+/// Kelpie's ids are `#[serde(transparent)]` newtypes over `NonZeroU64`, so the
+/// daemon deserializes them from JSON numbers only; a decimal string fails.
+/// Ids are opaque text inside this host, so they are converted at the edge.
+/// A non-numeric id is sent unchanged, which is what an older Kelpie expects.
+fn id_json(id: &str) -> Value {
+    id.parse::<u64>()
+        .map_or_else(|_| Value::String(id.to_owned()), Value::from)
 }
 
 fn write_json(stream: &mut UnixStream, value: &Value) -> Result<(), KelpieError> {

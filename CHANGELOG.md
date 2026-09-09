@@ -6,16 +6,25 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.5
+
+- Send Kelpie ids as JSON numbers. Kelpie's ids are `serde(transparent)`
+  newtypes over `NonZeroU64`, so the daemon accepts numbers only; the host was
+  still sending `inbox.claim` and `inbox.ack` ids as strings. alpha.4 fixed
+  reading and did not restore the inbox on its own.
+
+  **Action**: required with the integer-id Kelpie. Upgrade past alpha.4, not to
+  it. A non-numeric id is still sent unchanged, so an older Kelpie is
+  unaffected.
+
 ## 0.1.0-alpha.4
 
 - Read Kelpie ids sent as JSON numbers. Kelpie replaced UUID ids with integers
   and its JSON now emits them as numbers; the host read every id with a
-  string-only accessor, so each delivery failed as a missing `message_id` and
-  the inbox stayed down while the log reported only a reconnect loop. Ids
-  remain opaque text here, and both spellings are accepted.
+  string-only accessor, so each delivery failed as a missing `message_id`.
 
-  **Action**: required with Kelpie 0.2.0-alpha.5 or later. On an older Kelpie
-  it changes nothing.
+  Incomplete on its own: see alpha.5 for the sending half. On this version the
+  inbox still could not claim.
 
 ## 0.1.0-alpha.3
 
