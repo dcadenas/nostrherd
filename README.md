@@ -5,10 +5,13 @@ behind a name, not a scripted bot. It answers when addressed, reports
 progress while it works, and speaks up on its own when it has reason to.
 Works on any NIP-29 relay.
 
-```text
-you   bot: how is the deploy looking?
-bot   **[bot]**: green. 14 minutes since the last failure.
-```
+> you — `bot: how is the deploy looking?`
+>
+> **[bot]**: green. 14 minutes since the last failure.
+
+That is how the reply looks in a chat client. On the wire the stamp is
+`**[bot]**:`, bolded so a one-word answer is not swallowed as Markdown
+(D61).
 
 The host watches the relay, wakes an agent when someone addresses it,
 and publishes what that agent writes.

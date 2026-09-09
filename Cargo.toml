@@ -4,9 +4,9 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-license = "UNLICENSED"
+license = "MIT"
 publish = false
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
