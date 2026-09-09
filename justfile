@@ -44,8 +44,15 @@ _verify-version-unreleased:
     fi
     tagged=$(git rev-list -n1 "${tag}")
     head=$(git rev-parse HEAD)
-    if [[ "${tagged}" != "${head}" ]]; then
-        echo "verify: ${tag} is already released at ${tagged:0:7}, but HEAD is ${head:0:7}." >&2
+    if [[ "${tagged}" == "${head}" ]]; then
+        exit 0
+    fi
+    # Only what goes into the binary counts. A justfile or docs change since the
+    # tag leaves every build reporting ${v} identical, so it needs no bump.
+    changed=$(git diff --name-only "${tag}..HEAD" -- crates Cargo.toml Cargo.lock)
+    if [[ -n "${changed}" ]]; then
+        echo "verify: ${tag} is already released at ${tagged:0:7}, but these changed since:" >&2
+        echo "${changed}" | sed 's/^/          /' >&2
         echo "        Two builds would report ${v}. Cut the next one with:" >&2
         echo "          just release <next-version>" >&2
         exit 1
@@ -122,9 +129,11 @@ release new_version:
     git add Cargo.toml Cargo.lock
     git commit -m "Release {{new_version}}"
     git tag -a "v{{new_version}}" -m "{{new_version}}"
-    @echo
-    @echo "Committed and tagged v{{new_version}}. Nothing is pushed."
-    @echo "Push with: just release-push {{new_version}}"
+    # Plain echo: `@` is just's line-suppression syntax and is not valid inside
+    # a shebang recipe body, where the whole recipe is one shell script.
+    echo
+    echo "Committed and tagged v{{new_version}}. Nothing is pushed."
+    echo "Push with: just release-push {{new_version}}"
 
 # Push a release commit and its tag. Separate so the tag is reviewable first.
 release-push version:
