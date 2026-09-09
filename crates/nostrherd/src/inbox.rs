@@ -230,12 +230,9 @@ pub fn parse_delivery(event: &Value) -> Result<InboxDelivery, KelpieError> {
     let params = event
         .get("params")
         .ok_or_else(|| KelpieError::InvalidReceipt("inbox.delivery missing params".to_owned()))?;
-    let message_id = params
-        .get("message_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| KelpieError::InvalidReceipt("inbox.delivery missing message_id".to_owned()))?
-        .to_owned();
+    let message_id = crate::json_text(params.get("message_id")).ok_or_else(|| {
+        KelpieError::InvalidReceipt("inbox.delivery missing message_id".to_owned())
+    })?;
     Ok(InboxDelivery {
         kind: params
             .get("kind")
@@ -246,10 +243,7 @@ pub fn parse_delivery(event: &Value) -> Result<InboxDelivery, KelpieError> {
             .get("disposition")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
-        reply_to: params
-            .get("reply_to")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
+        reply_to: crate::json_text(params.get("reply_to")),
         sender_agent_id: optional_text(params, "sender_agent_id"),
         sender_public_name: optional_text(params, "sender_public_name"),
         body: params
@@ -262,11 +256,7 @@ pub fn parse_delivery(event: &Value) -> Result<InboxDelivery, KelpieError> {
 }
 
 fn optional_text(params: &Value, key: &str) -> Option<String> {
-    params
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    crate::json_text(params.get(key))
 }
 
 /// Spawn a reconnecting inbox that keeps the claim until the host ACKs.
@@ -393,6 +383,42 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{parse_delivery, InboxConn};
+
+    #[test]
+    fn delivery_ids_parse_as_numbers_and_as_strings() {
+        // Kelpie ids were UUID strings and are now integers, sent as JSON
+        // numbers. Reading them with `as_str` silently yielded None, which
+        // failed every delivery as a missing message_id and took the host's
+        // inbox down while it looked merely disconnected.
+        let numeric = serde_json::json!({
+            "method": "inbox.delivery",
+            "params": {
+                "message_id": 20639,
+                "reply_to": 1847,
+                "sender_agent_id": 1572,
+                "body": "hello",
+            }
+        });
+        let parsed = parse_delivery(&numeric).expect("numeric ids");
+        assert_eq!(parsed.message_id(), "20639");
+        assert_eq!(parsed.reply_to(), Some("1847"));
+        assert_eq!(parsed.sender_agent_id(), Some("1572"));
+
+        let textual = serde_json::json!({
+            "method": "inbox.delivery",
+            "params": {
+                "message_id": "01a08854-de56-7830-8045-abcd8a92e865",
+                "reply_to": "01a0869e-eb6a-7fb2-873d-978f9598193a",
+                "body": "hello",
+            }
+        });
+        let parsed = parse_delivery(&textual).expect("string ids");
+        assert_eq!(parsed.message_id(), "01a08854-de56-7830-8045-abcd8a92e865");
+        assert_eq!(
+            parsed.reply_to(),
+            Some("01a0869e-eb6a-7fb2-873d-978f9598193a")
+        );
+    }
 
     #[test]
     fn socket_resolution_matches_kelpie_fallbacks() {

@@ -6,6 +6,17 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.4
+
+- Read Kelpie ids sent as JSON numbers. Kelpie replaced UUID ids with integers
+  and its JSON now emits them as numbers; the host read every id with a
+  string-only accessor, so each delivery failed as a missing `message_id` and
+  the inbox stayed down while the log reported only a reconnect loop. Ids
+  remain opaque text here, and both spellings are accepted.
+
+  **Action**: required with Kelpie 0.2.0-alpha.5 or later. On an older Kelpie
+  it changes nothing.
+
 ## 0.1.0-alpha.3
 
 - Scaffolded corpora no longer restate the outbound stamp. `AGENTS.md` and

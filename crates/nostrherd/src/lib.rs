@@ -522,7 +522,9 @@ impl KelpieClient {
     ) -> Result<StartReconciliation, KelpieError> {
         if let Some(recorded_id) = receipt
             .and_then(|receipt| receipt.pointer("/result/logical_agent_id"))
-            .and_then(Value::as_str)
+            .map(Some)
+            .and_then(json_text)
+            .as_deref()
         {
             if launch
                 .logical_agent_id
@@ -574,9 +576,10 @@ impl KelpieClient {
         }
         if matches.len() > 1 {
             let logical_id = field(matches[0].0, "agent_id")?;
-            if matches.iter().any(|(agent, _)| {
-                agent.get("agent_id").and_then(Value::as_str) != Some(&logical_id)
-            }) {
+            if matches
+                .iter()
+                .any(|(agent, _)| json_text(agent.get("agent_id")).as_deref() != Some(&logical_id))
+            {
                 return Ok(StartReconciliation::Unsettled(
                     "report shows different logical identities on the recorded seat".to_owned(),
                 ));
@@ -925,10 +928,7 @@ impl HostWaiter<'_> {
                 message_id: field(result, "message_id")?,
                 operation_id: Some(field(result, "operation_id")?),
                 recipient: field(result, "recipient")?,
-                recipient_incarnation: result
-                    .get("recipient_incarnation")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                recipient_incarnation: json_text(result.get("recipient_incarnation")),
                 delivery: ask_delivery(result)?,
             });
         }
@@ -1056,13 +1056,13 @@ impl HostWaiter<'_> {
         let ask_ids = obligations
             .iter()
             .filter(|obligation| {
-                obligation.get("waiting_agent_id").and_then(Value::as_str)
+                json_text(obligation.get("waiting_agent_id")).as_deref()
                     == Some(self.identity.logical_agent_id())
             })
-            .filter_map(|obligation| obligation.get("ask_message_id").and_then(Value::as_str))
+            .filter_map(|obligation| json_text(obligation.get("ask_message_id")))
             .collect::<Vec<_>>();
         match ask_ids.as_slice() {
-            [ask_id] => Ok((*ask_id).to_owned()),
+            [ask_id] => Ok((*ask_id).clone()),
             [] => Err(KelpieError::InvalidReceipt(
                 "uncertain ask did not create a pending obligation".to_owned(),
             )),
@@ -1121,13 +1121,22 @@ fn result(receipt: &Value) -> Result<&Value, KelpieError> {
         .ok_or_else(|| KelpieError::InvalidReceipt("missing result".to_owned()))
 }
 
+/// One JSON scalar as text, accepting the number spelling of a Kelpie id.
+///
+/// Kelpie ids were UUID strings and are now integers, and its JSON emits them
+/// as numbers. Ids stay opaque to this host, so both spellings are read and
+/// stored as text. A genuinely textual field is never a number, so widening
+/// this costs nothing there.
+pub(crate) fn json_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
 fn field(value: &Value, name: &str) -> Result<String, KelpieError> {
-    value
-        .get(name)
-        .and_then(Value::as_str)
-        .filter(|field| !field.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| KelpieError::InvalidReceipt(format!("missing {name}")))
+    json_text(value.get(name)).ok_or_else(|| KelpieError::InvalidReceipt(format!("missing {name}")))
 }
 
 #[cfg(test)]
