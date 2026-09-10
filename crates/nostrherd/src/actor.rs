@@ -604,7 +604,7 @@ where
                 }
             }
         };
-        let action = outbox::handle_delivery_with_feedback(
+        let action = outbox::handle_delivery_with_feedback_and_audiences(
             &mut self.repository,
             publisher,
             &mut notice,
@@ -613,6 +613,7 @@ where
             &mut occupant_feedback,
             &self.output_guard,
             &mut operator_feedback,
+            &self.audiences,
         )
         .map_err(|error| match error {
             OutboxError::Repository(error) => ActorError::Repository(error),

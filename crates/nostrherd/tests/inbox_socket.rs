@@ -137,7 +137,7 @@ fn publish_live_final(body: &str) {
                 &channel,
                 "bot: socket proof",
                 &[],
-                None,
+                &[],
             ))
             .await
             .unwrap();

@@ -129,6 +129,13 @@ readers may exist. With neither source, it MUST also classify the audience as
 shared. A configured per-bot `operator_session` gives the occupant a private
 Kelpie tell destination that never enters the relay.
 
+The in-memory roster MUST retain every non-empty kind-0 `display_name`,
+`displayName`, and `name`, plus the local part of NIP-05, as participant aliases.
+Outbound occupant prose keeps readable `@Label` text and MUST add notification
+`p` tags for labels that uniquely identify channel participants. Matching is
+case-insensitive, uses the longest known label at each `@`, and MUST NOT resolve
+an alias shared by distinct pubkeys or a person outside the channel.
+
 ## Occupant reply
 
 The occupant is an ordinary Kelpie peer of waiter `nostrherd`. Snapshot
@@ -172,7 +179,8 @@ channel; do not repeat the refused body. This is an accident check, not a claim
 that arbitrary sensitive output is detected.
 
 A host-initiated wake has no user message in its declaring channel. Its final
-MUST therefore publish as a top-level stamped post without a reply or mention.
+MUST therefore publish as a top-level stamped post without a reply or requester
+mention. Participant names in its body still resolve to notification tags.
 
 Outbound `--reply-to` is the triggering EventId, including the first
 call. Keep the trigger's existing parent separately when snapshots need
@@ -188,10 +196,13 @@ per-channel ceiling nor a quiet-hours window (D52). How often a bot
 speaks is its own judgement, written in its corpus. Progress edits keep
 the D42 cap.
 
-The host MUST `--mention` the indexed event's effective author (not the
+The host MUST notification-tag the indexed event's effective author (not the
 raw relay signer, not an arbitrary `p` tag), including operator-authored
-triggers. `ignore_self` still blocks retrigger. The progress post (D42)
-is the exception: it carries no `--mention`.
+triggers, then uniquely resolved participant aliases named in the body. It MUST
+deduplicate pubkeys in that order and emit at most 50 `p` tags. Occupant tells
+and host-wake finals have no requester tag but use the same body-derived
+participant resolution. `ignore_self` still blocks retrigger. The progress post
+(D42) is the exception: it carries no participant or requester mention.
 
 On progress for an open ask the host MUST relay one stamped kind 9 per
 ask, `--reply-to` the trigger, without `--mention`, created after the

@@ -34,6 +34,13 @@ author attribution, and host stamps independent of request text.
 covers queued legacy rows, removed authorization and unavailable identity.
 Existing edit and queue tests assert requester stamps alongside their flow checks.
 
+Issue 95 extends the D66 roster with kind-0 display name, name, and NIP-05
+local-part aliases. `participant_mentions_use_longest_unique_alias_and_refuse_ambiguous_aliases`
+uses the live two-pubkey `Pollen` collision, proves per-alias refusal, and proves
+that distinct aliases still resolve. Domain builder, outbox reply/tell/wake, and
+ignored local-relay publish tests cover canonical dedupe, the 50-tag cap,
+readable body retention, participant-only resolution, and requester-first order.
+
 `./tools/local-relay contract-proof` also proves requester authorization: an
 operator-only bot refuses a peer; the operator is stamped `self:`; a peer admitted
 by an empty list queues, survives SQLite reopen, retains its full npub stamp,

@@ -1457,3 +1457,30 @@ reports a generic reason privately when `operator_session` is configured and in
 the operator notice channel, never echoing the body. The concrete publisher also
 checks, covering persisted retries and progress edits. This catches accidents;
 it is not general content enforcement.
+
+## D67. Named channel participants receive notification tags
+
+Status: accepted (issue 95)
+
+Extends D43 and D66. The D66 channel roster retains all kind-0 display-name and
+name fields plus the NIP-05 local part. Before publishing occupant prose, the
+host matches readable `@Label` text against that roster and adds the uniquely
+resolved participant pubkeys as `p` tags without rewriting the body. Labels may
+contain spaces, so matching chooses the longest known label at each `@` rather
+than tokenizing on whitespace.
+
+Ambiguity is evaluated per alias and fails closed. If two distinct channel
+participants answer to `Pollen`, `@Pollen` tags neither, even when another alias
+for either participant is unique and can resolve independently. Kind-0 display
+names are attacker-controlled metadata; choosing among duplicates would let one
+participant attract notifications intended for another. People outside the
+channel roster are never candidates.
+
+Replies retain the effective requester as the first notification recipient,
+then add body-derived participants in body order. Occupant tells and host-wake
+finals have no requester recipient but apply the same body-derived resolution.
+Progress keeps D42's intentional no-mention shape. Matching deduplicates pubkeys
+in canonical input order and caps the final list at 50, mirroring buzz-sdk
+`build_message`; wire order remains `h`, thread `e` tags, then `p` tags. The
+durable legacy `mention` column stores that ordered set as comma-separated hex
+pubkeys, so existing single-pubkey rows remain readable and retry the same event.

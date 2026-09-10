@@ -6,6 +6,13 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## Unreleased
+
+- Bot replies and bot-initiated posts now notify channel participants named with
+  a readable `@Label`. Names resolve only from the current channel roster;
+  duplicate names are left untagged, and notification tags are deduplicated and
+  capped at 50. No registry or database action is required.
+
 ## 0.1.0-alpha.12
 
 - Bots now receive a current audience summary with every ask and a participant

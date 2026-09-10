@@ -32,6 +32,7 @@ const PROFILE_LOOKUP_BATCH: usize = 8;
 pub struct AudienceParticipant {
     pub pubkey: String,
     pub display_name: Option<String>,
+    pub aliases: Vec<String>,
 }
 
 /// Evidence used to describe who can read a channel.
@@ -63,6 +64,7 @@ impl ChannelAudience {
             .map(|event| AudienceParticipant {
                 pubkey: event.author_pubkey.to_ascii_lowercase(),
                 display_name: None,
+                aliases: Vec::new(),
             })
             .collect::<Vec<_>>();
         Self {
@@ -102,6 +104,55 @@ impl ChannelAudience {
         };
         format!("Audience: {classification} ({evidence}).")
     }
+
+    /// Resolve readable `@Label` text to unique channel participants.
+    #[must_use]
+    pub fn mentioned_pubkeys(&self, body: &str) -> Vec<String> {
+        let mut aliases = std::collections::HashMap::<String, (String, HashSet<String>)>::new();
+        for participant in &self.participants {
+            for alias in &participant.aliases {
+                let normalized = alias.to_lowercase();
+                let entry = aliases
+                    .entry(normalized)
+                    .or_insert_with(|| (alias.clone(), HashSet::new()));
+                entry.1.insert(participant.pubkey.to_ascii_lowercase());
+            }
+        }
+        let mut aliases = aliases.into_values().collect::<Vec<_>>();
+        aliases.sort_by(|left, right| right.0.len().cmp(&left.0.len()).then(left.0.cmp(&right.0)));
+
+        let mut matches = Vec::new();
+        for (at, _) in body.match_indices('@') {
+            if body[..at]
+                .chars()
+                .next_back()
+                .is_some_and(is_alias_character)
+            {
+                continue;
+            }
+            let rest = &body[at + 1..];
+            let Some((_, pubkeys)) = aliases.iter().find(|(alias, _)| {
+                rest.get(..alias.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(alias))
+                    && rest.get(alias.len()..).is_some_and(|suffix| {
+                        suffix
+                            .chars()
+                            .next()
+                            .is_none_or(|character| !is_alias_character(character))
+                    })
+            }) else {
+                continue;
+            };
+            if pubkeys.len() == 1 {
+                matches.extend(pubkeys.iter().cloned());
+            }
+        }
+        matches
+    }
+}
+
+fn is_alias_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 /// Relay event emitted to the per-bot actor layer.
@@ -773,8 +824,10 @@ impl RelaySubscriber {
         for batch in participants.chunks(PROFILE_LOOKUP_BATCH) {
             resolved.extend(
                 join_all(batch.iter().cloned().map(|pubkey| async move {
+                    let profile = self.profile(&pubkey).await.unwrap_or_default();
                     AudienceParticipant {
-                        display_name: self.profile_display(&pubkey).await.unwrap_or(None),
+                        display_name: profile.display_name,
+                        aliases: profile.aliases,
                         pubkey,
                     }
                 }))
@@ -788,8 +841,14 @@ impl RelaySubscriber {
     }
 
     async fn profile_display(&self, pubkey: &str) -> Result<Option<String>, RelaySubscribeError> {
+        Ok(self.profile(pubkey).await?.display_name)
+    }
+
+    async fn profile(&self, pubkey: &str) -> Result<Profile, RelaySubscribeError> {
         let events = self.fetch_filtered(profile_filter(pubkey)).await?;
-        Ok(newest_event(&events).and_then(|event| parse_profile_display(&event.content)))
+        Ok(newest_event(&events)
+            .map(|event| parse_profile(&event.content))
+            .unwrap_or_default())
     }
 
     async fn fetch_filtered(
@@ -1035,19 +1094,48 @@ fn other_participant<'a>(operator_pubkey: &str, participants: &'a [String]) -> O
     other
 }
 
-fn parse_profile_display(content: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(content).ok()?;
-    for key in ["display_name", "displayName", "name"] {
-        if let Some(name) = value
-            .get(key)
-            .and_then(serde_json::Value::as_str)
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Profile {
+    display_name: Option<String>,
+    aliases: Vec<String>,
+}
+
+fn parse_profile(content: &str) -> Profile {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Profile::default();
+    };
+    let values = |keys: &[&str]| {
+        keys.iter()
+            .filter_map(|key| value.get(key).and_then(serde_json::Value::as_str))
             .map(str::trim)
             .filter(|name| !name.is_empty())
-        {
-            return Some(name.to_owned());
-        }
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let display_names = values(&["display_name", "displayName"]);
+    let names = values(&["name"]);
+    let mut aliases = display_names
+        .iter()
+        .chain(&names)
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(local_part) = value
+        .get("nip05")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|nip05| nip05.trim().split_once('@').map(|(local, _)| local.trim()))
+        .filter(|local| !local.is_empty())
+    {
+        aliases.push(local_part.to_owned());
     }
-    None
+    let mut seen = HashSet::new();
+    aliases.retain(|alias| seen.insert(alias.to_lowercase()));
+    Profile {
+        display_name: display_names
+            .into_iter()
+            .next()
+            .or_else(|| names.into_iter().next()),
+        aliases,
+    }
 }
 
 #[cfg(test)]
@@ -1938,9 +2026,12 @@ mod tests {
         client.connect().and_wait(Duration::from_secs(3)).await;
         let member = Keys::generate();
         let admin = Keys::generate();
-        let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Reader"}"#)
-            .finalize(&member)
-            .expect("profile");
+        let profile = EventBuilder::new(
+            Kind::Metadata,
+            r#"{"display_name":"Reader Name","name":"reader","nip05":"verified@example.test"}"#,
+        )
+        .finalize(&member)
+        .expect("profile");
         client.send_event(&profile).await.expect("store profile");
         let members = EventBuilder::new(Kind::Custom(GROUP_MEMBERS_KIND), "")
             .tags([
@@ -1962,7 +2053,11 @@ mod tests {
         assert_eq!(audience.participants.len(), 1);
         assert_eq!(
             audience.participants[0].display_name.as_deref(),
-            Some("Reader")
+            Some("Reader Name")
+        );
+        assert_eq!(
+            audience.participants[0].aliases,
+            ["Reader Name", "reader", "verified"]
         );
     }
 
@@ -2091,13 +2186,69 @@ mod tests {
             "Sebastian"
         );
         assert_eq!(
-            parse_profile_display(r#"{"display_name":"Sebastian","name":"seb"}"#).as_deref(),
-            Some("Sebastian")
+            parse_profile(
+                r#"{"display_name":"Sebastian","name":"seb","nip05":"seb-nip@example.test"}"#
+            ),
+            Profile {
+                display_name: Some("Sebastian".to_owned()),
+                aliases: vec![
+                    "Sebastian".to_owned(),
+                    "seb".to_owned(),
+                    "seb-nip".to_owned()
+                ],
+            }
         );
         assert_eq!(
-            parse_profile_display(r#"{"name":"seb"}"#).as_deref(),
+            parse_profile(r#"{"name":"seb"}"#).display_name.as_deref(),
             Some("seb")
         );
+    }
+
+    #[test]
+    fn participant_mentions_use_longest_unique_alias_and_refuse_ambiguous_aliases() {
+        let pollen_a = "9883bdf7681e7066a1b337b05f110c19bb13376346823361b2b0f2e12a6342e8";
+        let pollen_b = "b59090895522102b0b4a0e4de0955c7e0bfdf4dd3aa0d6aaff3095117bbfd9b2";
+        let manager = "c".repeat(64);
+        let short_pr = "d".repeat(64);
+        let audience = ChannelAudience {
+            source: AudienceSource::MemberList,
+            participants: vec![
+                AudienceParticipant {
+                    pubkey: pollen_a.to_owned(),
+                    display_name: Some("Pollen".to_owned()),
+                    aliases: vec![
+                        "Pollen".to_owned(),
+                        "pollen-a".to_owned(),
+                        "verified-a".to_owned(),
+                    ],
+                },
+                AudienceParticipant {
+                    pubkey: pollen_b.to_owned(),
+                    display_name: Some("Pollen".to_owned()),
+                    aliases: vec!["Pollen".to_owned(), "pollen-b".to_owned()],
+                },
+                AudienceParticipant {
+                    pubkey: manager.clone(),
+                    display_name: Some("PR Manager".to_owned()),
+                    aliases: vec!["PR Manager".to_owned()],
+                },
+                AudienceParticipant {
+                    pubkey: short_pr,
+                    display_name: Some("PR".to_owned()),
+                    aliases: vec!["PR".to_owned()],
+                },
+            ],
+        };
+
+        assert_eq!(
+            audience.mentioned_pubkeys(
+                "@Pollen stays ambiguous; ask @pollen-a or @verified-a. Notify @PR Manager."
+            ),
+            vec![pollen_a.to_owned(), pollen_a.to_owned(), manager]
+        );
+        assert!(audience
+            .mentioned_pubkeys("@outsider, @PRManager, and mail@pollen-a")
+            .is_empty());
     }
 
     fn indexed_target(event_id: &EventId, author: &Keys) -> IndexedRelayEvent {

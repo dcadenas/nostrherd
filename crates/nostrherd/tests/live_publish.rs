@@ -16,10 +16,13 @@ use nostr_sdk::prelude::{
     Client, ClientNotification, Filter, Keys, SignerAuthenticator, SubscriptionId, Timestamp,
 };
 use nostrherd::outbox::{BuzzPublisher, OutboundAttempt, OutboundPublisher};
+use nostrherd::relay::{AudienceParticipant, AudienceSource, ChannelAudience};
 use nostrherd_domain::{buzz, stamp_outbound, EventId};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const POLLEN_A: &str = "9883bdf7681e7066a1b337b05f110c19bb13376346823361b2b0f2e12a6342e8";
+const POLLEN_B: &str = "b59090895522102b0b4a0e4de0955c7e0bfdf4dd3aa0d6aaff3095117bbfd9b2";
 
 fn relay_url() -> String {
     std::env::var("NOSTRHERD_RELAY_URL").expect("NOSTRHERD_RELAY_URL (local relay)")
@@ -69,6 +72,24 @@ fn attempt_for(channel: &str, trigger: &EventId, body: &str) -> OutboundAttempt 
     }
 }
 
+fn pollen_audience() -> ChannelAudience {
+    ChannelAudience {
+        source: AudienceSource::MemberList,
+        participants: vec![
+            AudienceParticipant {
+                pubkey: POLLEN_A.to_owned(),
+                display_name: Some("Pollen".to_owned()),
+                aliases: vec!["Pollen".to_owned(), "pollen-a".to_owned()],
+            },
+            AudienceParticipant {
+                pubkey: POLLEN_B.to_owned(),
+                display_name: Some("Pollen".to_owned()),
+                aliases: vec!["Pollen".to_owned(), "pollen-b".to_owned()],
+            },
+        ],
+    }
+}
+
 async fn assert_refresh_filters(client: &Client, channel: &str, trigger: &EventId) {
     let subscriptions = client.subscriptions().await;
     let channel_filter = subscriptions
@@ -110,7 +131,7 @@ async fn live_publishes_each_kind_and_dedups_a_redelivery() {
     let publisher = BuzzPublisher::new(client.clone(), keys.clone(), relay_url.clone());
 
     // A real trigger on the channel: the operator posts a plain kind 9.
-    let trigger_message = buzz::channel_message(&channel, "live trigger", &[], None);
+    let trigger_message = buzz::channel_message(&channel, "live trigger", &[], &[]);
     let trigger_id = publisher
         .send_buzz(&trigger_message)
         .await
@@ -120,8 +141,9 @@ async fn live_publishes_each_kind_and_dedups_a_redelivery() {
     // Kind 9 through the OutboundPublisher path: prepare gives the id
     // before send, and the accepted id is the prepared id. The
     // markerless trigger replies with a reply marker only.
-    let stamped = stamp_outbound("live kind 9 body", "**[bot]**:");
-    let attempt = attempt_for(&channel, &trigger, &stamped);
+    let stamped = stamp_outbound("@Pollen is ambiguous; @pollen-a is unique", "**[bot]**:");
+    let mut attempt = attempt_for(&channel, &trigger, &stamped);
+    attempt.mention = pollen_audience().mentioned_pubkeys(&stamped).join(",");
     let prepared = publisher.prepare(&attempt).expect("prepare");
     let accepted = publisher.publish(&prepared).expect("publish");
     assert_eq!(accepted, prepared.event_id());
@@ -132,6 +154,7 @@ async fn live_publishes_each_kind_and_dedups_a_redelivery() {
     assert_eq!(event.kind.as_u16(), buzz::CHANNEL_MESSAGE_KIND);
     assert_eq!(event.content, stamped);
     assert_eq!(tag_values(&event, "h"), vec![channel.clone()]);
+    assert_eq!(tag_values(&event, "p"), vec![POLLEN_A.to_owned()]);
     assert_eq!(
         tag_values(&event, "e"),
         vec![trigger.as_str().to_owned()],
@@ -240,7 +263,7 @@ async fn live_refresh_replaces_channel_and_active_turn_filters() {
             &channel,
             "subscription refresh trigger",
             &[],
-            None,
+            &[],
         ))
         .await
         .expect("trigger post");
@@ -264,7 +287,7 @@ async fn live_refresh_replaces_channel_and_active_turn_filters() {
             &channel,
             "event after subscription refresh",
             &[],
-            None,
+            &[],
         ))
         .await
         .expect("channel post");
@@ -380,7 +403,7 @@ async fn live_retry_after_a_real_relay_drop() {
             &channel,
             "live retry trigger",
             &[],
-            None,
+            &[],
         ))
         .await
         .expect("trigger post");

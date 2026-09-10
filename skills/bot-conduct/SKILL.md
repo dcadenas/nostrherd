@@ -20,6 +20,9 @@ description: >
    An empty result covers only that surface: an index of one event kind says
    nothing about other kinds. Re-read command help before relying on an old
    capability check in a long-lived session.
+6. Naming a channel participant with `@Label` can notify them. Name people only
+   when that notification is useful to the conversation, not merely because
+   their name appears in background context.
 
 Deliberately absent: digests, first contact, escalation routing. Those
 depend on host primitives that do not exist yet; guidance for a

@@ -5,6 +5,7 @@
 //! before send (D28, amended) and a retry redelivers the same event,
 //! which the relay dedups.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use nostrherd_domain::{
 
 use crate::inbox::InboxDelivery;
 use crate::progress::{self, ProgressRelay};
+use crate::relay::ChannelAudience;
 use crate::{HostRepository, IndexedRelayEvent, SessionRecord, TurnRecord};
 
 /// Whether the claimed inbox delivery may be acknowledged.
@@ -560,18 +562,36 @@ impl BuzzPublisher {
     }
 }
 
+fn resolved_mentions(
+    body: &str,
+    requester: &str,
+    audience: Option<&ChannelAudience>,
+) -> Vec<String> {
+    let mut mentions = Vec::new();
+    if !requester.is_empty() {
+        mentions.push(requester.to_ascii_lowercase());
+    }
+    if let Some(audience) = audience {
+        mentions.extend(audience.mentioned_pubkeys(body));
+    }
+    let mut seen = std::collections::HashSet::new();
+    mentions.retain(|pubkey| seen.insert(pubkey.clone()));
+    mentions.truncate(50);
+    mentions
+}
+
 /// Stamped kind-9 channel message for one attempt (D43).
 fn attempt_buzz_event(attempt: &OutboundAttempt) -> BuzzEvent {
     let thread_tags = match (&attempt.reply_to_event_id, &attempt.thread_root_event_id) {
         (Some(trigger), thread_root) => buzz::reply_thread_tags(trigger, thread_root.as_ref()),
         (None, _) => Vec::new(),
     };
-    buzz::channel_message(
-        &attempt.channel_id,
-        &attempt.body,
-        &thread_tags,
-        Some(&attempt.mention),
-    )
+    let mentions = attempt
+        .mention
+        .split(',')
+        .filter(|mention| !mention.is_empty())
+        .collect::<Vec<_>>();
+    buzz::channel_message(&attempt.channel_id, &attempt.body, &thread_tags, &mentions)
 }
 
 /// Classify one inbox delivery against a persisted turn.
@@ -636,6 +656,7 @@ fn unpublishable_tell_feedback(message_id: &str) -> String {
     format!("your tell {message_id} did not publish: the body was empty.")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_occupant_tell<R, P>(
     repository: &mut R,
     publisher: &P,
@@ -644,6 +665,7 @@ fn handle_occupant_tell<R, P>(
     delivery: &InboxDelivery,
     output_guard: &OutputGuard,
     operator_feedback: &mut impl FnMut(&str),
+    audiences: &HashMap<String, ChannelAudience>,
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
 where
     R: HostRepository,
@@ -692,6 +714,7 @@ where
         &body,
         &destination,
         &session.bot_id,
+        audiences.get(&session.channel_id),
     )
 }
 
@@ -719,6 +742,7 @@ fn publish_initiated<R, P>(
     body: &str,
     destination: &SessionRecord,
     bot_id: &BotId,
+    audience: Option<&ChannelAudience>,
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
 where
     R: HostRepository,
@@ -736,7 +760,7 @@ where
         attempt.channel_id.clone_from(&destination.channel_id);
         attempt.reply_to_event_id = None;
         attempt.thread_root_event_id = None;
-        attempt.mention.clear();
+        attempt.mention = resolved_mentions(body, "", audience).join(",");
     }
     repository
         .save_outbound_attempt(&attempt)
@@ -903,6 +927,37 @@ where
     P: OutboundPublisher,
     I: InFlightReaction,
 {
+    handle_delivery_with_feedback_and_audiences(
+        repository,
+        publisher,
+        notice,
+        delivery,
+        reactions,
+        occupant_feedback,
+        output_guard,
+        operator_feedback,
+        &HashMap::new(),
+    )
+}
+
+/// Persist and publish with the latest D66 audience rosters.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn handle_delivery_with_feedback_and_audiences<R, P, I>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    delivery: &InboxDelivery,
+    reactions: &I,
+    occupant_feedback: &mut impl FnMut(&str, &str),
+    output_guard: &OutputGuard,
+    operator_feedback: &mut impl FnMut(&str),
+    audiences: &HashMap<String, ChannelAudience>,
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+    I: InFlightReaction,
+{
     if delivery.kind() == "tell" {
         return handle_occupant_tell(
             repository,
@@ -912,6 +967,7 @@ where
             delivery,
             output_guard,
             operator_feedback,
+            audiences,
         );
     }
     let Some(ask_id) = delivery.reply_to() else {
@@ -995,7 +1051,15 @@ where
                     }
                     return Ok(InboxAction::Ack);
                 }
-                complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
+                complete_outbound_with_audience(
+                    repository,
+                    publisher,
+                    notice,
+                    &turn,
+                    Some(&body),
+                    reactions,
+                    audiences.get(&turn.channel_id),
+                )
             }
             None => Ok(InboxAction::Hold),
         },
@@ -1047,6 +1111,24 @@ where
     P: OutboundPublisher,
     I: InFlightReaction,
 {
+    complete_outbound_with_audience(repository, publisher, notice, turn, body, reactions, None)
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn complete_outbound_with_audience<R, P, I>(
+    repository: &mut R,
+    publisher: &P,
+    notice: &mut impl FnMut(&str),
+    turn: &TurnRecord,
+    body: Option<&str>,
+    reactions: &I,
+    audience: Option<&ChannelAudience>,
+) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+where
+    R: HostRepository,
+    P: OutboundPublisher,
+    I: InFlightReaction,
+{
     let Some(ask_id) = turn.ask_id.as_deref() else {
         return Ok(InboxAction::Hold);
     };
@@ -1056,7 +1138,7 @@ where
             .map_err(OutboxError::Repository)?,
         None => None,
     };
-    let mention = indexed
+    let requester = indexed
         .as_ref()
         .map_or_else(String::new, |event: &IndexedRelayEvent| {
             event.author_pubkey.clone()
@@ -1073,7 +1155,7 @@ where
         .unwrap_or_else(|| OutboundAttempt {
             reply_to_event_id: turn.publish_reply_to_event_id.clone(),
             thread_root_event_id: thread_root_event_id.clone(),
-            mention,
+            mention: resolved_mentions(body.unwrap_or(""), &requester, audience).join(","),
             bot_id: Some(turn.bot_id.clone()),
             ..OutboundAttempt::new(ask_id, body.unwrap_or(""), turn.channel_id.clone())
         });
@@ -1086,6 +1168,9 @@ where
             .reply_to_event_id
             .clone_from(&turn.publish_reply_to_event_id);
         attempt.thread_root_event_id = thread_root_event_id;
+        if let Some(body) = body {
+            attempt.mention = resolved_mentions(body, &requester, audience).join(",");
+        }
     }
     repository
         .save_outbound_attempt(&attempt)
@@ -1389,6 +1474,7 @@ impl InFlightReaction for RecordingInFlightReaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relay::{AudienceParticipant, AudienceSource};
     use crate::test_support::{event_id, fake_event_id, open_repo, open_repo_for, FakePublisher};
     use nostrherd_domain::BotId;
 
@@ -1446,6 +1532,48 @@ mod tests {
 
     fn notices() -> impl FnMut(&str) {
         |_| {}
+    }
+
+    fn named_audiences() -> HashMap<String, ChannelAudience> {
+        HashMap::from([(
+            crate::test_support::CHANNEL.to_owned(),
+            ChannelAudience {
+                source: AudienceSource::MemberList,
+                participants: vec![AudienceParticipant {
+                    pubkey: "d".repeat(64),
+                    display_name: Some("Rabble Hacker".to_owned()),
+                    aliases: vec![
+                        "Rabble Hacker".to_owned(),
+                        "rabble".to_owned(),
+                        "rabble-nip05".to_owned(),
+                    ],
+                }],
+            },
+        )])
+    }
+
+    fn handle_named_delivery<R, P, I>(
+        repository: &mut R,
+        publisher: &P,
+        delivery: &InboxDelivery,
+        reactions: &I,
+    ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
+    where
+        R: HostRepository,
+        P: OutboundPublisher,
+        I: InFlightReaction,
+    {
+        handle_delivery_with_feedback_and_audiences(
+            repository,
+            publisher,
+            &mut notices(),
+            delivery,
+            reactions,
+            &mut |_, _| {},
+            &OutputGuard::default(),
+            &mut |_| {},
+            &named_audiences(),
+        )
     }
 
     #[test]
@@ -1589,6 +1717,62 @@ mod tests {
     }
 
     #[test]
+    fn reply_retains_requester_and_adds_named_participant_mentions() {
+        let (mut repository, publisher) = open_repo();
+        let body = "@rabble, the review is ready";
+        let action = handle_named_delivery(
+            &mut repository,
+            &publisher,
+            &delivery("final", "ask-1", body),
+            &NoopInFlightReaction,
+        )
+        .expect("handle");
+        assert_eq!(action, InboxAction::Ack);
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &[format!("**[bot]**: {body}")]
+        );
+        assert_eq!(
+            repository
+                .outbound_attempt("ask-1")
+                .unwrap()
+                .unwrap()
+                .mention,
+            format!("{},{}", "c".repeat(64), "d".repeat(64))
+        );
+    }
+
+    #[test]
+    fn resolved_mentions_deduplicate_with_requester_first_and_cap_at_fifty() {
+        let requester = "a".repeat(64);
+        let participants = (0..51)
+            .map(|index| AudienceParticipant {
+                pubkey: if index == 0 {
+                    requester.clone()
+                } else {
+                    format!("{index:064x}")
+                },
+                display_name: Some(format!("Person {index}")),
+                aliases: vec![format!("Person {index}")],
+            })
+            .collect::<Vec<_>>();
+        let body = (0..51)
+            .map(|index| format!("@Person {index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let audience = ChannelAudience {
+            participants,
+            source: AudienceSource::MemberList,
+        };
+
+        let mentions = resolved_mentions(&body, &requester, Some(&audience));
+        assert_eq!(mentions.len(), 50);
+        assert_eq!(mentions[0], requester);
+        assert_eq!(mentions[1], format!("{:064x}", 1));
+        assert_eq!(mentions[49], format!("{:064x}", 49));
+    }
+
+    #[test]
     fn mechanical_output_scrub_refuses_secrets_and_operator_paths_privately() {
         let cases = [
             format!("credential nsec1{}", "q".repeat(58)),
@@ -1691,26 +1875,29 @@ mod tests {
     }
 
     #[test]
-    fn host_wake_final_publishes_without_a_reply_or_mention() {
+    fn host_wake_final_adds_only_body_derived_participant_mentions() {
         let (mut repository, publisher) = open_repo();
         repository.execute_batch_for_test(
             "UPDATE turns SET publish_reply_to_event_id = NULL,
                  ask_body = '## Watch event';",
         );
 
-        let action = handle_delivery(
+        let action = handle_named_delivery(
             &mut repository,
             &publisher,
-            &mut notices(),
-            &delivery("final", "ask-1", "watched author posted"),
+            &delivery("final", "ask-1", "@Rabble Hacker, watched author posted"),
+            &NoopInFlightReaction,
         )
         .expect("handle");
 
         assert_eq!(action, InboxAction::Ack);
         let attempt = repository.outbound_attempt("ask-1").unwrap().unwrap();
-        assert_eq!(attempt.body, "**[bot]**: watched author posted");
+        assert_eq!(
+            attempt.body,
+            "**[bot]**: @Rabble Hacker, watched author posted"
+        );
         assert!(attempt.reply_to_event_id.is_none());
-        assert!(attempt.mention.is_empty());
+        assert_eq!(attempt.mention, "d".repeat(64));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1952,18 +2139,17 @@ mod tests {
     fn known_occupant_tell_posts_without_trigger_reply_to() {
         let (mut repository, publisher) = open_repo();
         let reactions = RecordingInFlightReaction::default();
-        let action = handle_delivery_with(
+        let action = handle_named_delivery(
             &mut repository,
             &publisher,
-            &mut notices(),
-            &occupant_tell("tell-1", "queue is clear", Some("bot-foobar"), None),
+            &occupant_tell("tell-1", "@rabble queue is clear", Some("bot-foobar"), None),
             &reactions,
         )
         .expect("handle");
         assert_eq!(action, InboxAction::Ack);
         assert_eq!(
             publisher.calls.lock().expect("calls").as_slice(),
-            &["**[bot]**: queue is clear".to_owned()]
+            &["**[bot]**: @rabble queue is clear".to_owned()]
         );
         assert_eq!(
             publisher.reply_to.lock().expect("reply_to").as_slice(),
@@ -1977,7 +2163,7 @@ mod tests {
         );
         let attempt = repository.outbound_attempt("tell-1").unwrap().unwrap();
         assert!(attempt.reply_to_event_id.is_none());
-        assert!(attempt.mention.is_empty());
+        assert_eq!(attempt.mention, "d".repeat(64));
         assert_eq!(attempt.bot_id.as_ref().map(BotId::as_str), Some("bot"));
     }
 

@@ -46,7 +46,8 @@ progress (D42) is one host-created, host-edited stamped post per ask —
 kept on final, Buzz-deleted (kind 9005) on cancel, excluded from
 snapshots and ask Context — with its own durable progress row (D28).
 A host-initiated Turn persists its typed ask body and has no relay reply target
-or mention. Its final still uses the same stamped publish attempt and terminal
+or requester mention. Its final still resolves participant aliases named in the
+body and uses the same stamped publish attempt and terminal
 Turn transition (D45, D46). Unprompted publishes are not counted or rate
 limited by the host; how often a bot speaks is its own judgement, written
 in its corpus (D52).

@@ -53,19 +53,25 @@ impl BuzzEvent {
 /// Build a channel message (kind 9; buzz `build_message`).
 ///
 /// Tag order follows the reference builder: `h`, then NIP-10 `e` thread
-/// tags, then the mention `p`. `thread_tags` comes from
+/// tags, then deduplicated mention `p` tags (at most 50). `thread_tags` comes from
 /// [`reply_thread_tags`]; a top-level post carries none.
 #[must_use]
 pub fn channel_message(
     channel_id: &str,
     content: &str,
     thread_tags: &[Vec<String>],
-    mention: Option<&str>,
+    mentions: &[&str],
 ) -> BuzzEvent {
     let mut tags = vec![vec!["h".to_owned(), channel_id.to_owned()]];
     tags.extend(thread_tags.iter().cloned());
-    if let Some(pubkey) = mention.map(str::trim).filter(|pubkey| !pubkey.is_empty()) {
-        tags.push(vec!["p".to_owned(), pubkey.to_ascii_lowercase()]);
+    let mut seen = std::collections::HashSet::new();
+    for pubkey in mentions
+        .iter()
+        .map(|pubkey| pubkey.trim().to_ascii_lowercase())
+        .filter(|pubkey| !pubkey.is_empty() && seen.insert(pubkey.clone()))
+        .take(50)
+    {
+        tags.push(vec!["p".to_owned(), pubkey]);
     }
     BuzzEvent {
         kind: CHANNEL_MESSAGE_KIND,
@@ -217,12 +223,7 @@ mod tests {
         let trigger = event_id('a');
         let root = event_id('b');
         let thread = reply_thread_tags(&trigger, Some(&root));
-        let event = channel_message(
-            "ch-1",
-            "**[bot]**: hi",
-            &thread,
-            Some("C".repeat(64).as_str()),
-        );
+        let event = channel_message("ch-1", "**[bot]**: hi", &thread, &["C".repeat(64).as_str()]);
         assert_eq!(event.kind(), CHANNEL_MESSAGE_KIND);
         assert_eq!(event.content(), "**[bot]**: hi");
         assert_eq!(
@@ -248,11 +249,30 @@ mod tests {
 
     #[test]
     fn channel_message_skips_empty_mention_and_thread() {
-        let event = channel_message("ch-1", "hello", &[], Some("  "));
+        let event = channel_message("ch-1", "hello", &[], &["  "]);
         assert_eq!(event.tags(), &[vec!["h".to_owned(), "ch-1".to_owned()]]);
 
-        let event = channel_message("ch-1", "hello", &[], None);
+        let event = channel_message("ch-1", "hello", &[], &[]);
         assert_eq!(event.tags(), &[vec!["h".to_owned(), "ch-1".to_owned()]]);
+    }
+
+    #[test]
+    fn channel_message_deduplicates_and_caps_mentions_in_input_order() {
+        let pubkeys = (0..52)
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        let mut mentions = vec![pubkeys[0].as_str(), pubkeys[0].as_str()];
+        mentions.extend(pubkeys.iter().skip(1).map(String::as_str));
+        let event = channel_message("ch-1", "hello", &[], &mentions);
+        let tagged = event
+            .tags()
+            .iter()
+            .filter(|tag| tag.first().map(String::as_str) == Some("p"))
+            .map(|tag| &tag[1])
+            .collect::<Vec<_>>();
+        assert_eq!(tagged.len(), 50);
+        assert_eq!(tagged[0], &pubkeys[0]);
+        assert_eq!(tagged[49], &pubkeys[49]);
     }
 
     #[test]

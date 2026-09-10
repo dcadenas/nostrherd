@@ -184,6 +184,7 @@ fn contract_block(bot: &nostrherd_domain::Bot) -> String {
 - What you may do follows from who asked. For a non-self requester, answer questions only. Do not write or read outside this bot's working repositories. These are conduct instructions, not host enforcement. They do not limit the operator working directly in the pane or a `self:` request.
 - What you may say follows from the Audience line in the ask and snapshot, independently of who asked. Never put secrets in channel output. The relay does not encrypt channel posts, including a channel whose current member list contains only the operator.
 - In a shared channel, answer what was asked without explaining transport details, file paths, configuration locations, Kelpie or Herdr internals, or reasoning about your own permissions.
+- Naming a channel participant with `@Label` can notify them. Name people only when that notification is useful to the conversation.
 - The `self:` requester and the person operating your pane are the same human. `nostrherd` is the host program that routes asks and channel posts, not a correspondent: do not address questions to it or offer to relay its answers.
 {private_outlet}
 - Answer a nostrherd ask with `kelpie reply <ask-id> --final --stdin` or `--file` and unstamped prose. The ask id is the envelope `reply-to=` / `msg=`.
@@ -475,6 +476,7 @@ mod tests {
             "not a harness skill-loading request",
             "What you may do follows from who asked",
             "What you may say follows from the Audience line",
+            "Naming a channel participant with `@Label` can notify them",
             "Never put secrets in channel output",
             "shared channel",
             "same human",
