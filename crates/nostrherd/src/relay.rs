@@ -108,6 +108,7 @@ impl ChannelAudience {
     /// Resolve readable `@Label` text to unique channel participants.
     #[must_use]
     pub fn mentioned_pubkeys(&self, body: &str) -> Vec<String> {
+        let code_mask = markdown_code_mask(body);
         let mut aliases = std::collections::HashMap::<String, (String, HashSet<String>)>::new();
         for participant in &self.participants {
             for alias in &participant.aliases {
@@ -123,23 +124,14 @@ impl ChannelAudience {
 
         let mut matches = Vec::new();
         for (at, _) in body.match_indices('@') {
-            if body[..at]
-                .chars()
-                .next_back()
-                .is_some_and(is_alias_character)
-            {
+            if code_mask[at] || !valid_mention_prefix(body, at) {
                 continue;
             }
             let rest = &body[at + 1..];
             let Some((_, pubkeys)) = aliases.iter().find(|(alias, _)| {
                 rest.get(..alias.len())
                     .is_some_and(|candidate| candidate.eq_ignore_ascii_case(alias))
-                    && rest.get(alias.len()..).is_some_and(|suffix| {
-                        suffix
-                            .chars()
-                            .next()
-                            .is_none_or(|character| !is_alias_character(character))
-                    })
+                    && rest.get(alias.len()..).is_some_and(valid_mention_suffix)
             }) else {
                 continue;
             };
@@ -151,8 +143,125 @@ impl ChannelAudience {
     }
 }
 
-fn is_alias_character(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
+fn valid_mention_prefix(body: &str, at: usize) -> bool {
+    if at == 0 || body[..at].ends_with("||") {
+        return true;
+    }
+    let before = &body[..at];
+    if before
+        .chars()
+        .next_back()
+        .is_some_and(|character| character.is_whitespace() || character == '(')
+    {
+        return true;
+    }
+    before
+        .bytes()
+        .rev()
+        .take_while(|byte| matches!(byte, b'*' | b'_'))
+        .take(3)
+        .count()
+        > 0
+}
+
+fn valid_mention_suffix(suffix: &str) -> bool {
+    suffix.is_empty()
+        || suffix.starts_with("||")
+        || suffix
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_whitespace() || ",;.!?:)]}*_".contains(character))
+}
+
+fn markdown_code_mask(text: &str) -> Vec<bool> {
+    let bytes = text.as_bytes();
+    let mut masked = vec![false; bytes.len()];
+    let mut fence: Option<(u8, usize)> = None;
+    let mut start = 0;
+    while start < bytes.len() {
+        let end = bytes[start..]
+            .iter()
+            .position(|byte| matches!(byte, b'\n' | b'\r'))
+            .map_or(bytes.len(), |offset| start + offset);
+        let line = &bytes[start..end];
+        let indent = line.iter().take_while(|byte| **byte == b' ').count().min(4);
+        let marker_start = indent.min(3);
+        let marker = line.get(marker_start).copied();
+        let marker_len = marker.map_or(0, |marker| {
+            line[marker_start..]
+                .iter()
+                .take_while(|byte| **byte == marker)
+                .count()
+        });
+        let closing = fence.is_some_and(|(expected, length)| {
+            marker == Some(expected)
+                && marker_len >= length
+                && line[marker_start + marker_len..]
+                    .iter()
+                    .all(|byte| matches!(byte, b' ' | b'\t'))
+        });
+        let opening = fence.is_none()
+            && marker.is_some_and(|marker| matches!(marker, b'`' | b'~'))
+            && marker_len >= 3
+            && !(marker == Some(b'`') && line[marker_start + marker_len..].contains(&b'`'));
+        if fence.is_some() || opening || indent >= 4 || line.starts_with(b"\t") {
+            masked[start..end].fill(true);
+        }
+        if closing {
+            fence = None;
+        } else if opening {
+            fence = marker.map(|marker| (marker, marker_len));
+        }
+        let line_break = if bytes.get(end) == Some(&b'\r') && bytes.get(end + 1) == Some(&b'\n') {
+            2
+        } else {
+            usize::from(end < bytes.len())
+        };
+        start = end + line_break;
+    }
+
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'`' || masked[index] || escaped_at(bytes, index) {
+            index += 1;
+            continue;
+        }
+        let delimiter = bytes[index..]
+            .iter()
+            .take_while(|byte| **byte == b'`')
+            .count();
+        let mut closer = index + delimiter;
+        while closer < bytes.len() {
+            if bytes[closer] != b'`' || masked[closer] {
+                closer += 1;
+                continue;
+            }
+            let length = bytes[closer..]
+                .iter()
+                .take_while(|byte| **byte == b'`')
+                .count();
+            if length == delimiter {
+                masked[index..closer + length].fill(true);
+                index = closer + length;
+                break;
+            }
+            closer += length;
+        }
+        if closer >= bytes.len() {
+            index += delimiter;
+        }
+    }
+    masked
+}
+
+fn escaped_at(bytes: &[u8], index: usize) -> bool {
+    bytes[..index]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 /// Relay event emitted to the per-bot actor layer.
@@ -1123,7 +1232,7 @@ fn parse_profile(content: &str) -> Profile {
         .get("nip05")
         .and_then(serde_json::Value::as_str)
         .and_then(|nip05| nip05.trim().split_once('@').map(|(local, _)| local.trim()))
-        .filter(|local| !local.is_empty())
+        .filter(|local| !local.is_empty() && *local != "_")
     {
         aliases.push(local_part.to_owned());
     }
@@ -2247,8 +2356,18 @@ mod tests {
             vec![pollen_a.to_owned(), pollen_a.to_owned(), manager]
         );
         assert!(audience
-            .mentioned_pubkeys("@outsider, @PRManager, and mail@pollen-a")
+            .mentioned_pubkeys("@outsider, @PRManager, mail@pollen-a, /@pollen-a, @pollen-a-B")
             .is_empty());
+        assert_eq!(
+            audience.mentioned_pubkeys("_@pollen-a_ and ||@pollen-b||"),
+            vec![pollen_a.to_owned(), pollen_b.to_owned()]
+        );
+        assert!(audience
+            .mentioned_pubkeys("`@pollen-a`\n```text\n@pollen-b\n```\n    @PR Manager")
+            .is_empty());
+        assert!(!parse_profile(r#"{"nip05":"_@example.test"}"#)
+            .aliases
+            .contains(&"_".to_owned()));
     }
 
     fn indexed_target(event_id: &EventId, author: &Keys) -> IndexedRelayEvent {
