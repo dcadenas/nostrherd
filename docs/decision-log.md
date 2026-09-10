@@ -1467,7 +1467,9 @@ name fields plus the NIP-05 local part. Before publishing occupant prose, the
 host matches readable `@Label` text against that roster and adds the uniquely
 resolved participant pubkeys as `p` tags without rewriting the body. Labels may
 contain spaces, so matching chooses the longest known label at each `@` rather
-than tokenizing on whitespace.
+than tokenizing on whitespace. Mention prefixes and suffixes follow Buzz's
+literal label grammar, and Markdown code is masked before the whole match so
+examples in inline, indented, or fenced code do not notify anyone.
 
 Ambiguity is evaluated per alias and fails closed. If two distinct channel
 participants answer to `Pollen`, `@Pollen` tags neither, even when another alias

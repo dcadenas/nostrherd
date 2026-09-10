@@ -108,7 +108,7 @@ impl ChannelAudience {
     /// Resolve readable `@Label` text to unique channel participants.
     #[must_use]
     pub fn mentioned_pubkeys(&self, body: &str) -> Vec<String> {
-        let code_mask = markdown_code_mask(body);
+        let mention_text = mask_markdown_code(body);
         let mut aliases = std::collections::HashMap::<String, (String, HashSet<String>)>::new();
         for participant in &self.participants {
             for alias in &participant.aliases {
@@ -123,11 +123,11 @@ impl ChannelAudience {
         aliases.sort_by(|left, right| right.0.len().cmp(&left.0.len()).then(left.0.cmp(&right.0)));
 
         let mut matches = Vec::new();
-        for (at, _) in body.match_indices('@') {
-            if code_mask[at] || !valid_mention_prefix(body, at) {
+        for (at, _) in mention_text.match_indices('@') {
+            if !valid_mention_prefix(&mention_text, at) {
                 continue;
             }
-            let rest = &body[at + 1..];
+            let rest = &mention_text[at + 1..];
             let Some((_, pubkeys)) = aliases.iter().find(|(alias, _)| {
                 rest.get(..alias.len())
                     .is_some_and(|candidate| candidate.eq_ignore_ascii_case(alias))
@@ -173,7 +173,7 @@ fn valid_mention_suffix(suffix: &str) -> bool {
             .is_some_and(|character| character.is_whitespace() || ",;.!?:)]}*_".contains(character))
 }
 
-fn markdown_code_mask(text: &str) -> Vec<bool> {
+fn mask_markdown_code(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut masked = vec![false; bytes.len()];
     let mut fence: Option<(u8, usize)> = None;
@@ -251,7 +251,18 @@ fn markdown_code_mask(text: &str) -> Vec<bool> {
             index += delimiter;
         }
     }
-    masked
+    let masked_bytes = bytes
+        .iter()
+        .zip(masked)
+        .map(|(byte, masked)| {
+            if masked && !matches!(byte, b'\n' | b'\r') {
+                b' '
+            } else {
+                *byte
+            }
+        })
+        .collect::<Vec<_>>();
+    String::from_utf8(masked_bytes).unwrap_or_default()
 }
 
 fn escaped_at(bytes: &[u8], index: usize) -> bool {
@@ -2353,7 +2364,7 @@ mod tests {
             audience.mentioned_pubkeys(
                 "@Pollen stays ambiguous; ask @pollen-a or @verified-a. Notify @PR Manager."
             ),
-            vec![pollen_a.to_owned(), pollen_a.to_owned(), manager]
+            vec![pollen_a.to_owned(), pollen_a.to_owned(), manager.clone()]
         );
         assert!(audience
             .mentioned_pubkeys("@outsider, @PRManager, mail@pollen-a, /@pollen-a, @pollen-a-B")
@@ -2365,6 +2376,10 @@ mod tests {
         assert!(audience
             .mentioned_pubkeys("`@pollen-a`\n```text\n@pollen-b\n```\n    @PR Manager")
             .is_empty());
+        assert_eq!(
+            audience.mentioned_pubkeys("@PR Manager`--dry-run` next"),
+            vec![manager]
+        );
         assert!(!parse_profile(r#"{"nip05":"_@example.test"}"#)
             .aliases
             .contains(&"_".to_owned()));
