@@ -96,7 +96,7 @@ fn adopt() -> CommandOutput {
 
 fn start() -> CommandOutput {
     success(&serde_json::json!({
-        "logical_agent_id": "occupant-agent",
+        "logical_agent_id": 1990,
         "incarnation_id": "occupant-incarnation",
         "runtime_start": {
             "operation_id": "start-operation",
@@ -112,7 +112,7 @@ fn start() -> CommandOutput {
 
 fn whoami() -> CommandOutput {
     success(&serde_json::json!({
-        "logical_agent_id": "occupant-agent",
+        "logical_agent_id": 1990,
         "incarnation_id": "occupant-incarnation",
         "public_name": "bot-foobar"
     }))
@@ -122,7 +122,7 @@ fn asked(message_id: &str) -> CommandOutput {
     success(&serde_json::json!({
         "message_id": message_id,
         "operation_id": "ask-operation",
-        "recipient": "occupant-agent",
+        "recipient": 1990,
         "delivery_outcome": "accepted"
     }))
 }
@@ -130,7 +130,7 @@ fn asked(message_id: &str) -> CommandOutput {
 fn renewed() -> CommandOutput {
     success(&serde_json::json!({
         "renew_id": "renew-id",
-        "recipient": "occupant-agent",
+        "recipient": 1990,
         "recipient_incarnation": "occupant-incarnation",
         "scheduled_at_ms": 1,
         "on_timeout": "abort",
@@ -593,10 +593,7 @@ fn non_uuid_channel_starts_an_occupant_and_publishes_its_answer() {
         .expect("session query")
         .expect("session");
     assert_eq!(session.session_name, "bot-foobar");
-    assert_eq!(
-        session.occupant_logical_id.as_deref(),
-        Some("occupant-agent")
-    );
+    assert_eq!(session.occupant_logical_id.as_deref(), Some("1990"));
     assert_eq!(
         harness.panes.calls.lock().expect("panes")[0].0,
         "bot-foobar"
@@ -1018,7 +1015,7 @@ fn flow_09_gone_pane_continues_the_logical_agent() {
         .clone();
     assert!(continued
         .windows(2)
-        .any(|pair| pair == ["--logical-id", "occupant-agent"]));
+        .any(|pair| pair == ["--logical-id", "1990"]));
 }
 
 #[test]

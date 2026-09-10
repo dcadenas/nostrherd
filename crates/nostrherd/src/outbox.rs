@@ -1672,12 +1672,7 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &occupant_tell(
-                "tell-both",
-                "both fields",
-                Some("bot-foobar"),
-                Some("occupant-agent"),
-            ),
+            &occupant_tell("tell-both", "both fields", Some("bot-foobar"), Some("1990")),
         )
         .expect("handle");
         assert_eq!(
@@ -1758,7 +1753,7 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &occupant_tell("tell-4", "from id", None, Some("occupant-agent")),
+            &occupant_tell("tell-4", "from id", None, Some("1990")),
         )
         .expect("handle");
         assert_eq!(

@@ -523,6 +523,12 @@ struct RelayPoll {
     announced: bool,
     subscription_error: Option<SubscriptionErrorNotice>,
     last_retry_error: Option<String>,
+    /// Deduped separately from `last_retry_error`, which a good fetch clears.
+    ///
+    /// Resuming queued work runs on its own timer, so an error here repeats at
+    /// that cadence for as long as the cause lasts. Reporting each repeat once
+    /// buried the one line that mattered under hundreds of identical ones.
+    last_resume_error: Option<String>,
     last_queued_resume: Instant,
     last_channel_ids: Vec<String>,
     last_active_event_ids: Vec<EventId>,
@@ -710,10 +716,15 @@ async fn poll_relay(
         .await?;
     }
     if poll.last_queued_resume.elapsed() >= RESUME_QUEUED_EVERY {
+        let mut failure = None;
         for actor in actors.iter_mut() {
             if let Err(error) = actor.resume_queued(kelpie, waiter) {
-                eprintln!("queued occupant resume failed: {error}");
+                failure = Some(format!("queued occupant resume failed: {error}"));
             }
+        }
+        match failure {
+            Some(message) => note_retry(&mut poll.last_resume_error, message),
+            None => poll.last_resume_error = None,
         }
         poll.last_queued_resume = Instant::now();
     }
@@ -848,6 +859,7 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
         announced: false,
         subscription_error: None,
         last_retry_error: None,
+        last_resume_error: None,
         last_queued_resume: Instant::now(),
         last_channel_ids: Vec::new(),
         last_active_event_ids: Vec::new(),
@@ -1309,6 +1321,7 @@ mod tests {
                 last_reported: Instant::now(),
             }),
             last_retry_error: None,
+            last_resume_error: None,
             last_queued_resume: Instant::now(),
             last_channel_ids: channel_ids.clone(),
             last_active_event_ids: active_event_ids.clone(),

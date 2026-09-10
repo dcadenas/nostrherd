@@ -6,6 +6,23 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.7
+
+- Forget occupant identities recorded before Kelpie renumbered its agents. A
+  session stored a `UUIDv7` agent id, which the integer-id daemon refuses on
+  sight, so the host retried a start that could never succeed — once a second,
+  forever, while the channel stayed silent and the trigger sat queued. On first
+  start this version clears those ids and their recorded start attempts, naming
+  each session it clears.
+
+  **Action**: none. Affected channels start a fresh occupant on their next
+  trigger, and work queued behind the failure is delivered rather than lost.
+  Those occupants lose their Kelpie conversation continuity, which was already
+  unreachable.
+
+- A repeated queued-resume failure is reported once, not on every retry. The
+  identical line every second is what buried the one that named the cause.
+
 ## 0.1.0-alpha.6
 
 - Pin Kelpie `0.2.0-alpha.5` in the README. crates.io `0.2.0-alpha.4` is the

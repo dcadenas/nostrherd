@@ -106,6 +106,54 @@ fn backfill_outbound_bot_id(connection: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// True for the only shape Kelpie accepts as a logical agent id.
+///
+/// Kelpie's ids are `serde(transparent)` newtypes over `NonZeroU64`, so an id
+/// that is not a positive decimal integer is not merely unknown to the daemon:
+/// it is refused before any lookup, and no amount of retrying makes it valid.
+pub(crate) fn is_kelpie_id(value: &str) -> bool {
+    value.parse::<u64>().is_ok_and(|id| id != 0)
+}
+
+/// Forget occupant identities recorded before Kelpie renumbered its agents.
+///
+/// Kelpie replaced `UUIDv7` agent ids with integers and did not carry the old
+/// ids forward, so every session recorded before that migration points at an
+/// identity the daemon will never accept. The host had no way to notice: it
+/// passed the stored id to `kelpie start --logical-id`, got a hard refusal,
+/// and retried once a second forever while the channel stayed silent.
+///
+/// Clearing the id lets the session start a fresh occupant. The recorded start
+/// attempt has to go with it, because it carries the same dead id in its launch
+/// JSON and would otherwise be reconciled instead of a clean start.
+fn drop_pre_integer_occupant_ids(connection: &Connection) -> rusqlite::Result<()> {
+    let stale: Vec<(String, Option<String>)> = connection
+        .prepare("SELECT session_name, occupant_logical_id FROM sessions")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, id): &(String, Option<String>)| {
+            id.as_deref().is_some_and(|id| !is_kelpie_id(id))
+        })
+        .collect();
+    for (session_name, occupant_logical_id) in &stale {
+        connection.execute(
+            "UPDATE sessions SET occupant_logical_id = NULL, renew_id = NULL
+             WHERE session_name = ?1",
+            [session_name],
+        )?;
+        connection.execute(
+            "DELETE FROM occupant_starts WHERE session_name = ?1",
+            [session_name],
+        )?;
+        eprintln!(
+            "session {session_name} forgot occupant {}: not a Kelpie id; starting a fresh occupant",
+            occupant_logical_id.as_deref().unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
 fn migrate_turn_wake_columns(connection: &Connection) -> rusqlite::Result<()> {
     if !column_exists(connection, "turns", "ask_body")? {
         connection.execute("ALTER TABLE turns ADD COLUMN ask_body TEXT", [])?;
@@ -185,6 +233,7 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE outbound_attempts ADD COLUMN abandoned_at INTEGER",
     )?;
     backfill_outbound_bot_id(connection)?;
+    drop_pre_integer_occupant_ids(connection)?;
     connection.execute_batch(
         "DROP INDEX IF EXISTS progress_posts_pending_flush;
          CREATE INDEX progress_posts_pending_flush
@@ -1669,6 +1718,76 @@ mod tests {
             retry_noticed_at: None,
             delete_pending: false,
         }
+    }
+
+    #[test]
+    fn only_a_positive_integer_is_a_kelpie_id() {
+        assert!(is_kelpie_id("1990"));
+        assert!(!is_kelpie_id("0"));
+        assert!(!is_kelpie_id("-1"));
+        assert!(!is_kelpie_id(""));
+        assert!(!is_kelpie_id("01a068f7-fc0e-7172-8dfc-4fc1a54ec66c"));
+    }
+
+    /// A session recorded before Kelpie renumbered its agents must start over.
+    ///
+    /// The stored UUID is refused by the daemon on sight, so keeping it means
+    /// retrying a start that can never succeed. The recorded start attempt has
+    /// to go too: it carries the same dead id and would be reconciled instead.
+    #[test]
+    fn an_occupant_id_from_before_the_integer_ids_is_forgotten() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot = BotId::new("bot").unwrap();
+        let mut record = session(&bot, "channel");
+        record.occupant_logical_id = Some("01a068f7-fc0e-7172-8dfc-4fc1a54ec66c".to_owned());
+        record.renew_id = Some("01a06902-cf56-7462-ad91-6a7e6f0bb7fe".to_owned());
+        repository.save_session(&record).expect("save");
+        repository
+            .connection
+            .execute(
+                "INSERT INTO occupant_starts(
+                     session_name, attempt_key, attempt_json, created_at, updated_at)
+                 VALUES (?1, 'key', '{}', 0, 0)",
+                [&record.session_name],
+            )
+            .expect("recorded start");
+
+        drop_pre_integer_occupant_ids(&repository.connection).expect("migration");
+
+        let reloaded = repository
+            .session_by_name(&record.session_name)
+            .expect("query")
+            .expect("session");
+        assert_eq!(reloaded.occupant_logical_id, None);
+        assert_eq!(reloaded.renew_id, None);
+        let starts: i64 = repository
+            .connection
+            .query_row("SELECT count(*) FROM occupant_starts", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(starts, 0);
+    }
+
+    #[test]
+    fn an_integer_occupant_id_survives_the_migration() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot = BotId::new("bot").unwrap();
+        let mut record = session(&bot, "channel");
+        record.occupant_logical_id = Some("1990".to_owned());
+        record.renew_id = Some("2796".to_owned());
+        repository.save_session(&record).expect("save");
+
+        drop_pre_integer_occupant_ids(&repository.connection).expect("migration");
+
+        let reloaded = repository
+            .session_by_name(&record.session_name)
+            .expect("query")
+            .expect("session");
+        assert_eq!(reloaded.occupant_logical_id.as_deref(), Some("1990"));
+        assert_eq!(reloaded.renew_id.as_deref(), Some("2796"));
     }
 
     #[test]
