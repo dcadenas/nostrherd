@@ -119,6 +119,25 @@ fn backfill_outbound_bot_id(connection: &Connection) -> rusqlite::Result<()> {
 /// and `UNIQUE(bot_id, channel_id)`. Dropping the column removes the drift
 /// rather than handling it: what is never stored cannot go stale. The recorded
 /// start attempts go with it, since each is keyed to a seat that is now dead.
+/// How the running build relates to the one that last opened the database.
+///
+/// Recorded because nothing did: an operator upgrading had no way to tell which
+/// build had shaped the database, and a downgrade was undetectable. Migrations
+/// only go forward — [`migrate_to_name_identity`] drops a column — so an older
+/// build cannot restore what a newer one removed and will write rows missing
+/// whatever it does not know about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostVersionChange {
+    /// No version recorded: a new database, or one from before this was kept.
+    FirstRun,
+    /// The same build as last time.
+    Unchanged,
+    /// A newer build than last time.
+    Upgraded { from: String },
+    /// An older build than last time, which the database cannot go back to.
+    Downgraded { from: String },
+}
+
 fn migrate_to_name_identity(connection: &Connection) -> rusqlite::Result<()> {
     if column_exists(connection, "sessions", "occupant_logical_id")? {
         connection.execute_batch(
@@ -352,6 +371,11 @@ impl SqliteRepository {
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
 
+             CREATE TABLE IF NOT EXISTS host_meta (
+                 key TEXT PRIMARY KEY NOT NULL,
+                 value TEXT NOT NULL
+             ) STRICT;
+
              CREATE TABLE IF NOT EXISTS processed_events (
                  event_id TEXT PRIMARY KEY NOT NULL
                      CHECK(length(event_id) = 64)
@@ -496,6 +520,54 @@ impl SqliteRepository {
         migrate_progress_posts_without_dispatched(&connection)?;
         run_column_migrations(&connection)?;
         Ok(Self { connection })
+    }
+
+    /// Compare the running build against the one that last opened this database.
+    ///
+    /// Records `running` unless it would move the stamp backwards, so a refused
+    /// downgrade leaves the database saying which build actually shaped it.
+    /// Reports the fact only; refusing is the caller's policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `host_meta` cannot be read or written, or when
+    /// either version is not valid semver.
+    pub fn record_host_version(&self, running: &str) -> rusqlite::Result<HostVersionChange> {
+        let stored: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM host_meta WHERE key = 'host_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let change = match stored {
+            None => HostVersionChange::FirstRun,
+            Some(stored) if stored == running => HostVersionChange::Unchanged,
+            Some(stored) => {
+                // Text order is not version order: alpha.10 sorts before
+                // alpha.9, which is the one comparison this has to get right.
+                let parse = |text: &str| {
+                    semver::Version::parse(text).map_err(|error| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            format!("{text} is not a version: {error}"),
+                            rusqlite::types::Type::Text,
+                        )
+                    })
+                };
+                if parse(running)? < parse(&stored)? {
+                    return Ok(HostVersionChange::Downgraded { from: stored });
+                }
+                HostVersionChange::Upgraded { from: stored }
+            }
+        };
+        self.connection.execute(
+            "INSERT INTO host_meta(key, value) VALUES('host_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [running],
+        )?;
+        Ok(change)
     }
 
     #[cfg(test)]
@@ -1624,6 +1696,71 @@ mod tests {
 
     /// A database written before D62 loses its stored identity on open.
     ///
+    /// A database remembers which build shaped it, and says so once.
+    #[test]
+    fn the_host_version_is_recorded_and_reported_only_when_it_changes() {
+        let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+            .expect("repository");
+        assert_eq!(
+            repository.record_host_version("0.1.0-alpha.9").unwrap(),
+            HostVersionChange::FirstRun
+        );
+        assert_eq!(
+            repository.record_host_version("0.1.0-alpha.9").unwrap(),
+            HostVersionChange::Unchanged
+        );
+        assert_eq!(
+            repository.record_host_version("0.1.0-alpha.10").unwrap(),
+            HostVersionChange::Upgraded {
+                from: "0.1.0-alpha.9".to_owned()
+            }
+        );
+    }
+
+    /// Text order is not version order, and this is the comparison that breaks
+    /// first: `alpha.10` sorts before `alpha.9` as a string, so a lexical
+    /// compare would call the next upgrade a downgrade and refuse to start.
+    #[test]
+    fn a_double_digit_prerelease_is_newer_than_a_single_digit_one() {
+        let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+            .expect("repository");
+        repository.record_host_version("0.1.0-alpha.9").unwrap();
+        assert_eq!(
+            repository.record_host_version("0.1.0-alpha.10").unwrap(),
+            HostVersionChange::Upgraded {
+                from: "0.1.0-alpha.9".to_owned()
+            }
+        );
+        assert_eq!(
+            repository.record_host_version("0.1.0-alpha.9").unwrap(),
+            HostVersionChange::Downgraded {
+                from: "0.1.0-alpha.10".to_owned()
+            }
+        );
+    }
+
+    /// A refused downgrade must not rewrite the stamp. If it did, the second
+    /// attempt would look like a first run and the guard would let it through.
+    #[test]
+    fn a_downgrade_leaves_the_stamp_on_the_build_that_shaped_the_database() {
+        let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+            .expect("repository");
+        repository.record_host_version("0.1.0-alpha.10").unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                repository.record_host_version("0.1.0-alpha.9").unwrap(),
+                HostVersionChange::Downgraded {
+                    from: "0.1.0-alpha.10".to_owned()
+                },
+                "a repeated downgrade stays refused"
+            );
+        }
+        assert_eq!(
+            repository.record_host_version("0.1.0-alpha.10").unwrap(),
+            HostVersionChange::Unchanged
+        );
+    }
+
     /// The column and the start attempts are the two places a dead Kelpie id
     /// could hide, and either one stops a channel: the id is refused on sight,
     /// and a recorded attempt is keyed to a seat that no longer exists.

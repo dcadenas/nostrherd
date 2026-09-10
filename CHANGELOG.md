@@ -6,6 +6,25 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.10
+
+- The database records which build opened it, so an upgrade says what it came
+  from and a downgrade is refused (D64). Migrations only go forward — alpha.8's
+  drops a column — so an older build cannot restore what a newer one removed and
+  would write rows missing whatever it does not know about. Nothing checked for
+  that before.
+
+  On an upgrade the host prints one line naming both versions. On a downgrade it
+  refuses to start and says how to recover: reinstall the newer build, or restore
+  a backup taken before it ran. `nostrherd --check` reports either one without
+  connecting to Kelpie or the relay, so run it before restarting.
+
+  **Action**: none. The guard binds from this version onward — a downgrade to
+  alpha.9 or earlier is unprotected, because those builds have no such check.
+
+- The `nostrherd connected` log line carries the version, so a log says which
+  build wrote it.
+
 ## 0.1.0-alpha.9
 
 - The binary is the whole install, so `cargo install` works and a git

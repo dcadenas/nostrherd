@@ -252,3 +252,30 @@ upgrade-smoke:
     sqlite3 "${db}" "SELECT session_name FROM sessions;" | grep -qx 'mybot-a-channel' \
         || { echo "upgrade-smoke: the session itself was lost" >&2; exit 1; }
     echo "upgrade-smoke: a pre-D62 stored identity was dropped, the session kept"
+
+    # The database records which build shaped it (D64), so an upgrade is
+    # reported and a downgrade is refused rather than silently losing whatever
+    # the older build does not know how to write.
+    version=$(just version)
+    stamped=$(sqlite3 "${db}" "SELECT value FROM host_meta WHERE key = 'host_version';")
+    if [[ "${stamped}" != "${version}" ]]; then
+        echo "upgrade-smoke: database says ${stamped:-<nothing>}, binary is ${version}" >&2
+        exit 1
+    fi
+
+    # Claim a far-future build opened it, which no release can ever be behind.
+    sqlite3 "${db}" "UPDATE host_meta SET value = '99.0.0' WHERE key = 'host_version';"
+    if run --check 2>"${root}/refused"; then
+        echo "upgrade-smoke: started against a database from a newer build" >&2
+        exit 1
+    fi
+    grep -q 'Migrations only go forward' "${root}/refused" \
+        || { echo "upgrade-smoke: refused, but not for the reason it should:" >&2
+             cat "${root}/refused" >&2; exit 1; }
+    # A refused start must not claim the database, or the retry would sail past.
+    still=$(sqlite3 "${db}" "SELECT value FROM host_meta WHERE key = 'host_version';")
+    if [[ "${still}" != "99.0.0" ]]; then
+        echo "upgrade-smoke: a refused downgrade rewrote the stamp to ${still}" >&2
+        exit 1
+    fi
+    echo "upgrade-smoke: the host stamps its version and refuses to run behind it"

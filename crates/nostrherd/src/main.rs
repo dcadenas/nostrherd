@@ -26,7 +26,7 @@ use nostrherd::progress::{BackgroundProgressRelay, ProgressRelay};
 use nostrherd::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
 };
-use nostrherd::sqlite::SqliteRepository;
+use nostrherd::sqlite::{HostVersionChange, SqliteRepository};
 use nostrherd::{
     unix_now, HostRepository, HostWaiter, KelpieClient, KelpieError, WAITER_IDEMPOTENCY_KEY,
 };
@@ -127,6 +127,10 @@ enum HostError {
     Kelpie(KelpieError),
     Actor(ActorError<rusqlite::Error>),
     NoBots,
+    Downgrade {
+        stored: String,
+        running: &'static str,
+    },
     NotificationClosed,
     InboxClosed,
     Path(nostrherd::paths::PathError),
@@ -191,6 +195,10 @@ impl fmt::Display for HostError {
             Self::Kelpie(error) => write!(formatter, "{error}"),
             Self::Actor(error) => write!(formatter, "{error}"),
             Self::NoBots => formatter.write_str("bot config has no bots; run nostrherd init <dir> to register one (use --config for a custom registry)"),
+            Self::Downgrade { stored, running } => write!(
+                formatter,
+                "this database was last opened by nostrherd {stored}, and {running} is older. Migrations only go forward, so {running} cannot restore what {stored} changed and would write rows missing what it does not know about. Reinstall {stored} or newer, or restore a backup taken before {stored} first ran."
+            ),
             Self::NotificationClosed => formatter.write_str("relay notification channel closed"),
             Self::InboxClosed => formatter.write_str("kelpie inbox closed"),
         }
@@ -217,6 +225,7 @@ impl std::error::Error for HostError {
             | Self::MissingRegistry(_)
             | Self::InvalidOperatorKey
             | Self::NoBots
+            | Self::Downgrade { .. }
             | Self::NotificationClosed
             | Self::InboxClosed
             | Self::MissingInitArg(_)
@@ -299,7 +308,32 @@ fn load_host(config: &Path, database: &Path) -> Result<(BotRegistry, SqliteRepos
             error,
         })?;
     }
-    Ok((registry, SqliteRepository::open(database)?))
+    let repository = SqliteRepository::open(database)?;
+    report_host_version(&repository)?;
+    Ok((registry, repository))
+}
+
+/// Stamp the running build on the database, refusing to run behind it (D64).
+///
+/// Placed here so `--check` reports the change before a restart commits to it,
+/// which is the whole point of running `--check` after an upgrade.
+fn report_host_version(repository: &SqliteRepository) -> Result<(), HostError> {
+    let running = env!("CARGO_PKG_VERSION");
+    match repository.record_host_version(running)? {
+        HostVersionChange::FirstRun | HostVersionChange::Unchanged => {}
+        HostVersionChange::Upgraded { from } => {
+            eprintln!(
+                "nostrherd upgraded {from} -> {running}; see CHANGELOG.md for anything to do"
+            );
+        }
+        HostVersionChange::Downgraded { from } => {
+            return Err(HostError::Downgrade {
+                stored: from,
+                running,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn waiter_key_path(database: &Path) -> PathBuf {
@@ -657,7 +691,7 @@ async fn poll_relay(
                 poll.last_watched_author_pubkeys
                     .clone_from(&scope.watched_author_pubkeys);
                 if !poll.announced {
-                    eprintln!("nostrherd connected");
+                    eprintln!("nostrherd {} connected", env!("CARGO_PKG_VERSION"));
                     poll.announced = true;
                 }
             }

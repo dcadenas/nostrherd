@@ -123,10 +123,16 @@ any schema migrations, and exits without needing the key or Kelpie, so it
 is the safe way to find out whether the new build accepts your setup
 before you restart into it.
 
-`nostrherd --version` reports the build you are running. Compare it
-against [`CHANGELOG.md`](CHANGELOG.md), which is written as what an
-operator has to do rather than what a commit touched; most entries say
-**Action**: none.
+The database records which build last opened it, so `--check` names what
+you upgraded from. Read those versions in
+[`CHANGELOG.md`](CHANGELOG.md), which is written as what an operator has
+to do rather than what a commit touched; most entries say **Action**:
+none. `nostrherd --version` reports the build you are running.
+
+Downgrading is refused. Migrations only go forward, so an older build
+cannot restore what a newer one changed and would write rows missing what
+it does not know about. To go back, restore a database backup from before
+the newer build first ran.
 
 ## Create a bot
 

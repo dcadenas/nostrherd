@@ -1352,3 +1352,35 @@ host: it ships in the build, so changing it means rebuilding, which
 `just smoke` runs a relocated copy of the binary with no checkout and no
 `skills/` beside it, which is the shape `cargo install` produces, because
 building in place was the one arrangement that could never catch this.
+
+## D64. The database records the build that shaped it, and refuses an older one
+
+Status: accepted
+
+Nothing recorded which build had opened a database. An operator upgrading had
+no way to tell what they were coming from, so `CHANGELOG.md` could not be read
+selectively: every entry was equally maybe-relevant. Worse, a downgrade was
+undetectable. Migrations only go forward — D62's drops a column — so an older
+build cannot restore what a newer one removed, and it writes rows missing every
+column it does not know about. That is silent data loss with no check anywhere.
+
+A `host_meta` key-value table holds `host_version`. The repository compares the
+running build against the stored one and reports the fact; refusing is the
+host's policy, not the repository's. An upgrade prints one line naming both
+versions and pointing at `CHANGELOG.md`. A downgrade fails startup, and the
+message says why the database cannot go back and what the operator can do
+instead: reinstall the newer build, or restore a backup taken before it ran.
+
+The stamp is written after migrations succeed, so a half-applied migration
+leaves the database naming the build that last fully shaped it. A refused
+downgrade does not write, because a guard that claims the database on the
+attempt it rejects lets the retry through.
+
+Versions are compared as semver, not as text. `alpha.10` sorts before `alpha.9`
+as a string, so a lexical compare would call the next upgrade a downgrade and
+refuse to start on it. That is the one comparison this has to get right, which
+is why the `semver` crate is a dependency rather than a hand-rolled split.
+
+The check runs in `load_host`, so `--check` reports the change before a restart
+commits to it. This guard binds only from this version onward: a downgrade to a
+build that predates it is unprotected, because the older build has no such code.
