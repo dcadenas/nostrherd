@@ -130,19 +130,24 @@ fn unbound() -> CommandOutput {
     failure("conflict", "no ready agent for alias bot-foobar")
 }
 
-/// `who --history` for a name Kelpie has never recorded.
+/// `who --resolve` for a name nothing has ever held.
 fn no_claimants() -> CommandOutput {
-    success(&serde_json::json!({"claimants": [], "name": "bot-foobar"}))
+    failure("conflict", "no ready agent for alias bot-foobar")
 }
 
-/// `who --history` for a name whose runtimes have all ended.
+/// `who --resolve` for a name whose runtimes have all ended.
 fn dead_claimants() -> CommandOutput {
     success(&serde_json::json!({
-        "name": "bot-foobar",
+        "public_name": "bot-foobar",
+        "addressable": false,
+        "continue": "newest_claimant",
+        "logical_agent_id": 1990,
+        "incarnation_id": null,
         "claimants": [
             {"logical_agent_id": "1611", "created_at_ms": 1, "live": false},
             {"logical_agent_id": "1990", "created_at_ms": 9, "live": false},
-        ]
+        ],
+        "unresolved": []
     }))
 }
 

@@ -6,6 +6,23 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.11
+
+- Kelpie picks the identity a restarted occupant continues, instead of the host
+  reading the claimant history and choosing the newest itself (D65). The host
+  now calls `who <name> --resolve` and uses the answer. Same outcome in the
+  normal case, one call instead of a policy the host had no business owning.
+
+  **Action**: upgrade Kelpie first, then the host.
+
+      cargo install kelpie-herdr --version 0.2.0-alpha.6
+      cargo install --git https://github.com/dcadenas/nostrherd --tag v0.1.0-alpha.11 --force
+
+  and restart `kelpied` and the host. This version requires Kelpie
+  `0.2.0-alpha.6`: earlier releases have no `--resolve`, so every restart of a
+  dead occupant would fail against them. Upgrading the host first leaves it
+  unable to recover a channel until Kelpie catches up.
+
 ## 0.1.0-alpha.10
 
 - The database records which build opened it, so an upgrade says what it came

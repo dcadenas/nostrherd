@@ -1384,3 +1384,39 @@ is why the `semver` crate is a dependency rather than a hand-rolled split.
 The check runs in `load_host`, so `--check` reports the change before a restart
 commits to it. This guard binds only from this version onward: a downgrade to a
 build that predates it is unprotected, because the older build has no such code.
+
+## D65. Kelpie resolves a name to the identity to continue
+
+Status: accepted
+
+Refines D62, which kept the policy in the host because Kelpie had no way to
+answer the question. It does now, so the host stops deciding.
+
+D62 needed one thing Kelpie would not give it: given a name whose runtimes have
+all ended, which identity should the replacement continue? `whoami` answers only
+while a claimant is live and reports a conflict otherwise, so the host read the
+full claimant history and picked the newest by `created_at_ms`. That worked, and
+it put a coordination policy in a consumer. Every other consumer would have
+written the same loop slightly differently, and they would have drifted.
+
+`kelpie who <name> --resolve` (dcadenas/kelpie#49, released in `0.2.0-alpha.6`)
+returns the continue target directly: the uniquely addressable claimant, or the
+newest logical agent still holding the name. The host asks and uses the answer.
+The claimant list and unresolved asks come back in the same result, so it is a
+stated choice rather than a silent guess.
+
+An unheld name still comes back as the same `no ready agent for alias` conflict
+that an unbound `whoami` gives, which the host already reads as "nothing to
+continue, start fresh". A name whose claimants are merely dead now resolves
+successfully instead, which is the case D62 exists for. Those two answers are
+what the host distinguishes; nothing else about the receipt is read.
+
+The resolved `logical_agent_id` is a JSON number at the top level and a string
+inside `claimants`. The host reads it through the same accessor that takes
+either, which is what alphas 4 and 5 were spent on. Do not reintroduce a
+string-only read.
+
+This raises the floor to Kelpie `0.2.0-alpha.6`. Herdr's dead-pane gap is
+untouched — `agent rename --clear` still answers `agent_not_found` on an
+agentless pane — so the pane reclaim in `restart_occupant` stays load-bearing
+rather than being a workaround waiting to be removed.

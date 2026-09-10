@@ -1298,8 +1298,7 @@ where
         }
         let continue_as = kelpie
             .resolve_name(&session.session_name)
-            .map_err(ActorError::Kelpie)?
-            .map(|claimant| claimant.logical_agent_id);
+            .map_err(ActorError::Kelpie)?;
         let started = self.fresh_start(
             kelpie,
             waiter,
@@ -1756,19 +1755,31 @@ mod tests {
         failure("conflict", "no ready agent for alias bot-foobar")
     }
 
-    /// `who --history` for a name Kelpie has never recorded.
+    /// `who --resolve` for a name nothing has ever held.
+    ///
+    /// Kelpie answers this with the same conflict as an unbound `whoami`, so
+    /// the host reads it as "nothing to continue" rather than as a failure.
     fn no_claimants() -> CommandOutput {
-        success(&serde_json::json!({"claimants": [], "name": "bot-foobar"}))
+        failure("conflict", "no ready agent for alias bot-foobar")
     }
 
-    /// `who --history` for a name whose runtimes have all ended.
+    /// `who --resolve` for a name whose runtimes have all ended.
+    ///
+    /// Shaped from a real receipt: `logical_agent_id` is a JSON number at the
+    /// top level and a string inside `claimants`, and Kelpie resolves a name
+    /// with no live claimant rather than reporting a conflict for it.
     fn dead_claimants() -> CommandOutput {
         success(&serde_json::json!({
-            "name": "bot-foobar",
+            "public_name": "bot-foobar",
+            "addressable": false,
+            "continue": "newest_claimant",
+            "logical_agent_id": 1990,
+            "incarnation_id": null,
             "claimants": [
                 {"logical_agent_id": "1611", "created_at_ms": 1, "live": false},
                 {"logical_agent_id": "1990", "created_at_ms": 9, "live": false},
-            ]
+            ],
+            "unresolved": []
         }))
     }
 
@@ -2615,13 +2626,22 @@ mod tests {
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
             .expect("asked");
 
+        {
+            let calls = runner.calls.lock().expect("calls");
+            let (who, _) = call(&calls, "who");
+            assert!(
+                who.iter().any(|argument| argument == "--resolve"),
+                "Kelpie picks the identity to continue, so the host must ask it to: {who:?}"
+            );
+        }
+
         let continued = continued_starts(&runner);
         assert_eq!(continued.len(), 1);
         assert!(
             continued[0]
                 .windows(2)
                 .any(|pair| pair == ["--logical-id", "1990"]),
-            "1990 was created after 1611, so it is the identity to continue: {:?}",
+            "the resolved id is a JSON number, and reaches the start as 1990: {:?}",
             continued[0]
         );
     }

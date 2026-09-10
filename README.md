@@ -26,9 +26,10 @@ accordingly.
 Alpha, and built for its author's own use. The database schema, the
 channel conventions, and the corpus contract all still change. Herdr and
 Kelpie are alpha too. Build Herdr from current sources and install Kelpie
-`0.2.0-alpha.5` as shown below. Earlier Kelpie releases spell ids differently
-on the wire, and this host will not receive replies from them. Check
-compatibility when upgrading either dependency.
+`0.2.0-alpha.6` as shown below; the host requires it. Earlier releases spell
+ids differently on the wire, so this host will not receive replies from them,
+and none before alpha.6 can tell it which identity to continue after an
+occupant dies. Check compatibility when upgrading either dependency.
 
 ## How it works
 
@@ -61,7 +62,7 @@ running. nostrherd cannot start an agent while Herdr is stopped.
 host and the agents. Install it and leave `kelpied` running:
 
 ```bash
-cargo install kelpie-herdr --version 0.2.0-alpha.5
+cargo install kelpie-herdr --version 0.2.0-alpha.6
 kelpied
 ```
 

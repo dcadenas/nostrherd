@@ -56,15 +56,6 @@ pub struct OccupantLaunch {
     pub backend_session: Option<String>,
 }
 
-/// One logical agent that has held a public name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NameClaimant {
-    pub logical_agent_id: String,
-    pub created_at_ms: i64,
-    /// Whether Kelpie can address this claimant right now.
-    pub live: bool,
-}
-
 /// Short trusted body used only to finish `kelpie start --tell`.
 pub const OCCUPANT_BOOTSTRAP: &str =
     "Read startup.md before answering. Wait for Kelpie asks from nostrherd.";
@@ -191,7 +182,7 @@ pub enum KelpieError {
 impl fmt::Display for KelpieError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(error) => write!(formatter, "failed to invoke Kelpie: {error}; install with cargo install kelpie-herdr --version 0.2.0-alpha.4 and start kelpied"),
+            Self::Io(error) => write!(formatter, "failed to invoke Kelpie: {error}; install with cargo install kelpie-herdr --version 0.2.0-alpha.6 and start kelpied"),
             Self::Rejected { status, stderr } => {
                 write!(formatter, "Kelpie exited with {status}: {stderr}; check that kelpied is running and KELPIE_SOCKET selects its socket")
             }
@@ -395,50 +386,33 @@ impl KelpieClient {
     ///
     /// A logical agent outlives its runtimes, so a name accumulates claimants:
     /// each incarnation Kelpie ever recorded under it. `whoami` answers only
-    /// while one is live and reports a conflict otherwise, so continuing a
-    /// name after its runtime died means choosing from the history. The newest
-    /// claimant is the one whose conversation the channel was last having.
+    /// while one is live, so continuing a name after its runtime died means
+    /// choosing among the dead. `--resolve` makes that choice: the uniquely
+    /// addressable claimant, or the newest logical agent still holding the
+    /// name. Kelpie owns the policy, because every consumer otherwise
+    /// reimplements it and they drift.
     ///
-    /// Returns `None` when no claimant has ever held the name, which is the
-    /// signal to start fresh (D62).
+    /// Returns `None` when nothing has ever held the name, which is the signal
+    /// to start fresh (D62).
+    ///
+    /// Requires Kelpie `0.2.0-alpha.6`, which added `--resolve`.
     ///
     /// # Errors
     ///
     /// Returns an error when Kelpie cannot be invoked or answers unreadably.
-    pub fn resolve_name(&self, name: &str) -> Result<Option<NameClaimant>, KelpieError> {
-        let output = self.invoke(&["--json", "who", name, "--history"], &[])?;
+    pub fn resolve_name(&self, name: &str) -> Result<Option<String>, KelpieError> {
+        let output = self.invoke(&["--json", "who", name, "--resolve"], &[])?;
         if !output.success {
-            // An unknown name is an answer, not a failure: nothing holds it.
+            // An unheld name is an answer, not a failure: nothing to continue.
+            // A name whose claimants are merely dead resolves successfully.
             if occupant_alias_unbound(&output.receipt) {
                 return Ok(None);
             }
             return Err(output.rejected());
         }
-        let claimants = result(&output.receipt)?
-            .get("claimants")
-            .and_then(Value::as_array)
-            .ok_or_else(|| KelpieError::InvalidReceipt("missing claimants".to_owned()))?;
-        claimants
-            .iter()
-            .map(|claimant| {
-                Ok(NameClaimant {
-                    logical_agent_id: field(claimant, "logical_agent_id")?,
-                    created_at_ms: claimant
-                        .get("created_at_ms")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0),
-                    live: claimant
-                        .get("live")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                })
-            })
-            .collect::<Result<Vec<_>, KelpieError>>()
-            .map(|claimants| {
-                claimants
-                    .into_iter()
-                    .max_by_key(|claimant| claimant.created_at_ms)
-            })
+        // A number here and a string inside `claimants`, which is why this
+        // reads it through `field`: the same split cost two releases once.
+        field(result(&output.receipt)?, "logical_agent_id").map(Some)
     }
 
     /// Start a session occupant in an existing Herdr pane.
