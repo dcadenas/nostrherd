@@ -6,12 +6,20 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
-## Unreleased
+## 0.1.0-alpha.13
 
 - Bot replies and bot-initiated posts now notify channel participants named with
-  a readable `@Label`. Names resolve only from the current channel roster;
-  duplicate names are left untagged, and notification tags are deduplicated and
-  capped at 50. No registry or database action is required.
+  a readable `@Label` (D67). Until now the `@name` went out as plain text with a
+  notification tag naming only the requester, so the person named was never told.
+  Names resolve only from the current channel roster, matched longest-first
+  against display name, kind-0 `name` and NIP-05 local part; a name held by more
+  than one participant is left untagged rather than guessed, and tags are
+  deduplicated and capped at 50.
+
+  Note that a bot naming someone in passing will now notify them. The occupant
+  conduct advice says to name people only when the notification is useful.
+
+  **Action**: none.
 
 ## 0.1.0-alpha.12
 
