@@ -149,6 +149,10 @@ release new_version:
     sed -i '0,/^version = ".*"/s//version = "{{new_version}}"/' Cargo.toml
     cargo update --workspace --quiet
     just gates
+    # A release is exactly when an upgrade path gets exercised for the first
+    # time, by someone who already has a database. Prove both here.
+    just smoke
+    just upgrade-smoke
     git add Cargo.toml Cargo.lock
     git commit -m "Release {{new_version}}"
     git tag -a "v{{new_version}}" -m "{{new_version}}"
@@ -177,3 +181,50 @@ smoke:
     run --check
     grep -q 'id = "mybot"' "${root}/home/.config/nostrherd/bots.toml"
     echo "smoke: init registered the bot and --check loaded it"
+
+# Start on a database an older version wrote, which `smoke` never does.
+#
+# `smoke` only ever installs from nothing, so every upgrade path was untested.
+# Both outages so far were upgrades: a Kelpie id format the stored rows predate,
+# which the host retried forever in silence. Seed the old shape and require the
+# host to reach a working state on its own.
+upgrade-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root=$(mktemp -d)
+    trap 'rm -rf "${root}"' EXIT
+    cargo build --release --quiet
+    run() { env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME="${root}/home" \
+        ./target/release/nostrherd "$@"; }
+    db="${root}/home/.local/share/nostrherd/nostrherd.sqlite"
+    mkdir -p "${root}/home"
+    run init "${root}/mybot" --id mybot --kind opencode
+    run --check
+
+    # The pre-integer Kelpie shape: a UUIDv7 agent id, the renew it armed, and
+    # the recorded start attempt carrying that same id in its launch JSON.
+    sqlite3 "${db}" "
+        INSERT INTO sessions(bot_id, channel_id, session_name,
+                             occupant_logical_id, renew_id)
+        VALUES ('mybot', 'a-channel', 'mybot-a-channel',
+                '01a068f7-fc0e-7172-8dfc-4fc1a54ec66c',
+                '01a06902-cf56-7462-ad91-6a7e6f0bb7fe');
+        INSERT INTO occupant_starts(session_name, attempt_key, attempt_json,
+                                    created_at, updated_at)
+        VALUES ('mybot-a-channel', 'stale-key', '{}', 0, 0);"
+
+    run --check 2>"${root}/notice" || { cat "${root}/notice" >&2; exit 1; }
+    grep -q 'mybot-a-channel forgot occupant' "${root}/notice" \
+        || { echo "upgrade-smoke: the cleared session was not named" >&2
+             cat "${root}/notice" >&2; exit 1; }
+
+    left=$(sqlite3 "${db}" "
+        SELECT (SELECT count(*) FROM sessions
+                WHERE occupant_logical_id IS NOT NULL OR renew_id IS NOT NULL)
+             + (SELECT count(*) FROM occupant_starts);")
+    if [[ "${left}" != "0" ]]; then
+        echo "upgrade-smoke: ${left} unusable row(s) survived the upgrade" >&2
+        sqlite3 -header "${db}" "SELECT * FROM sessions; SELECT * FROM occupant_starts;" >&2
+        exit 1
+    fi
+    echo "upgrade-smoke: a pre-integer occupant id was forgotten and named"
