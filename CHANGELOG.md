@@ -6,6 +6,21 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.14
+
+- Occupants are told how to compose what they publish, not just how to behave.
+  The conduct advice had conduct rules and no formatting guidance, so GitHub
+  artifacts and links came out worse than they needed to: unlabelled code
+  fences, prose describing where something lives instead of its URL, and
+  `buzz://` links reformatted into uselessness — Buzz renders a returned link as
+  a preview card only when it is posted verbatim. The advice now covers
+  GitHub-flavored Markdown, language-tagged fences, verbatim `buzz://` links,
+  real URLs, a findings-report shape, and not sending a reply that only
+  acknowledges the request.
+
+  **Action**: none. The advice ships in the binary (D63) and is rewritten into
+  each corpus on the next occupant start, so upgrading and restarting is enough.
+
 ## 0.1.0-alpha.13
 
 - Bot replies and bot-initiated posts now notify channel participants named with
