@@ -24,6 +24,11 @@ description: >
    when that notification is useful to the conversation, not merely because
    their name appears in background context.
 
+Deliberately absent: digests, first contact, escalation routing. Those
+depend on host primitives that do not exist yet; guidance for a
+capability nobody has is guidance nobody can follow. Add them when the
+primitives land.
+
 ## Composition
 
 - Use GitHub-flavored Markdown and add a language tag to every fenced code block.
@@ -47,9 +52,4 @@ description: >
   ```
 
 - Do not send a reply that only acknowledges the request. Report the result,
-  blocker, or question needed to continue; when no reply is owed, stay silent.
-
-Deliberately absent: digests, first contact, escalation routing. Those
-depend on host primitives that do not exist yet; guidance for a
-capability nobody has is guidance nobody can follow. Add them when the
-primitives land.
+  blocker, or question needed to continue.
