@@ -67,7 +67,9 @@ impl OutputGuard {
 }
 
 fn contains_path(body: &str, path: &Path) -> bool {
-    !path.as_os_str().is_empty() && body.contains(path.to_string_lossy().as_ref())
+    path.parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty())
+        && body.contains(path.to_string_lossy().as_ref())
 }
 
 fn contains_nsec(body: &str) -> bool {
@@ -1618,6 +1620,15 @@ mod tests {
             assert_eq!(occupant.len(), 1);
             assert!(!occupant[0].contains(&body));
         }
+    }
+
+    #[test]
+    fn filesystem_root_is_not_treated_as_an_operator_home() {
+        let guard = OutputGuard::new(
+            Some(PathBuf::from("/")),
+            PathBuf::from("/run/user/1000/kelpie/kelpie.sock"),
+        );
+        assert_eq!(guard.refusal("see https://example.test/status"), None);
     }
 
     #[test]
