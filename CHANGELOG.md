@@ -6,6 +6,34 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.8
+
+- A session's name is its identity, and the host converges on one occupant per
+  channel (D62). The host no longer records which Kelpie agent occupies a
+  session. That pointer went stale twice in a week and stopped a channel dead
+  both times: once when Kelpie renumbered agents to integers, and once when a
+  name stayed claimed by the pane of an occupant that had died, so every
+  replacement was refused as `agent_name_taken`.
+
+  Whatever answers to the name is the occupant. When nothing answers, the host
+  reclaims the pane still holding the name, continues the newest identity Kelpie
+  recorded for it, and starts. Refusing to allocate a replacement is gone with
+  the stored id: two holders of one name cannot exist, so a restart can no
+  longer duplicate anything.
+
+  **Action**: none. A channel stuck on a dead occupant recovers by itself on
+  its next message, including work queued behind the failure. On first start
+  this version drops the stored identities and their recorded start attempts.
+
+- The backend's session token is kept and replayed, so a restarted occupant
+  continues its conversation rather than rebuilding it from the corpus. The
+  token is opaque: `kind` names any installed agent CLI, and the host stores
+  and replays exactly what Herdr reported.
+
+- A pane left holding a session's name is closed when it blocks a start. The
+  host allocated a workspace per occupant and never released one, so every
+  occupant it ever started leaked its pane.
+
 ## 0.1.0-alpha.7
 
 - Forget occupant identities recorded before Kelpie renumbered its agents. A

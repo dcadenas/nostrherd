@@ -606,26 +606,15 @@ fn occupant_session<R: HostRepository>(
     repository: &R,
     delivery: &InboxDelivery,
 ) -> Result<Option<SessionRecord>, R::Error> {
-    let name = delivery.sender_public_name();
-    let id = delivery.sender_agent_id();
-    let by_name = name
-        .map(|value| repository.session_by_name(value))
-        .transpose()?
-        .flatten();
-    let by_id = id
-        .map(|value| repository.session_by_occupant_logical_id(value))
-        .transpose()?
-        .flatten();
-    Ok(match (name, id, by_name, by_id) {
-        (Some(_), Some(id), Some(named), Some(bound))
-            if named == bound && named.occupant_logical_id.as_deref() == Some(id) =>
-        {
-            Some(named)
-        }
-        (Some(_), None, Some(named), None) => Some(named),
-        (None, Some(_), None, Some(bound)) => Some(bound),
-        _ => None,
-    })
+    // The name is the identity (D62), and Kelpie fills the envelope's sender
+    // name from its own records, so it is the routing key. The host used to
+    // cross-check it against a stored logical id; there is no stored id now,
+    // and Kelpie admits only one holder of a name, so the name alone decides.
+    delivery
+        .sender_public_name()
+        .map(|name| repository.session_by_name(name))
+        .transpose()
+        .map(Option::flatten)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1733,33 +1722,41 @@ mod tests {
     }
 
     #[test]
-    fn disagreeing_tell_identity_does_not_post() {
+    /// The sender's name decides, and a stale id alongside it changes nothing.
+    ///
+    /// The host recorded no identity to disagree with (D62), and Kelpie admits
+    /// only one holder of a name, so the name alone is the routing key.
+    fn a_stale_agent_id_does_not_stop_a_named_sender_posting() {
         let (mut repository, publisher) = open_repo();
-        let action = handle_delivery(
+        handle_delivery(
             &mut repository,
             &publisher,
             &mut notices(),
-            &occupant_tell("tell-6", "hi", Some("bot-foobar"), Some("other-occupant")),
+            &occupant_tell("tell-6", "hi", Some("bot-foobar"), Some("1611")),
         )
         .expect("handle");
-        assert_eq!(action, InboxAction::Ack);
-        assert!(publisher.calls.lock().expect("calls").is_empty());
+        assert_eq!(
+            publisher.calls.lock().expect("calls").as_slice(),
+            &["**[bot]**: hi".to_owned()]
+        );
     }
 
     #[test]
-    fn occupant_logical_id_tell_posts_to_that_session() {
+    /// An unnamed sender has no session, so its tell is acked and dropped.
+    ///
+    /// An agent id used to be a second way in. Nothing maps one to a session
+    /// now, and inventing a mapping would let any id post to any channel.
+    fn an_unnamed_sender_posts_nowhere() {
         let (mut repository, publisher) = open_repo();
-        handle_delivery(
+        let action = handle_delivery(
             &mut repository,
             &publisher,
             &mut notices(),
             &occupant_tell("tell-4", "from id", None, Some("1990")),
         )
         .expect("handle");
-        assert_eq!(
-            publisher.calls.lock().expect("calls").as_slice(),
-            &["**[bot]**: from id".to_owned()]
-        );
+        assert_eq!(action, InboxAction::Ack);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
     }
 
     #[test]

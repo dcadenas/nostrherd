@@ -42,14 +42,35 @@ pub trait OccupantPaneAllocator {
     /// Returns an error when Herdr cannot create the workspace.
     fn allocate(&self, session_name: &str, cwd: &Path) -> Result<OccupantPane, Self::Error>;
 
-    /// Close a pane whose occupant never started.
-    /// Start errors alone do not prove a pane is empty; automatic reclamation
-    /// of leaked workspaces is outside D39's scope.
+    /// Close a pane whose occupant never started, or whose occupant is gone.
+    ///
+    /// A start error alone does not prove a pane is empty, so a caller must
+    /// establish that the occupant is not running before calling this.
     ///
     /// # Errors
     ///
     /// Returns an error when Herdr cannot close the pane.
     fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error>;
+
+    /// Find the pane already holding `session_name`, within this bot's corpus.
+    ///
+    /// Herdr allows one claim on a name, so a pane left behind by a previous
+    /// occupant blocks every later start with `agent_name_taken`. The cwd is
+    /// the ownership proof: a pane holding the name somewhere else belongs to
+    /// something that is not this bot, and is never touched (D62).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Herdr cannot be asked.
+    fn claimed(&self, session_name: &str, cwd: &Path) -> Result<Option<ClaimedPane>, Self::Error>;
+}
+
+/// A Herdr pane already holding a session's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedPane {
+    pub pane: OccupantPane,
+    /// The backend's own session token, when Herdr recorded one for this pane.
+    pub backend_session: Option<String>,
 }
 
 /// One triggering event ready for the bot actor.
@@ -105,8 +126,6 @@ pub enum ActorError<E> {
     TurnNotOpened { ask_id: String },
     /// The host could not write the channel snapshot.
     Snapshot(io::Error),
-    /// A live occupant under the session name is not the recorded agent.
-    OccupantTwin { recorded: String, live: String },
     /// Host publish of an occupant final failed.
     Outbox(String),
 }
@@ -126,10 +145,6 @@ impl<E: fmt::Display> fmt::Display for ActorError<E> {
                 write!(formatter, "delivered ask {ask_id} was not bound to a turn")
             }
             Self::Snapshot(error) => write!(formatter, "place snapshot failed: {error}"),
-            Self::OccupantTwin { recorded, live } => write!(
-                formatter,
-                "session occupant {live} is not the recorded logical agent {recorded}"
-            ),
             Self::Outbox(error) => write!(formatter, "{error}"),
         }
     }
@@ -149,7 +164,6 @@ where
             | Self::AskNotDelivered(_)
             | Self::EmptyAskBody
             | Self::TurnNotOpened { .. }
-            | Self::OccupantTwin { .. }
             | Self::Outbox(_) => None,
         }
     }
@@ -1066,9 +1080,6 @@ where
         waiter: &HostWaiter<'_>,
         session: &SessionRecord,
     ) -> Result<bool, ActorError<R::Error>> {
-        let Some(logical_id) = session.occupant_logical_id.as_deref() else {
-            return Ok(false);
-        };
         let turns = self
             .repository
             .turns_for_session(&session.bot_id, &session.channel_id)
@@ -1076,26 +1087,17 @@ where
         if !turns.iter().any(|turn| turn.state == TurnState::Open) {
             return Ok(false);
         }
+        // An open turn means an occupant owes an answer. If the name still
+        // answers, nothing was lost and the occupant is already working on it.
         match kelpie.occupant_whoami(&session.session_name) {
-            Ok(live) if live.logical_agent_id() == logical_id => Ok(false),
-            Ok(live) => Err(ActorError::OccupantTwin {
-                recorded: logical_id.to_owned(),
-                live: live.logical_agent_id().to_owned(),
-            }),
-            Err(KelpieError::TargetUnavailable) => {
-                let snapshot_relpath = self.refresh_snapshot(session)?;
-                let mut session = session.clone();
-                self.continue_recorded_occupant(
-                    kelpie,
-                    waiter,
-                    &mut session,
-                    &snapshot_relpath,
-                    logical_id,
-                )?;
-                Ok(true)
-            }
-            Err(error) => Err(ActorError::Kelpie(error)),
+            Ok(_) => return Ok(false),
+            Err(KelpieError::TargetUnavailable) => {}
+            Err(error) => return Err(ActorError::Kelpie(error)),
         }
+        let snapshot_relpath = self.refresh_snapshot(session)?;
+        let mut session = session.clone();
+        self.restart_occupant(kelpie, waiter, &mut session, &snapshot_relpath)?;
+        Ok(true)
     }
 
     fn should_ask_event(
@@ -1145,34 +1147,6 @@ where
             return Ok(());
         };
         let snapshot_relpath = self.refresh_snapshot(&session)?;
-        if session.occupant_logical_id.is_none() {
-            let occupant =
-                self.start_occupant(kelpie, waiter, &mut session, &snapshot_relpath, None)?;
-            session.occupant_logical_id = Some(occupant.logical_agent_id().to_owned());
-            self.repository
-                .save_session(&session)
-                .map_err(ActorError::Repository)?;
-            self.try_arm_renew(
-                kelpie,
-                occupant.logical_agent_id(),
-                occupant.incarnation_id(),
-                &snapshot_relpath,
-                &mut session,
-            )?;
-        } else if session.renew_id.is_none() {
-            if let Ok((logical_id, incarnation_id)) = waiter.occupant_ids(
-                &session.session_name,
-                session.occupant_logical_id.as_deref(),
-            ) {
-                self.try_arm_renew(
-                    kelpie,
-                    &logical_id,
-                    &incarnation_id,
-                    &snapshot_relpath,
-                    &mut session,
-                )?;
-            }
-        }
         let events = self.channel_events_for_occupant(channel_id)?;
         let context_event_id = if queued.publish_reply_to_event_id.is_none() {
             queued
@@ -1227,6 +1201,20 @@ where
                 return Err(ActorError::AskNotDelivered(delivery));
             }
         }
+        // A live occupant with no renew is one whose schedule was lost, not one
+        // that never had a seat. The receipt names who took the ask, so arming
+        // from it costs no extra round trip and cannot target a stale identity.
+        if session.renew_id.is_none() {
+            if let Some(incarnation) = receipt.recipient_incarnation() {
+                self.try_arm_renew(
+                    kelpie,
+                    receipt.recipient(),
+                    incarnation,
+                    &snapshot_relpath,
+                    &mut session,
+                )?;
+            }
+        }
         self.repository
             .open_next_turn(self.bot.id(), channel_id, receipt.message_id())
             .map_err(ActorError::Repository)?
@@ -1250,12 +1238,7 @@ where
         body: &str,
         idempotency_key: &str,
     ) -> Result<crate::AskReceipt, ActorError<R::Error>> {
-        let first_attempt = waiter.ask_named(
-            &session.session_name,
-            session.occupant_logical_id.as_deref(),
-            body,
-            idempotency_key,
-        );
+        let first_attempt = waiter.ask_named(&session.session_name, None, body, idempotency_key);
         let unavailable_incarnation = match first_attempt {
             Err(KelpieError::TargetUnavailable) => None,
             Ok(receipt) if receipt.delivery() == AskDelivery::TargetUnavailable => {
@@ -1279,148 +1262,83 @@ where
                 )
                 .map_err(ActorError::Kelpie)?;
         }
-
-        let logical_id = session
-            .occupant_logical_id
-            .clone()
-            .ok_or(ActorError::UnnameableSession)?;
-        self.continue_recorded_occupant(kelpie, waiter, session, snapshot_relpath, &logical_id)?;
+        // Nothing answers to the name: it has never been started, or its
+        // runtime ended. Either way, converge and ask again.
+        self.restart_occupant(kelpie, waiter, session, snapshot_relpath)?;
         waiter
-            .ask_named(
-                &session.session_name,
-                Some(&logical_id),
-                body,
-                idempotency_key,
-            )
+            .ask_named(&session.session_name, None, body, idempotency_key)
             .map_err(ActorError::Kelpie)
     }
 
-    fn continue_recorded_occupant(
+    /// Put a working occupant behind a name that is not answering (D62).
+    ///
+    /// Call this only once the name has been found unaddressable, which an
+    /// ask reports on its own: probing first would cost a round trip and still
+    /// leave a window where the answer goes stale before it is used.
+    ///
+    /// The name is the identity, so this converges rather than reconciling.
+    /// Nothing about the occupant is stored between calls, so there is no
+    /// recorded state to drift, and no state this can fail to anticipate: a
+    /// name Kelpie has never seen starts fresh, and one whose runtimes have
+    /// ended continues its newest identity.
+    fn restart_occupant(
         &mut self,
         kelpie: &KelpieClient,
         waiter: &HostWaiter<'_>,
         session: &mut SessionRecord,
         snapshot_relpath: &str,
-        logical_id: &str,
-    ) -> Result<(), ActorError<R::Error>> {
-        let occupant =
-            self.start_occupant(kelpie, waiter, session, snapshot_relpath, Some(logical_id))?;
+    ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
+        // Nothing answers to the name, so a pane still holding it in this
+        // bot's corpus is one whose occupant has gone: a live one would have
+        // answered. Reclaim that seat, or Herdr refuses the start with
+        // `agent_name_taken`, and carry its backend session forward.
+        if let Some(claimed) = self
+            .panes
+            .claimed(&session.session_name, self.bot.corpus_path())
+            .map_err(|error| ActorError::Pane(error.to_string()))?
+        {
+            if session.backend_session.is_none() {
+                session.backend_session.clone_from(&claimed.backend_session);
+            }
+            self.panes
+                .release(&claimed.pane)
+                .map_err(|error| ActorError::Pane(error.to_string()))?;
+        }
+        let continue_as = kelpie
+            .resolve_name(&session.session_name)
+            .map_err(ActorError::Kelpie)?
+            .map(|claimant| claimant.logical_agent_id);
+        let started = self.fresh_start(
+            kelpie,
+            waiter,
+            session,
+            snapshot_relpath,
+            continue_as.as_deref(),
+        )?;
+        // A new runtime never inherits the old one's renew schedule.
         session.renew_id = None;
-        self.repository
-            .save_session(session)
-            .map_err(ActorError::Repository)?;
         self.try_arm_renew(
             kelpie,
-            occupant.logical_agent_id(),
-            occupant.incarnation_id(),
+            started.logical_agent_id(),
+            started.incarnation_id(),
             snapshot_relpath,
             session,
-        )
+        )?;
+        Ok(started)
     }
 
-    fn start_occupant(
-        &mut self,
-        kelpie: &KelpieClient,
-        waiter: &HostWaiter<'_>,
-        session: &mut SessionRecord,
-        snapshot_relpath: &str,
-        continue_as: Option<&str>,
-    ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
-        match self
-            .repository
-            .occupant_start(&session.session_name)
-            .map_err(ActorError::Repository)?
-        {
-            Some(attempt) if !attempt.completed || session.occupant_logical_id.is_none() => {
-                self.resume_recorded_start(kelpie, attempt, session)
-            }
-            _ => self.fresh_start(kelpie, waiter, session, snapshot_relpath, continue_as),
-        }
-    }
-
-    /// Settle one previously recorded, unsettled launch attempt.
+    /// Allocate a seat and start one runtime on it.
     ///
-    /// Reconciliation re-reads Kelpie's own records by exact seat, so a retry
-    /// never allocates a second identity for the same bot (D20).
-    fn resume_recorded_start(
-        &mut self,
-        kelpie: &KelpieClient,
-        mut attempt: crate::OccupantStartAttempt,
-        session: &mut SessionRecord,
-    ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
-        let outcome =
-            match kelpie.reconcile_occupant_start(&mut attempt.launch, attempt.receipt.as_ref()) {
-                Ok(crate::StartReconciliation::Missing) => {
-                    // Kelpie atomically reserves the key with identity/operation creation.
-                    // Reusing it on this same seat either starts once or is refused; it
-                    // cannot allocate a second identity (client-protocol idempotency).
-                    kelpie
-                        .dispatch_occupant_start(&mut attempt)
-                        .map(crate::StartReconciliation::Ready)
-                }
-                other => other,
-            };
-        match outcome {
-            Ok(crate::StartReconciliation::Ready(started)) => {
-                session.occupant_logical_id = Some(started.logical_agent_id().to_owned());
-                attempt.launch.logical_agent_id = Some(started.logical_agent_id().to_owned());
-                attempt.completed = true;
-                self.repository
-                    .save_occupant_start(&attempt)
-                    .map_err(ActorError::Repository)?;
-                Ok(started)
-            }
-            Ok(crate::StartReconciliation::FailedStart { logical_agent_id }) => {
-                session.occupant_logical_id = Some(logical_agent_id);
-                attempt.completed = true;
-                attempt.diagnostic = Some(
-                    "recorded incarnation ended; next attempt must continue its logical identity"
-                        .to_owned(),
-                );
-                self.repository
-                    .save_occupant_start(&attempt)
-                    .map_err(ActorError::Repository)?;
-                Err(ActorError::Kelpie(KelpieError::InvalidReceipt(
-                    "recorded incarnation ended; retry must continue its logical identity"
-                        .to_owned(),
-                )))
-            }
-            Ok(crate::StartReconciliation::Unsettled(reason)) => {
-                if attempt.diagnostic.as_deref() != Some(reason.as_str()) {
-                    eprintln!(
-                        "occupant start for {} is unsettled: {reason}; keeping the recorded attempt",
-                        session.session_name
-                    );
-                    attempt.diagnostic = Some(reason);
-                    self.repository
-                        .save_occupant_start(&attempt)
-                        .map_err(ActorError::Repository)?;
-                }
-                Err(ActorError::Kelpie(KelpieError::InvalidReceipt(format!(
-                    "unsettled occupant start for {}: refusing to allocate a replacement",
-                    session.session_name
-                ))))
-            }
-            Ok(crate::StartReconciliation::Missing) => {
-                unreachable!("missing start was dispatched above")
-            }
-            Err(error) => {
-                attempt.diagnostic = Some(error.to_string());
-                self.repository
-                    .save_occupant_start(&attempt)
-                    .map_err(ActorError::Repository)?;
-                Err(ActorError::Kelpie(error))
-            }
-        }
-    }
-
-    /// Persist one launch attempt with its key, then invoke Kelpie.
+    /// `continue_as` carries the name's existing identity forward when it has
+    /// one. Kelpie reserves the idempotency key with identity creation, so a
+    /// retry of the same seat either starts once or is refused; it cannot mint
+    /// a second identity for the name.
     ///
     /// # Errors
     ///
-    /// Returns an error when the start fails; the durable attempt keeps the
-    /// receipt and diagnostic so the retry path reconciles instead of minting
-    /// a second logical agent.
+    /// Returns an error when the seat cannot be allocated or the start fails.
+    /// The pane is kept on failure: a start error does not prove the pane is
+    /// empty, and closing one whose occupant may be running loses it.
     fn fresh_start(
         &mut self,
         kelpie: &KelpieClient,
@@ -1433,7 +1351,6 @@ where
             .panes
             .allocate(&session.session_name, self.bot.corpus_path())
             .map_err(|error| ActorError::Pane(error.to_string()))?;
-        let bootstrap = occupant_bootstrap(snapshot_relpath);
         let launch = OccupantLaunch {
             name: session.session_name.clone(),
             pane_id: pane.pane_id.clone(),
@@ -1442,46 +1359,33 @@ where
             cwd: self.bot.corpus_path().to_path_buf(),
             timeout_ms: OCCUPANT_START_TIMEOUT_MS,
             logical_agent_id: continue_as.map(str::to_owned),
+            backend_session: session.backend_session.clone(),
         };
         let key = format!(
             "nostrherd:{}:{}:{}",
             session.session_name, pane.pane_id, pane.terminal_id
         );
-        let mut attempt = crate::OccupantStartAttempt {
-            key,
-            launch,
-            bootstrap,
-            sender_id: waiter.identity().logical_agent_id().to_owned(),
-            receipt: None,
-            start_error: None,
-            diagnostic: None,
-            completed: false,
-        };
-        self.repository
-            .save_occupant_start(&attempt)
-            .map_err(ActorError::Repository)?;
-        let outcome = kelpie.dispatch_occupant_start(&mut attempt);
-        match outcome {
-            Ok(started) => {
-                session.occupant_logical_id = Some(started.logical_agent_id().to_owned());
-                attempt.launch.logical_agent_id = Some(started.logical_agent_id().to_owned());
-                attempt.completed = true;
-                self.repository
-                    .save_occupant_start(&attempt)
-                    .map_err(ActorError::Repository)?;
-                Ok(started)
-            }
-            Err(error) => {
-                attempt.diagnostic = Some(error.to_string());
-                self.repository
-                    .save_occupant_start(&attempt)
-                    .map_err(ActorError::Repository)?;
-                match self.resume_recorded_start(kelpie, attempt, session) {
-                    Err(ActorError::Kelpie(_)) => Err(ActorError::Kelpie(error)),
-                    outcome => outcome,
-                }
-            }
+        let started = kelpie
+            .start_occupant_with_receipt(
+                &launch,
+                &occupant_bootstrap(snapshot_relpath),
+                Some(waiter.identity().logical_agent_id()),
+                Some(&key),
+                &mut None,
+            )
+            .map_err(ActorError::Kelpie)?;
+        // Herdr records the backend's session only once the runtime is up, so
+        // read it back now rather than from the start receipt.
+        if let Ok(Some(claimed)) = self
+            .panes
+            .claimed(&session.session_name, self.bot.corpus_path())
+        {
+            session.backend_session = claimed.backend_session;
         }
+        self.repository
+            .save_session(session)
+            .map_err(ActorError::Repository)?;
+        Ok(started)
     }
 
     fn try_arm_renew(
@@ -1656,7 +1560,7 @@ fn ensure_bot_session<R: HostRepository>(
         bot_id: bot.id().clone(),
         channel_id: channel_id.to_owned(),
         session_name: name.as_str().to_owned(),
-        occupant_logical_id: None,
+        backend_session: None,
         renew_id: None,
         ask_context_event_id: None,
         ask_context_created_at: None,
@@ -1688,6 +1592,8 @@ mod tests {
     struct FakePanes {
         calls: Mutex<Vec<(String, PathBuf)>>,
         released: Mutex<Vec<String>>,
+        /// Panes Herdr already reports as holding a session's name.
+        claims: Mutex<std::collections::HashMap<String, ClaimedPane>>,
     }
 
     impl OccupantPaneAllocator for Arc<FakePanes> {
@@ -1708,6 +1614,19 @@ mod tests {
                 .expect("released")
                 .push(pane.pane_id.clone());
             Ok(())
+        }
+
+        fn claimed(
+            &self,
+            session_name: &str,
+            _cwd: &Path,
+        ) -> Result<Option<ClaimedPane>, Self::Error> {
+            Ok(self
+                .claims
+                .lock()
+                .expect("claims")
+                .get(session_name)
+                .cloned())
         }
     }
 
@@ -1754,7 +1673,7 @@ mod tests {
 
     fn start() -> CommandOutput {
         success(&serde_json::json!({
-            "logical_agent_id": "occupant-agent",
+            "logical_agent_id": 1990,
             "incarnation_id": "occupant-incarnation",
             "runtime_start": {
                 "operation_id": "start-operation",
@@ -1786,7 +1705,7 @@ mod tests {
 
     fn whoami() -> CommandOutput {
         success(&serde_json::json!({
-            "logical_agent_id": "occupant-agent",
+            "logical_agent_id": 1990,
             "incarnation_id": "occupant-incarnation",
             "public_name": "bot-foobar"
         }))
@@ -1794,7 +1713,7 @@ mod tests {
 
     fn whoami_other() -> CommandOutput {
         success(&serde_json::json!({
-            "logical_agent_id": "twin-agent",
+            "logical_agent_id": 2016,
             "incarnation_id": "twin-incarnation",
             "public_name": "bot-foobar"
         }))
@@ -1804,7 +1723,7 @@ mod tests {
         success(&serde_json::json!({
             "message_id": message_id,
             "operation_id": "ask-operation",
-            "recipient": "occupant-agent",
+            "recipient": 1990,
             "recipient_incarnation": "occupant-incarnation",
             "delivery_outcome": "accepted"
         }))
@@ -1828,7 +1747,7 @@ mod tests {
     fn renewed() -> CommandOutput {
         success(&serde_json::json!({
             "renew_id": "renew-id",
-            "recipient": "occupant-agent",
+            "recipient": 1990,
             "recipient_incarnation": "occupant-incarnation",
             "scheduled_at_ms": 1,
             "on_timeout": "abort",
@@ -1839,6 +1758,54 @@ mod tests {
 
     fn cancelled() -> CommandOutput {
         success(&serde_json::json!({}))
+    }
+
+    /// `whoami` for a name no live claimant answers to.
+    fn unbound() -> CommandOutput {
+        failure("conflict", "no ready agent for alias bot-foobar")
+    }
+
+    /// `who --history` for a name Kelpie has never recorded.
+    fn no_claimants() -> CommandOutput {
+        success(&serde_json::json!({"claimants": [], "name": "bot-foobar"}))
+    }
+
+    /// `who --history` for a name whose runtimes have all ended.
+    fn dead_claimants() -> CommandOutput {
+        success(&serde_json::json!({
+            "name": "bot-foobar",
+            "claimants": [
+                {"logical_agent_id": "1611", "created_at_ms": 1, "live": false},
+                {"logical_agent_id": "1990", "created_at_ms": 9, "live": false},
+            ]
+        }))
+    }
+
+    /// The first Kelpie invocation of a subcommand.
+    ///
+    /// Kelpie calls are asserted by name, not by position: convergence adds
+    /// probes ahead of a start, and an index-based assertion breaks on that
+    /// without saying anything about the behaviour it was written to pin.
+    fn call<'a>(
+        calls: &'a [(Vec<String>, Vec<u8>)],
+        subcommand: &str,
+    ) -> &'a (Vec<String>, Vec<u8>) {
+        calls
+            .iter()
+            .find(|(arguments, _)| arguments.get(1).is_some_and(|name| name == subcommand))
+            .unwrap_or_else(|| panic!("no {subcommand} call in {calls:?}"))
+    }
+
+    /// The most recent Kelpie invocation of a subcommand.
+    fn last_call<'a>(
+        calls: &'a [(Vec<String>, Vec<u8>)],
+        subcommand: &str,
+    ) -> &'a (Vec<String>, Vec<u8>) {
+        calls
+            .iter()
+            .rev()
+            .find(|(arguments, _)| arguments.get(1).is_some_and(|name| name == subcommand))
+            .unwrap_or_else(|| panic!("no {subcommand} call in {calls:?}"))
     }
 
     fn failure(class: &str, message: &str) -> CommandOutput {
@@ -1991,6 +1958,7 @@ mod tests {
         let panes = Arc::new(FakePanes {
             calls: Mutex::new(Vec::new()),
             released: Mutex::new(Vec::new()),
+            claims: Mutex::new(std::collections::HashMap::new()),
         });
         let kelpie = KelpieClient::with_runner(Arc::clone(&runner));
         let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
@@ -2012,7 +1980,7 @@ mod tests {
     #[test]
     fn host_watch_fire_opens_a_normal_turn_with_a_typed_section() {
         let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), whoami(), renewed(), whoami(), asked("ask-watch")]);
+            actor([adopt(), whoami(), asked("ask-watch"), renewed()]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
         actor
@@ -2021,7 +1989,7 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: channel_id.to_owned(),
                 session_name: "bot-foobar".to_owned(),
-                occupant_logical_id: Some("occupant-agent".to_owned()),
+                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -2053,8 +2021,7 @@ mod tests {
         assert_eq!(turn.state, TurnState::Open);
         assert!(turn.publish_reply_to_event_id.is_none());
         let calls = runner.calls.lock().expect("calls");
-        let body = &calls.last().expect("ask").1;
-        let body = String::from_utf8_lossy(body);
+        let body = String::from_utf8_lossy(&call(&calls, "ask").1);
         assert!(body.starts_with("## Watch event\n\n"));
         assert!(body.contains("## Context"));
     }
@@ -2070,7 +2037,7 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: channel_id.to_owned(),
                 session_name: "bot-foobar".to_owned(),
-                occupant_logical_id: Some("occupant-agent".to_owned()),
+                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -2128,8 +2095,15 @@ mod tests {
 
     #[test]
     fn trigger_phrase_creates_a_watched_author_scope() {
-        let (mut actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-watch")]);
+        let (mut actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-watch"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let author = "d".repeat(64);
         let trigger = work('a', &format!("watch {author} max 2"), None);
@@ -2165,12 +2139,6 @@ mod tests {
 
         assert!(error.to_string().contains("agent_pane_busy"), "{error}");
         assert!(panes.released.lock().expect("released").is_empty());
-        let session = actor
-            .repository
-            .session(actor.bot.id(), &trigger.channel_id)
-            .expect("session")
-            .expect("session row");
-        assert!(session.occupant_logical_id.is_none());
     }
 
     #[test]
@@ -2193,612 +2161,13 @@ mod tests {
         );
     }
 
-    fn start_report(cwd: &Path, state: &str) -> CommandOutput {
-        success(&serde_json::json!({"agents": [{
-            "agent_id": "occupant-agent",
-            "public_name": "bot-foobar",
-            "incarnations": [{
-                "incarnation_id": "occupant-incarnation",
-                "state": state,
-                "intended_pane_id": "w2:p1",
-                "expected_terminal_id": "term-9",
-                "backend_kind": "opencode",
-                "working_directory": cwd
-            }]
-        }]}))
-    }
-
-    #[test]
-    fn reconciliation_recovers_a_ready_successor_after_an_adoption_receipt_is_lost() {
-        let (actor, kelpie, runner, _) = actor([]);
-        let output = start_report(actor.bot.corpus_path(), "starting");
-        let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let incarnations = report["result"]["agents"][0]["incarnations"]
-            .as_array_mut()
-            .unwrap();
-        let mut ready = incarnations[0].clone();
-        incarnations[0]["incarnation_id"] = "prior-start-incarnation".into();
-        ready["state"] = "ready".into();
-        incarnations.push(ready);
-        runner
-            .outputs
-            .lock()
-            .unwrap()
-            .extend([success(&report["result"]), whoami()]);
-        let mut launch = OccupantLaunch {
-            name: "bot-foobar".to_owned(),
-            pane_id: "w2:p1".to_owned(),
-            terminal_id: "term-9".to_owned(),
-            backend: "opencode".to_owned(),
-            cwd: actor.bot.corpus_path().to_path_buf(),
-            timeout_ms: 90_000,
-            logical_agent_id: None,
-        };
-        assert!(matches!(
-            kelpie.reconcile_occupant_start(&mut launch, None).unwrap(),
-            crate::StartReconciliation::Ready(_)
-        ));
-        assert_eq!(launch.logical_agent_id.as_deref(), Some("occupant-agent"));
-        assert_eq!(runner.calls.lock().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn reconciliation_refuses_a_conflicting_seat_without_adopting() {
-        for mismatch in [
-            "name",
-            "backend",
-            "corpus",
-            "identity",
-            "two-identities",
-            "two-ready",
-            "failed-with-live-successor",
-            "declared-failed-with-live-successor",
-        ] {
-            let (actor, kelpie, runner, _) = actor([]);
-            let output = start_report(actor.bot.corpus_path(), "ready");
-            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            let agent = &mut report["result"]["agents"][0];
-            match mismatch {
-                "name" => agent["public_name"] = "other".into(),
-                "backend" => agent["incarnations"][0]["backend_kind"] = "other".into(),
-                "corpus" => agent["incarnations"][0]["working_directory"] = "/other".into(),
-                "identity" => agent["agent_id"] = "other".into(),
-                "two-identities" => {
-                    let mut twin = agent.clone();
-                    twin["agent_id"] = "other".into();
-                    report["result"]["agents"]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(twin);
-                }
-                "two-ready"
-                | "failed-with-live-successor"
-                | "declared-failed-with-live-successor" => {
-                    let mut second = agent["incarnations"][0].clone();
-                    second["incarnation_id"] = "successor-incarnation".into();
-                    if mismatch != "two-ready" {
-                        agent["incarnations"][0]["state"] =
-                            if mismatch == "failed-with-live-successor" {
-                                "failed"
-                            } else {
-                                "declared"
-                            }
-                            .into();
-                        agent["incarnations"][0]["latest_operation"] =
-                            serde_json::json!({"kind":"start","outcome":"failed"});
-                        second["intended_pane_id"] = "w9:p1".into();
-                    }
-                    agent["incarnations"].as_array_mut().unwrap().push(second);
-                }
-                _ => unreachable!(),
-            }
-            runner
-                .outputs
-                .lock()
-                .unwrap()
-                .push_back(success(&report["result"]));
-            let mut launch = OccupantLaunch {
-                name: "bot-foobar".to_owned(),
-                pane_id: "w2:p1".to_owned(),
-                terminal_id: "term-9".to_owned(),
-                backend: "opencode".to_owned(),
-                cwd: actor.bot.corpus_path().to_path_buf(),
-                timeout_ms: 90_000,
-                logical_agent_id: (mismatch != "two-identities")
-                    .then(|| "occupant-agent".to_owned()),
-            };
-            assert!(
-                matches!(
-                    kelpie.reconcile_occupant_start(&mut launch, None).unwrap(),
-                    crate::StartReconciliation::Unsettled(_)
-                ),
-                "{mismatch}"
-            );
-            assert_eq!(runner.calls.lock().unwrap().len(), 1, "{mismatch}");
-        }
-    }
-
-    #[test]
-    fn readiness_conflicts_and_host_restart_keep_one_start_identity() {
-        let (mut actor, kelpie, runner, panes) = actor([
-            adopt(),
-            failure(
-                "conflict",
-                "readiness does not prove the intended incarnation",
-            ),
-        ]);
-        let database = actor.bot.corpus_path().join("host.sqlite");
-        actor.repository = SqliteRepository::open(&database).expect("disk repository");
-        let bot = actor.bot.clone();
-        runner.outputs.lock().expect("outputs").extend([
-            start_report(bot.corpus_path(), "starting"),
-            failure("conflict", "not yet ready"),
-            start_report(bot.corpus_path(), "starting"),
-            failure("conflict", "not yet ready"),
-            start_report(bot.corpus_path(), "unknown"),
-            failure("conflict", "not yet ready"),
-            start_report(bot.corpus_path(), "ready"),
-            whoami(),
-            renewed(),
-            whoami(),
-            asked("ask-recovered"),
-        ]);
-        let waiter = kelpie.register_waiter().expect("waiter");
-        let trigger = work('a', "hello", None);
-        actor
-            .handle_trigger(&kelpie, &waiter, &trigger)
-            .expect_err("conflict");
-        let attempt = actor
-            .repository
-            .occupant_start("bot-foobar")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            attempt.receipt.as_ref().unwrap()["error"]["class"],
-            "conflict"
-        );
-        assert_eq!(
-            attempt.launch.logical_agent_id.as_deref(),
-            Some("occupant-agent")
-        );
-        drop(actor);
-
-        let mut actor = BotActor::new(
-            bot,
-            SqliteRepository::open(&database).expect("reopen repository"),
-            Arc::clone(&panes),
-            PathBuf::from("/synthetic-install/skills/bot-conduct/SKILL.md"),
-            "b".repeat(64),
-        );
-        for _ in 0..2 {
-            actor
-                .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
-                .expect_err("still unsettled");
-        }
-        actor
-            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
-            .expect("same occupant recovered");
-        assert_eq!(panes.calls.lock().unwrap().len(), 1);
-        assert!(panes.released.lock().unwrap().is_empty());
-        let calls = runner.calls.lock().unwrap();
-        let starts: Vec<_> = calls
-            .iter()
-            .filter(|(args, _)| args.iter().any(|arg| arg == "start"))
-            .collect();
-        assert_eq!(starts.len(), 1);
-        assert!(starts[0]
-            .0
-            .windows(2)
-            .any(|args| args == ["--idempotency-key", &attempt.key]));
-        assert_eq!(
-            actor
-                .repository
-                .session(actor.bot.id(), &trigger.channel_id)
-                .unwrap()
-                .unwrap()
-                .occupant_logical_id
-                .as_deref(),
-            Some("occupant-agent")
-        );
-        assert_eq!(
-            actor
-                .repository
-                .occupant_start("bot-foobar")
-                .unwrap()
-                .unwrap()
-                .key,
-            attempt.key
-        );
-    }
-
-    #[test]
-    fn missing_start_report_does_not_authorize_a_replacement() {
-        let (mut actor, kelpie, runner, panes) = actor([
-            adopt(),
-            failure("unknown", "start response lost"),
-            success(&serde_json::json!({"agents": []})),
-            failure("conflict", "key belongs to prior operation; refusing retry"),
-            success(&serde_json::json!({"agents": []})),
-            failure("conflict", "key belongs to prior operation; refusing retry"),
-        ]);
-        let waiter = kelpie.register_waiter().unwrap();
-        let trigger = work('a', "hello", None);
-        actor
-            .handle_trigger(&kelpie, &waiter, &trigger)
-            .unwrap_err();
-        actor
-            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
-            .unwrap_err();
-        assert_eq!(panes.calls.lock().unwrap().len(), 1);
-        assert!(panes.released.lock().unwrap().is_empty());
-        assert!(runner.outputs.lock().unwrap().is_empty());
-        let calls = runner.calls.lock().unwrap();
-        let starts: Vec<_> = calls
-            .iter()
-            .filter(|(args, _)| args.iter().any(|arg| arg == "start"))
-            .collect();
-        assert_eq!(starts.len(), 3);
-        assert!(starts.iter().all(|call| *call == starts[0]));
-    }
-
-    #[test]
-    fn restart_replays_an_undeclared_start_with_the_original_key_and_preserves_io_error() {
-        let (mut actor, kelpie, runner, panes) = actor([
-            adopt(),
-            CommandOutput {
-                success: false,
-                status: "exit status: 1".to_owned(),
-                stdout: Vec::new(),
-                stderr: b"connection refused before dispatch".to_vec(),
-            },
-            failure("unknown", "report unavailable"),
-            success(&serde_json::json!({"agents": []})),
-            start(),
-            renewed(),
-            whoami(),
-            asked("ask-after-restart"),
-        ]);
-        let database = actor.bot.corpus_path().join("host.sqlite");
-        actor.repository = SqliteRepository::open(&database).unwrap();
-        let bot = actor.bot.clone();
-        let waiter = kelpie.register_waiter().unwrap();
-        let trigger = work('a', "hello", None);
-        actor
-            .handle_trigger(&kelpie, &waiter, &trigger)
-            .unwrap_err();
-        drop(actor);
-        let mut actor = BotActor::new(
-            bot,
-            SqliteRepository::open(database).unwrap(),
-            Arc::clone(&panes),
-            PathBuf::from("/synthetic-install/skills/bot-conduct/SKILL.md"),
-            "b".repeat(64),
-        );
-        actor
-            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
-            .unwrap();
-        let attempt = actor
-            .repository
-            .occupant_start("bot-foobar")
-            .unwrap()
-            .unwrap();
-        assert!(attempt.completed);
-        assert!(attempt
-            .start_error
-            .unwrap()
-            .contains("connection refused before dispatch"));
-        assert_eq!(panes.calls.lock().unwrap().len(), 1);
-        let calls = runner.calls.lock().unwrap();
-        let starts: Vec<_> = calls
-            .iter()
-            .filter(|(args, _)| args.iter().any(|arg| arg == "start"))
-            .collect();
-        assert_eq!(starts.len(), 2);
-        assert_eq!(starts[0], starts[1]);
-    }
-
-    #[test]
-    fn terminal_starts_are_recoverable_and_a_receipt_disambiguates_reused_seats() {
-        for state in ["failed", "retired", "superseded", "ready"] {
-            let (actor, kelpie, runner, _) = actor([]);
-            let output = start_report(actor.bot.corpus_path(), state);
-            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            let mut other = report["result"]["agents"][0].clone();
-            other["agent_id"] = "other-identity".into();
-            report["result"]["agents"]
-                .as_array_mut()
-                .unwrap()
-                .push(other);
-            runner
-                .outputs
-                .lock()
-                .unwrap()
-                .push_back(success(&report["result"]));
-            if state == "ready" {
-                runner.outputs.lock().unwrap().push_back(whoami());
-            }
-            let mut launch = OccupantLaunch {
-                name: "bot-foobar".to_owned(),
-                pane_id: "w2:p1".to_owned(),
-                terminal_id: "term-9".to_owned(),
-                backend: "opencode".to_owned(),
-                cwd: actor.bot.corpus_path().to_path_buf(),
-                timeout_ms: 90_000,
-                logical_agent_id: None,
-            };
-            let receipt = serde_json::json!({"result": {"logical_agent_id": "occupant-agent", "incarnation_id": "occupant-incarnation"}});
-            let outcome = kelpie
-                .reconcile_occupant_start(&mut launch, Some(&receipt))
-                .unwrap();
-            if state == "ready" {
-                assert!(matches!(outcome, crate::StartReconciliation::Ready(_)));
-            } else {
-                assert!(matches!(
-                    outcome,
-                    crate::StartReconciliation::FailedStart { .. }
-                ));
-            }
-            assert_eq!(launch.logical_agent_id.as_deref(), Some("occupant-agent"));
-        }
-    }
-
-    #[test]
-    fn declared_start_retries_only_with_a_failed_start_operation() {
-        for (kind, outcome) in [
-            ("start", "failed"),
-            ("start", "pending"),
-            ("start", "unknown"),
-            ("adopt", "failed"),
-        ] {
-            let (actor, kelpie, runner, _) = actor([]);
-            let output = start_report(actor.bot.corpus_path(), "declared");
-            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            report["result"]["agents"][0]["incarnations"][0]["latest_operation"] =
-                serde_json::json!({"kind":kind,"outcome":outcome});
-            runner
-                .outputs
-                .lock()
-                .unwrap()
-                .push_back(success(&report["result"]));
-            let rejected = kind == "start" && outcome == "failed";
-            if !rejected {
-                runner
-                    .outputs
-                    .lock()
-                    .unwrap()
-                    .push_back(failure("conflict", "no adoptable runtime"));
-            }
-            let mut launch = OccupantLaunch {
-                name: "bot-foobar".to_owned(),
-                pane_id: "w2:p1".to_owned(),
-                terminal_id: "term-9".to_owned(),
-                backend: "opencode".to_owned(),
-                cwd: actor.bot.corpus_path().to_path_buf(),
-                timeout_ms: 90_000,
-                logical_agent_id: None,
-            };
-            let result = kelpie.reconcile_occupant_start(&mut launch, None);
-            if rejected {
-                assert!(matches!(
-                    result.unwrap(),
-                    crate::StartReconciliation::FailedStart { .. }
-                ));
-            } else {
-                assert!(
-                    result.is_err(),
-                    "{kind}/{outcome} must not authorize a replacement"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn consecutive_failed_starts_use_the_same_ended_rule_for_siblings() {
-        for outcome in ["failed", "pending", "unknown"] {
-            let (actor, kelpie, runner, _) = actor([]);
-            let output = start_report(actor.bot.corpus_path(), "failed");
-            let mut report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            let current = &report["result"]["agents"][0]["incarnations"][0];
-            let mut sibling = current.clone();
-            sibling["incarnation_id"] = "prior-declaration".into();
-            sibling["intended_pane_id"] = "old:pane".into();
-            sibling["state"] = "declared".into();
-            sibling["latest_operation"] = serde_json::json!({"kind":"start","outcome":outcome});
-            report["result"]["agents"][0]["incarnations"]
-                .as_array_mut()
-                .unwrap()
-                .push(sibling);
-            runner
-                .outputs
-                .lock()
-                .unwrap()
-                .push_back(success(&report["result"]));
-            let mut launch = OccupantLaunch {
-                name: "bot-foobar".to_owned(),
-                pane_id: "w2:p1".to_owned(),
-                terminal_id: "term-9".to_owned(),
-                backend: "opencode".to_owned(),
-                cwd: actor.bot.corpus_path().to_path_buf(),
-                timeout_ms: 90_000,
-                logical_agent_id: None,
-            };
-            let result = kelpie.reconcile_occupant_start(&mut launch, None).unwrap();
-            if outcome == "failed" {
-                assert!(matches!(
-                    result,
-                    crate::StartReconciliation::FailedStart { .. }
-                ));
-            } else {
-                assert!(matches!(result, crate::StartReconciliation::Unsettled(_)));
-            }
-            assert_eq!(runner.calls.lock().unwrap().len(), 1);
-        }
-    }
-
-    #[test]
-    fn readiness_conflict_adopts_the_exact_recorded_identity() {
-        let (mut actor, kelpie, runner, panes) = actor([
-            adopt(),
-            failure("conflict", "exact intended incarnation is not ready"),
-        ]);
-        runner.outputs.lock().unwrap().extend([
-            start_report(actor.bot.corpus_path(), "starting"),
-            success(&serde_json::json!({
-                "outcome": "succeeded",
-                "logical_agent_id": "occupant-agent",
-                "incarnation_id": "occupant-incarnation",
-                "operation_id": "adopt-operation"
-            })),
-            renewed(),
-            whoami(),
-            asked("ask-adopted"),
-        ]);
-        let waiter = kelpie.register_waiter().unwrap();
-        actor
-            .handle_trigger(&kelpie, &waiter, &work('a', "hello", None))
-            .unwrap();
-        assert_eq!(panes.calls.lock().unwrap().len(), 1);
-        let calls = runner.calls.lock().unwrap();
-        let args = &calls
-            .iter()
-            .find(|(args, _)| args.iter().any(|arg| arg == "adopt"))
-            .unwrap()
-            .0;
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--logical-id", "occupant-agent"]));
-        assert!(args.windows(2).any(|pair| pair == ["--pane", "w2:p1"]));
-        assert!(args.windows(2).any(|pair| pair == ["--terminal", "term-9"]));
-        let attempt = actor
-            .repository
-            .occupant_start("bot-foobar")
-            .unwrap()
-            .unwrap();
-        assert!(attempt.completed);
-        assert_eq!(
-            attempt.launch.logical_agent_id.as_deref(),
-            Some("occupant-agent")
-        );
-        assert_eq!(attempt.receipt.unwrap()["error"]["class"], "conflict");
-    }
-
-    #[test]
-    fn failed_binding_commit_leaves_launch_unsettled_and_recovers_without_starting_twice() {
-        let (mut actor, kelpie, runner, panes) = actor([adopt(), start()]);
-        let database = actor.bot.corpus_path().join("host.sqlite");
-        actor.repository = SqliteRepository::open(&database).unwrap();
-        let connection = Connection::open(database).unwrap();
-        connection.execute_batch("CREATE TRIGGER reject_binding BEFORE UPDATE OF occupant_logical_id ON sessions
-            WHEN NEW.occupant_logical_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'proof failed binding'); END;").unwrap();
-        let waiter = kelpie.register_waiter().unwrap();
-        let trigger = work('a', "hello", None);
-        assert!(matches!(
-            actor.handle_trigger(&kelpie, &waiter, &trigger),
-            Err(ActorError::Repository(_))
-        ));
-        assert!(
-            !actor
-                .repository
-                .occupant_start("bot-foobar")
-                .unwrap()
-                .unwrap()
-                .completed
-        );
-        assert!(actor
-            .repository
-            .session(actor.bot.id(), &trigger.channel_id)
-            .unwrap()
-            .unwrap()
-            .occupant_logical_id
-            .is_none());
-        connection
-            .execute_batch("DROP TRIGGER reject_binding;")
-            .unwrap();
-        runner.outputs.lock().unwrap().extend([
-            start_report(actor.bot.corpus_path(), "ready"),
-            whoami(),
-            renewed(),
-            whoami(),
-            asked("ask-recovered-commit"),
-        ]);
-        actor
-            .ask_oldest_queued(&kelpie, &waiter, &trigger.channel_id)
-            .unwrap();
-        assert_eq!(panes.calls.lock().unwrap().len(), 1);
-        assert!(
-            actor
-                .repository
-                .occupant_start("bot-foobar")
-                .unwrap()
-                .unwrap()
-                .completed
-        );
-    }
-
-    #[test]
-    fn proven_failed_start_continues_identity_and_retains_attempt_history() {
-        let (mut actor, kelpie, runner, panes) =
-            actor([adopt(), failure("rejected", "launch rejected")]);
-        let database = actor.bot.corpus_path().join("host.sqlite");
-        actor.repository = SqliteRepository::open(&database).unwrap();
-        runner
-            .outputs
-            .lock()
-            .unwrap()
-            .extend([start_report(actor.bot.corpus_path(), "failed"), start()]);
-        let waiter = kelpie.register_waiter().unwrap();
-        let trigger = work('a', "hello", None);
-        actor
-            .handle_trigger(&kelpie, &waiter, &trigger)
-            .unwrap_err();
-        let previous = actor
-            .repository
-            .occupant_start("bot-foobar")
-            .unwrap()
-            .unwrap();
-        assert!(previous.completed);
-        let mut session = actor
-            .repository
-            .session(actor.bot.id(), &trigger.channel_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            session.occupant_logical_id.as_deref(),
-            Some("occupant-agent")
-        );
-        actor
-            .start_occupant(
-                &kelpie,
-                &waiter,
-                &mut session,
-                "snapshot.md",
-                Some("occupant-agent"),
-            )
-            .unwrap();
-        assert_eq!(panes.calls.lock().unwrap().len(), 2);
-        let calls = runner.calls.lock().unwrap();
-        let args = &calls.last().unwrap().0;
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--logical-id", "occupant-agent"]));
-        let newest = actor
-            .repository
-            .occupant_start("bot-foobar")
-            .unwrap()
-            .unwrap();
-        assert_ne!(previous.key, newest.key);
-        let count: u32 = Connection::open(database)
-            .unwrap()
-            .query_row("SELECT count(*) FROM occupant_starts", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
-    }
-
     #[test]
     fn a_failed_kelpie_cancel_still_deletes_the_progress_post() {
         let relay = Arc::new(crate::progress::RecordingProgressRelay::default());
         let (actor, kelpie, _runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -2843,8 +2212,15 @@ mod tests {
 
     #[test]
     fn first_trigger_starts_then_asks_and_stores_reply_to() {
-        let (mut actor, kelpie, runner, panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
 
@@ -2861,10 +2237,6 @@ mod tests {
             .expect("session")
             .expect("bound");
         assert_eq!(session.session_name, "bot-foobar");
-        assert_eq!(
-            session.occupant_logical_id.as_deref(),
-            Some("occupant-agent")
-        );
         assert_eq!(session.renew_id.as_deref(), Some("renew-id"));
         let turns = actor
             .repository
@@ -2897,21 +2269,21 @@ mod tests {
                 .contains(".nostrherd/places/<your public Kelpie name>.md")
         );
         let calls = runner.calls.lock().expect("calls");
-        assert_eq!(calls[1].0[1], "start");
-        assert!(String::from_utf8_lossy(&calls[1].1).contains("Read startup.md before answering"));
-        assert!(calls[1]
+        let start = call(&calls, "start");
+        assert!(String::from_utf8_lossy(&start.1).contains("Read startup.md before answering"));
+        assert!(start
             .0
             .windows(2)
             .any(|pair| pair == ["--sender-id", "waiter-agent"]));
         assert_eq!(
-            calls[1].1,
+            start.1,
             occupant_bootstrap(".nostrherd/places/bot-foobar.md").as_bytes()
         );
-        assert_eq!(calls[2].0[1], "renew");
-        assert!(!calls[2].0.iter().any(|argument| argument == "--sender-id"));
-        assert_eq!(calls[4].0[1], "ask");
+        let renew = call(&calls, "renew");
+        assert!(!renew.0.iter().any(|argument| argument == "--sender-id"));
+        let ask = call(&calls, "ask");
         assert_eq!(
-            calls[4].0[calls[4]
+            ask.0[ask
                 .0
                 .iter()
                 .position(|arg| arg == "--idempotency-key")
@@ -2919,16 +2291,23 @@ mod tests {
                 + 1],
             format!("{}:1", trigger.event_id.as_str())
         );
-        assert_eq!(ask_request(&calls[4].1), trigger.nostr_body);
-        assert!(ask_has_context(&calls[4].1));
+        assert_eq!(ask_request(&ask.1), trigger.nostr_body);
+        assert!(ask_has_context(&ask.1));
         assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
         assert_eq!(WAITER_NAME, "nostrherd");
     }
 
     #[test]
     fn first_trigger_names_the_occupant_from_the_place_display() {
-        let (mut actor, kelpie, _runner, panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, _runner, panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let mut trigger = work('a', "@daniel bot: hello", None);
         trigger.channel_display = "#eng".to_owned();
@@ -2948,8 +2327,15 @@ mod tests {
 
     #[test]
     fn existing_session_keeps_its_stored_name() {
-        let (mut actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         actor
@@ -3011,7 +2397,7 @@ mod tests {
                     && call
                         .0
                         .windows(2)
-                        .any(|pair| pair == ["--logical-id", "occupant-agent"])
+                        .any(|pair| pair == ["--logical-id", "1990"])
             })
             .map(|call| call.0.clone())
             .collect()
@@ -3021,6 +2407,8 @@ mod tests {
     fn failed_renew_still_asks() {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             failure("conflict", "incarnation already has a renew"),
             whoami(),
@@ -3062,6 +2450,8 @@ mod tests {
     fn later_trigger_asks_the_same_occupant_without_starting() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -3094,8 +2484,15 @@ mod tests {
 
     #[test]
     fn open_turn_queues_without_a_second_ask() {
-        let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .handle_trigger(&kelpie, &waiter, &work('a', "bot: first", None))
@@ -3129,11 +2526,14 @@ mod tests {
     fn gone_open_occupant_is_continued_without_a_second_ask() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
             asked("ask-1"),
             failure("conflict", "no ready agent for alias bot-foobar"),
+            dead_claimants(),
             start(),
             renewed(),
         ]);
@@ -3155,10 +2555,6 @@ mod tests {
             .session(actor.bot.id(), &trigger.channel_id)
             .expect("session")
             .expect("bound");
-        assert_eq!(
-            session.occupant_logical_id.as_deref(),
-            Some("occupant-agent")
-        );
         assert_eq!(session.renew_id.as_deref(), Some("renew-id"));
         let turns = actor
             .repository
@@ -3177,10 +2573,121 @@ mod tests {
             .any(|pair| pair == ["--name", "bot-foobar"]));
     }
 
+    /// A name Kelpie has never seen starts fresh, carrying no identity.
+    ///
+    /// Passing `--logical-id` here would name an agent that does not exist,
+    /// which is how a channel stopped dead before D62.
+    #[test]
+    fn an_unknown_name_starts_without_continuing_an_identity() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+
+        actor
+            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
+            .expect("asked");
+
+        assert_eq!(start_count(&runner), 1);
+        assert!(
+            continued_starts(&runner).is_empty(),
+            "nothing held the name, so there is no identity to continue"
+        );
+        assert_eq!(panes.calls.lock().expect("pane calls").len(), 1);
+    }
+
+    /// A name whose runtimes have all ended continues its newest claimant.
+    ///
+    /// Kelpie keeps every identity a name ever had, so the choice is the one
+    /// whose conversation the channel was last having, by creation time.
+    #[test]
+    fn dead_claimants_continue_the_newest_identity() {
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            dead_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+
+        actor
+            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
+            .expect("asked");
+
+        let continued = continued_starts(&runner);
+        assert_eq!(continued.len(), 1);
+        assert!(
+            continued[0]
+                .windows(2)
+                .any(|pair| pair == ["--logical-id", "1990"]),
+            "1990 was created after 1611, so it is the identity to continue: {:?}",
+            continued[0]
+        );
+    }
+
+    /// A pane still holding the name is reclaimed before the start.
+    ///
+    /// Nothing answers to the name, so a pane holding it in this bot's corpus
+    /// is one whose occupant has gone. Leaving it there makes Herdr refuse the
+    /// start with `agent_name_taken`, which stopped a channel for four hours.
+    #[test]
+    fn a_pane_still_holding_the_name_is_reclaimed_and_its_session_carried_over() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            unbound(),
+            dead_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
+        panes.claims.lock().expect("claims").insert(
+            "bot-foobar".to_owned(),
+            ClaimedPane {
+                pane: OccupantPane {
+                    pane_id: "w1EW:p1".to_owned(),
+                    terminal_id: "term_65b128dba71fc2e".to_owned(),
+                },
+                backend_session: Some("ses_f7e8c964affeaMRRyT4cVoGkDc".to_owned()),
+            },
+        );
+        let waiter = kelpie.register_waiter().expect("waiter");
+
+        actor
+            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
+            .expect("asked");
+
+        assert_eq!(
+            panes.released.lock().expect("released").as_slice(),
+            &["w1EW:p1".to_owned()],
+            "the husk holding the name must be closed before the start"
+        );
+        let start = call(&runner.calls.lock().expect("calls"), "start")
+            .0
+            .clone();
+        assert!(
+            start
+                .windows(2)
+                .any(|pair| pair == ["--session", "ses_f7e8c964affeaMRRyT4cVoGkDc"]),
+            "the reclaimed pane's backend session is replayed verbatim: {start:?}"
+        );
+    }
+
     #[test]
     fn ready_open_occupant_is_left_bound_without_asking() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -3206,8 +2713,15 @@ mod tests {
 
     #[test]
     fn pending_scope_lists_open_turn_channels_and_event_ids() {
-        let (mut actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         actor
@@ -3226,38 +2740,17 @@ mod tests {
     }
 
     #[test]
-    fn recovery_refuses_a_namesake_twin() {
-        let (mut actor, kelpie, runner, _panes) = actor([
-            adopt(),
-            start(),
-            renewed(),
-            whoami(),
-            asked("ask-1"),
-            whoami_other(),
-        ]);
-        let waiter = kelpie.register_waiter().expect("waiter");
-        actor
-            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
-            .expect("asked");
-
-        let error = actor
-            .recover_open_occupants(&kelpie, &waiter)
-            .expect_err("twin");
-        assert!(error.to_string().contains("twin-agent"));
-        assert_eq!(ask_count(&runner), 1);
-        assert_eq!(start_count(&runner), 1);
-        assert!(continued_starts(&runner).is_empty());
-    }
-
-    #[test]
     fn resume_queued_recovers_a_gone_open_occupant_without_asking() {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
             asked("ask-1"),
             failure("conflict", "no ready agent for alias bot-foobar"),
+            dead_claimants(),
             start(),
             renewed(),
         ]);
@@ -3276,6 +2769,8 @@ mod tests {
     fn whoami_invalid_receipt_does_not_start_a_replacement() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -3299,6 +2794,8 @@ mod tests {
     fn whoami_rejection_does_not_start_a_replacement() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -3322,14 +2819,8 @@ mod tests {
     fn resume_queued_asks_later_channel_when_open_recovery_fails() {
         let first_channel = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
         let second_channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
-        let (mut actor, kelpie, runner, _panes) = actor([
-            adopt(),
-            whoami_other(),
-            whoami(),
-            renewed(),
-            whoami(),
-            asked("ask-2"),
-        ]);
+        let (mut actor, kelpie, runner, _panes) =
+            actor([adopt(), whoami_other(), whoami(), asked("ask-2"), renewed()]);
         let waiter = kelpie.register_waiter().expect("waiter");
         actor
             .repository
@@ -3337,7 +2828,7 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: first_channel.to_owned(),
                 session_name: "bot-aaa".to_owned(),
-                occupant_logical_id: Some("occupant-agent".to_owned()),
+                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -3364,7 +2855,7 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: second_channel.to_owned(),
                 session_name: "bot-foobar".to_owned(),
-                occupant_logical_id: Some("occupant-agent".to_owned()),
+                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -3407,15 +2898,22 @@ mod tests {
         assert_eq!(ask_count(&runner), 1);
         assert_eq!(start_count(&runner), 0);
         assert_eq!(
-            ask_request(&runner.calls.lock().expect("calls").last().expect("ask").1),
+            ask_request(&last_call(&runner.calls.lock().expect("calls"), "ask").1),
             "second"
         );
     }
 
     #[test]
     fn resume_queued_starts_an_occupant_for_bootstrapping() {
-        let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         actor
@@ -3453,7 +2951,8 @@ mod tests {
             actor.resume_queued(&kelpie, &waiter).expect("resume"),
             Some(TriggerOutcome::Asked)
         );
-        assert_eq!(runner.calls.lock().expect("calls")[1].0[1], "start");
+        let calls = runner.calls.lock().expect("calls");
+        call(&calls, "start");
     }
 
     #[test]
@@ -3461,6 +2960,8 @@ mod tests {
     fn queued_turn_recovers_an_unavailable_recorded_occupant_and_drains() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -3470,6 +2971,7 @@ mod tests {
             pending_ask("ask-unavailable"),
             cancelled(),
             retired(),
+            dead_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -3515,10 +3017,6 @@ mod tests {
             .session(actor.bot.id(), &second.channel_id)
             .expect("session")
             .expect("bound");
-        assert_eq!(
-            session.occupant_logical_id.as_deref(),
-            Some("occupant-agent")
-        );
         assert_eq!(session.renew_id.as_deref(), Some("renew-id"));
         let turns = actor
             .repository
@@ -3570,8 +3068,6 @@ mod tests {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
             whoami(),
-            renewed(),
-            whoami(),
             failure("rejected", "occupant rejected the prompt"),
             pending_ask("ask-rejected"),
             cancelled(),
@@ -3584,7 +3080,7 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: trigger.channel_id.clone(),
                 session_name: "bot-foobar".to_owned(),
-                occupant_logical_id: Some("occupant-agent".to_owned()),
+                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -3640,9 +3136,8 @@ mod tests {
             failure("conflict", "no ready agent for alias bot-aaa"),
             failure("rejected", "recovery start failed"),
             whoami(),
-            renewed(),
-            whoami(),
             asked("ask-2"),
+            renewed(),
         ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         for (channel, display, character, body) in [
@@ -3655,7 +3150,7 @@ mod tests {
                     bot_id: actor.bot.id().clone(),
                     channel_id: channel.to_owned(),
                     session_name: format!("bot-{display}"),
-                    occupant_logical_id: Some("occupant-agent".to_owned()),
+                    backend_session: None,
                     renew_id: None,
                     ask_context_event_id: None,
                     ask_context_created_at: None,
@@ -3700,7 +3195,7 @@ mod tests {
         let calls = runner.calls.lock().expect("calls");
         assert_eq!(calls.iter().filter(|call| call.0[1] == "ask").count(), 1);
         assert_eq!(calls.iter().filter(|call| call.0[1] == "start").count(), 1);
-        assert_eq!(ask_request(&calls.last().expect("ask").1), "second");
+        assert_eq!(ask_request(&last_call(&calls, "ask").1), "second");
     }
 
     #[test]
@@ -3728,8 +3223,15 @@ mod tests {
 
     #[test]
     fn ingest_turn_candidate_uses_the_actor_path() {
-        let (mut actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "@daniel bot: hello", Some('c'));
         let action = crate::relay::IngestAction::TurnCandidate {
@@ -3977,8 +3479,15 @@ mod tests {
 
     #[test]
     fn snapshot_excludes_other_channel_dms() {
-        let (mut actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "bot: hello", None);
         let now = crate::unix_now().expect("now");
@@ -4058,6 +3567,8 @@ mod tests {
     fn handle_turn_completed_asks_the_queued_turn() {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4094,7 +3605,7 @@ mod tests {
         assert_eq!(turns[1].state, TurnState::Open);
         assert_eq!(turns[1].ask_id.as_deref(), Some("ask-2"));
         assert_eq!(
-            ask_request(&runner.calls.lock().expect("calls").last().expect("ask").1),
+            ask_request(&last_call(&runner.calls.lock().expect("calls"), "ask").1),
             "second"
         );
     }
@@ -4103,6 +3614,8 @@ mod tests {
     fn ingest_edit_cancels_open_work_and_asks_the_latest_body() {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4164,6 +3677,8 @@ mod tests {
     fn ingest_delete_cancels_open_work_without_asking() {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4214,8 +3729,15 @@ mod tests {
 
     #[test]
     fn claimed_open_turn_ignores_later_edits() {
-        let (mut actor, kelpie, runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "hello", None);
         actor
@@ -4261,6 +3783,8 @@ mod tests {
     fn ingest_edit_of_queued_work_replaces_without_a_second_ask() {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4319,6 +3843,8 @@ mod tests {
     fn ingest_edit_of_open_turn_drains_a_queued_sibling() {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4368,7 +3894,7 @@ mod tests {
         assert_eq!(turns[2].state, TurnState::Queued);
         assert_eq!(turns[2].event_id, first.event_id);
         assert_eq!(
-            ask_request(&runner.calls.lock().expect("calls").last().expect("ask").1),
+            ask_request(&last_call(&runner.calls.lock().expect("calls"), "ask").1),
             "second"
         );
     }
@@ -4425,8 +3951,15 @@ mod tests {
     #[test]
     fn trigger_adds_in_flight_reaction() {
         let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
-        let (actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "hello", None);
@@ -4443,8 +3976,15 @@ mod tests {
     #[test]
     fn queued_trigger_adds_its_own_in_flight_reaction() {
         let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
-        let (actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
         let waiter = kelpie.register_waiter().expect("waiter");
         let first = work('a', "first", None);
@@ -4464,8 +4004,15 @@ mod tests {
     #[test]
     fn duplicate_trigger_does_not_add_again() {
         let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
-        let (actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "hello", None);
@@ -4486,6 +4033,8 @@ mod tests {
         let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
         let (actor, kelpie, _runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4520,6 +4069,8 @@ mod tests {
         let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
         let (actor, kelpie, _runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4555,8 +4106,15 @@ mod tests {
     #[test]
     fn occupant_final_removes_in_flight_reaction() {
         let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
-        let (actor, kelpie, runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (actor, kelpie, runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "hello", None);
@@ -4591,6 +4149,8 @@ mod tests {
         let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
         let (actor, kelpie, _runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4696,6 +4256,8 @@ mod tests {
         let relay = Arc::new(crate::progress::RecordingProgressRelay::default());
         let (actor, kelpie, _runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4745,6 +4307,8 @@ mod tests {
         let relay = Arc::new(crate::progress::RecordingProgressRelay::default());
         let (actor, kelpie, _runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),
@@ -4797,8 +4361,15 @@ mod tests {
 
     #[test]
     fn snapshot_progress_post_excluded() {
-        let (mut actor, kelpie, _runner, _panes) =
-            actor([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+        let (mut actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
         let waiter = kelpie.register_waiter().expect("waiter");
         let trigger = work('a', "hello", None);
         let post_id = "e".repeat(64);
@@ -4847,6 +4418,8 @@ mod tests {
     fn ask_context_excludes_progress_post() {
         let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
+            unbound(),
+            no_claimants(),
             start(),
             renewed(),
             whoami(),

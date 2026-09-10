@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use crate::actor::{OccupantPane, OccupantPaneAllocator};
+use crate::actor::{ClaimedPane, OccupantPane, OccupantPaneAllocator};
 use crate::{CommandRunner, ProcessRunner};
 
 /// Process-backed allocator that creates one Herdr workspace per occupant.
@@ -108,6 +108,35 @@ impl OccupantPaneAllocator for HerdrPaneAllocator {
         occupant_pane(&receipt)
     }
 
+    fn claimed(&self, session_name: &str, cwd: &Path) -> Result<Option<ClaimedPane>, Self::Error> {
+        let cwd = cwd.to_str().ok_or_else(|| {
+            HerdrError::InvalidReceipt("occupant corpus path is not valid UTF-8".to_owned())
+        })?;
+        let output = self
+            .runner
+            .run(&["agent".to_owned(), "list".to_owned()], &[])
+            .map_err(HerdrError::Io)?;
+        if !output.success {
+            return Err(HerdrError::Rejected {
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        let receipt: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            HerdrError::InvalidReceipt(format!("herdr agent list was not JSON: {error}"))
+        })?;
+        Ok(receipt
+            .pointer("/result/agents")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|agent| {
+                agent.get("name").and_then(Value::as_str) == Some(session_name)
+                    && agent.get("cwd").and_then(Value::as_str) == Some(cwd)
+            })
+            .and_then(claimed_pane))
+    }
+
     fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error> {
         // Closing the root pane closes the workspace it was created with.
         let output = self
@@ -165,6 +194,26 @@ pub fn current_pane_with(program: impl AsRef<Path>) -> Result<OccupantPane, Herd
         HerdrError::InvalidReceipt(format!("herdr pane get was not JSON: {error}"))
     })?;
     occupant_pane(&receipt)
+}
+
+/// Read one `herdr agent list` entry as a pane already holding a name.
+///
+/// The backend session is whatever Herdr recorded for the pane. It is opaque:
+/// backends spell it differently, and the host only carries it back to Kelpie.
+fn claimed_pane(agent: &Value) -> Option<ClaimedPane> {
+    let pane_id = agent.get("pane_id").and_then(Value::as_str)?;
+    let terminal_id = agent.get("terminal_id").and_then(Value::as_str)?;
+    Some(ClaimedPane {
+        pane: OccupantPane {
+            pane_id: pane_id.to_owned(),
+            terminal_id: terminal_id.to_owned(),
+        },
+        backend_session: agent
+            .pointer("/agent_session/value")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    })
 }
 
 fn occupant_pane(receipt: &Value) -> Result<OccupantPane, HerdrError> {

@@ -11,8 +11,8 @@ use crate::outbox::OutboundAttempt;
 use crate::progress::ProgressPost;
 use crate::watch::{WatchFire, WatchRecord};
 use crate::{
-    HostRepository, IndexedRelayEvent, NewTurn, OccupantStartAttempt, SessionRecord, TurnRecord,
-    TurnReplacement, TurnState,
+    HostRepository, IndexedRelayEvent, NewTurn, SessionRecord, TurnRecord, TurnReplacement,
+    TurnState,
 };
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -106,52 +106,30 @@ fn backfill_outbound_bot_id(connection: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// True for the only shape Kelpie accepts as a logical agent id.
+/// Stop recording which Kelpie identity occupies a session (D62).
 ///
-/// Kelpie's ids are `serde(transparent)` newtypes over `NonZeroU64`, so an id
-/// that is not a positive decimal integer is not merely unknown to the daemon:
-/// it is refused before any lookup, and no amount of retrying makes it valid.
-pub(crate) fn is_kelpie_id(value: &str) -> bool {
-    value.parse::<u64>().is_ok_and(|id| id != 0)
-}
-
-/// Forget occupant identities recorded before Kelpie renumbered its agents.
+/// The host used to store a logical agent id per session and treat it as the
+/// identity. That pointer went stale twice: Kelpie renumbered agents from
+/// `UUIDv7` to integers without carrying the old ids across, and a name left
+/// claimed by a dead occupant's pane refused every replacement. Both times a
+/// channel stopped forever, because a stored identifier can disagree with
+/// reality and nothing could converge back.
 ///
-/// Kelpie replaced `UUIDv7` agent ids with integers and did not carry the old
-/// ids forward, so every session recorded before that migration points at an
-/// identity the daemon will never accept. The host had no way to notice: it
-/// passed the stored id to `kelpie start --logical-id`, got a hard refusal,
-/// and retried once a second forever while the channel stayed silent.
-///
-/// Clearing the id lets the session start a fresh occupant. The recorded start
-/// attempt has to go with it, because it carries the same dead id in its launch
-/// JSON and would otherwise be reconciled instead of a clean start.
-fn drop_pre_integer_occupant_ids(connection: &Connection) -> rusqlite::Result<()> {
-    let stale: Vec<(String, Option<String>)> = connection
-        .prepare("SELECT session_name, occupant_logical_id FROM sessions")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|(_, id): &(String, Option<String>)| {
-            id.as_deref().is_some_and(|id| !is_kelpie_id(id))
-        })
-        .collect();
-    for (session_name, occupant_logical_id) in &stale {
-        connection.execute(
-            "UPDATE sessions SET occupant_logical_id = NULL, renew_id = NULL
-             WHERE session_name = ?1",
-            [session_name],
+/// The session name was always the real key, enforced by `session_name UNIQUE`
+/// and `UNIQUE(bot_id, channel_id)`. Dropping the column removes the drift
+/// rather than handling it: what is never stored cannot go stale. The recorded
+/// start attempts go with it, since each is keyed to a seat that is now dead.
+fn migrate_to_name_identity(connection: &Connection) -> rusqlite::Result<()> {
+    if column_exists(connection, "sessions", "occupant_logical_id")? {
+        connection.execute_batch(
+            "ALTER TABLE sessions DROP COLUMN occupant_logical_id;
+             DROP TABLE IF EXISTS occupant_starts;",
         )?;
-        connection.execute(
-            "DELETE FROM occupant_starts WHERE session_name = ?1",
-            [session_name],
-        )?;
-        eprintln!(
-            "session {session_name} forgot occupant {}: not a Kelpie id; starting a fresh occupant",
-            occupant_logical_id.as_deref().unwrap_or_default()
-        );
     }
-    Ok(())
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE sessions ADD COLUMN backend_session TEXT",
+    )
 }
 
 fn migrate_turn_wake_columns(connection: &Connection) -> rusqlite::Result<()> {
@@ -233,7 +211,7 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE outbound_attempts ADD COLUMN abandoned_at INTEGER",
     )?;
     backfill_outbound_bot_id(connection)?;
-    drop_pre_integer_occupant_ids(connection)?;
+    migrate_to_name_identity(connection)?;
     connection.execute_batch(
         "DROP INDEX IF EXISTS progress_posts_pending_flush;
          CREATE INDEX progress_posts_pending_flush
@@ -408,8 +386,8 @@ impl SqliteRepository {
                    bot_id TEXT NOT NULL,
                    channel_id TEXT NOT NULL,
                    session_name TEXT NOT NULL UNIQUE,
-                   occupant_logical_id TEXT,
                    renew_id TEXT,
+                   backend_session TEXT,
                    ask_context_event_id TEXT CHECK(
                        ask_context_event_id IS NULL OR length(ask_context_event_id) = 64
                    ),
@@ -417,16 +395,6 @@ impl SqliteRepository {
                    UNIQUE(bot_id, channel_id)
                ) STRICT;
 
-               CREATE TABLE IF NOT EXISTS occupant_starts (
-                   sequence INTEGER PRIMARY KEY,
-                   session_name TEXT NOT NULL,
-                   attempt_key TEXT NOT NULL UNIQUE,
-                   attempt_json TEXT NOT NULL,
-                   created_at INTEGER NOT NULL,
-                   updated_at INTEGER NOT NULL
-               ) STRICT;
-               CREATE INDEX IF NOT EXISTS occupant_starts_session
-                   ON occupant_starts(session_name, sequence);
 
              CREATE TABLE IF NOT EXISTS turns (
                  sequence INTEGER PRIMARY KEY,
@@ -546,8 +514,8 @@ impl SqliteRepository {
             bot_id: parse_bot_id(&stored_bot_id, 0)?,
             channel_id: row.get(1)?,
             session_name: row.get(2)?,
-            occupant_logical_id: row.get(3)?,
-            renew_id: row.get(4)?,
+            renew_id: row.get(3)?,
+            backend_session: row.get(4)?,
             ask_context_event_id: event_id
                 .as_deref()
                 .map(|value| parse_event_id(value, 5))
@@ -577,57 +545,6 @@ impl SqliteRepository {
 
 impl HostRepository for SqliteRepository {
     type Error = rusqlite::Error;
-
-    fn occupant_start(
-        &self,
-        session_name: &str,
-    ) -> Result<Option<OccupantStartAttempt>, Self::Error> {
-        let json: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT attempt_json FROM occupant_starts WHERE session_name = ?1
-                 ORDER BY sequence DESC LIMIT 1",
-                [session_name],
-                |row| row.get(0),
-            )
-            .optional()?;
-        json.map(|json| serde_json::from_str(&json))
-            .transpose()
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-    }
-
-    fn save_occupant_start(&mut self, attempt: &OccupantStartAttempt) -> Result<(), Self::Error> {
-        let json = serde_json::to_string(attempt)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let now = crate::unix_now()
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO occupant_starts(session_name, attempt_key, attempt_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(attempt_key) DO UPDATE SET
-                 attempt_json = excluded.attempt_json,
-                 updated_at = excluded.updated_at",
-            params![attempt.launch.name, attempt.key, json, now],
-        )?;
-        if attempt.completed {
-            let logical_id = attempt.launch.logical_agent_id.as_deref().ok_or(
-                rusqlite::Error::InvalidParameterName(
-                    "completed start requires a logical identity".to_owned(),
-                ),
-            )?;
-            let changed = transaction.execute(
-                "UPDATE sessions SET occupant_logical_id = ?1 WHERE session_name = ?2
-                 AND (occupant_logical_id IS NULL OR occupant_logical_id = ?1)",
-                params![logical_id, attempt.launch.name],
-            )?;
-            if changed != 1 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
-        }
-        transaction.commit()?;
-        Ok(())
-    }
 
     fn mark_event_processed(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
         let transaction = self.connection.transaction()?;
@@ -785,12 +702,12 @@ impl HostRepository for SqliteRepository {
     fn save_session(&mut self, session: &SessionRecord) -> Result<(), Self::Error> {
         self.connection.execute(
             "INSERT INTO sessions(
-                 bot_id, channel_id, session_name, occupant_logical_id, renew_id,
+                 bot_id, channel_id, session_name, renew_id, backend_session,
                  ask_context_event_id, ask_context_created_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(bot_id, channel_id) DO UPDATE SET
                  session_name = excluded.session_name,
-                 occupant_logical_id = excluded.occupant_logical_id,
+                 backend_session = excluded.backend_session,
                  renew_id = excluded.renew_id,
                  ask_context_event_id = excluded.ask_context_event_id,
                  ask_context_created_at = excluded.ask_context_created_at",
@@ -798,8 +715,8 @@ impl HostRepository for SqliteRepository {
                 session.bot_id.as_str(),
                 session.channel_id,
                 session.session_name,
-                session.occupant_logical_id,
                 session.renew_id,
+                session.backend_session,
                 session.ask_context_event_id.as_ref().map(EventId::as_str),
                 session.ask_context_created_at,
             ],
@@ -814,7 +731,7 @@ impl HostRepository for SqliteRepository {
     ) -> Result<Option<SessionRecord>, Self::Error> {
         self.connection
             .query_row(
-                "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id,
+                "SELECT bot_id, channel_id, session_name, renew_id, backend_session,
                         ask_context_event_id, ask_context_created_at
                  FROM sessions WHERE bot_id = ?1 AND channel_id = ?2",
                 params![bot_id.as_str(), channel_id],
@@ -826,28 +743,13 @@ impl HostRepository for SqliteRepository {
     fn session_by_name(&self, session_name: &str) -> Result<Option<SessionRecord>, Self::Error> {
         self.connection
             .query_row(
-                "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id,
+                "SELECT bot_id, channel_id, session_name, renew_id, backend_session,
                         ask_context_event_id, ask_context_created_at
                  FROM sessions WHERE session_name = ?1",
                 [session_name],
                 Self::read_session,
             )
             .optional()
-    }
-
-    fn session_by_occupant_logical_id(
-        &self,
-        occupant_logical_id: &str,
-    ) -> Result<Option<SessionRecord>, Self::Error> {
-        let mut statement = self.connection.prepare(
-            "SELECT bot_id, channel_id, session_name, occupant_logical_id, renew_id,
-                    ask_context_event_id, ask_context_created_at
-             FROM sessions WHERE occupant_logical_id = ?1",
-        )?;
-        let mut sessions = statement
-            .query_map([occupant_logical_id], Self::read_session)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((sessions.len() == 1).then(|| sessions.remove(0)))
     }
 
     fn open_next_turn(
@@ -1112,7 +1014,7 @@ impl HostRepository for SqliteRepository {
     fn sessions_with_pending_turns(&self) -> Result<Vec<SessionRecord>, Self::Error> {
         let mut statement = self.connection.prepare(
             "SELECT DISTINCT s.bot_id, s.channel_id, s.session_name,
-                    s.occupant_logical_id, s.renew_id,
+                    s.renew_id, s.backend_session,
                     s.ask_context_event_id, s.ask_context_created_at
              FROM sessions AS s
              JOIN turns AS t ON t.session_id = s.id
@@ -1681,8 +1583,8 @@ mod tests {
             bot_id: bot_id.clone(),
             channel_id: channel_id.to_owned(),
             session_name: format!("{bot_id}-channel"),
-            occupant_logical_id: Some("logical-agent-id".to_owned()),
             renew_id: Some("renew-id".to_owned()),
+            backend_session: None,
             ask_context_event_id: None,
             ask_context_created_at: None,
         }
@@ -1720,74 +1622,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn only_a_positive_integer_is_a_kelpie_id() {
-        assert!(is_kelpie_id("1990"));
-        assert!(!is_kelpie_id("0"));
-        assert!(!is_kelpie_id("-1"));
-        assert!(!is_kelpie_id(""));
-        assert!(!is_kelpie_id("01a068f7-fc0e-7172-8dfc-4fc1a54ec66c"));
-    }
-
-    /// A session recorded before Kelpie renumbered its agents must start over.
+    /// A database written before D62 loses its stored identity on open.
     ///
-    /// The stored UUID is refused by the daemon on sight, so keeping it means
-    /// retrying a start that can never succeed. The recorded start attempt has
-    /// to go too: it carries the same dead id and would be reconciled instead.
+    /// The column and the start attempts are the two places a dead Kelpie id
+    /// could hide, and either one stops a channel: the id is refused on sight,
+    /// and a recorded attempt is keyed to a seat that no longer exists.
     #[test]
-    fn an_occupant_id_from_before_the_integer_ids_is_forgotten() {
-        let mut repository =
-            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
-                .expect("repository");
-        let bot = BotId::new("bot").unwrap();
-        let mut record = session(&bot, "channel");
-        record.occupant_logical_id = Some("01a068f7-fc0e-7172-8dfc-4fc1a54ec66c".to_owned());
-        record.renew_id = Some("01a06902-cf56-7462-ad91-6a7e6f0bb7fe".to_owned());
-        repository.save_session(&record).expect("save");
-        repository
-            .connection
-            .execute(
-                "INSERT INTO occupant_starts(
+    fn opening_a_pre_d62_database_drops_the_stored_identity() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                     id INTEGER PRIMARY KEY,
+                     bot_id TEXT NOT NULL,
+                     channel_id TEXT NOT NULL,
+                     session_name TEXT NOT NULL UNIQUE,
+                     occupant_logical_id TEXT,
+                     renew_id TEXT,
+                     UNIQUE(bot_id, channel_id)
+                 ) STRICT;
+                 CREATE TABLE occupant_starts (
+                     sequence INTEGER PRIMARY KEY,
+                     session_name TEXT NOT NULL,
+                     attempt_key TEXT NOT NULL UNIQUE,
+                     attempt_json TEXT NOT NULL,
+                     created_at INTEGER NOT NULL,
+                     updated_at INTEGER NOT NULL
+                 ) STRICT;
+                 INSERT INTO sessions(bot_id, channel_id, session_name, occupant_logical_id)
+                 VALUES ('bot', 'a-channel', 'bot-a-channel',
+                         '01a068f7-fc0e-7172-8dfc-4fc1a54ec66c');
+                 INSERT INTO occupant_starts(
                      session_name, attempt_key, attempt_json, created_at, updated_at)
-                 VALUES (?1, 'key', '{}', 0, 0)",
-                [&record.session_name],
+                 VALUES ('bot-a-channel', 'stale', '{}', 0, 0);",
             )
-            .expect("recorded start");
+            .expect("pre-D62 schema");
 
-        drop_pre_integer_occupant_ids(&repository.connection).expect("migration");
+        migrate_to_name_identity(&connection).expect("migration");
 
-        let reloaded = repository
-            .session_by_name(&record.session_name)
-            .expect("query")
-            .expect("session");
-        assert_eq!(reloaded.occupant_logical_id, None);
-        assert_eq!(reloaded.renew_id, None);
-        let starts: i64 = repository
-            .connection
-            .query_row("SELECT count(*) FROM occupant_starts", [], |row| row.get(0))
+        assert!(!column_exists(&connection, "sessions", "occupant_logical_id").unwrap());
+        assert!(column_exists(&connection, "sessions", "backend_session").unwrap());
+        let starts: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'occupant_starts'",
+                [],
+                |row| row.get(0),
+            )
             .expect("count");
-        assert_eq!(starts, 0);
+        assert_eq!(starts, 0, "recorded start attempts must not survive");
     }
 
     #[test]
-    fn an_integer_occupant_id_survives_the_migration() {
+    fn the_backend_session_survives_a_round_trip_verbatim() {
         let mut repository =
             SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
                 .expect("repository");
         let bot = BotId::new("bot").unwrap();
         let mut record = session(&bot, "channel");
-        record.occupant_logical_id = Some("1990".to_owned());
-        record.renew_id = Some("2796".to_owned());
+        // Opaque to the host: an opencode token here, a UUID for another
+        // backend. Stored and replayed exactly as Herdr reported it.
+        record.backend_session = Some("ses_f7e8c964affeaMRRyT4cVoGkDc".to_owned());
         repository.save_session(&record).expect("save");
-
-        drop_pre_integer_occupant_ids(&repository.connection).expect("migration");
 
         let reloaded = repository
             .session_by_name(&record.session_name)
             .expect("query")
             .expect("session");
-        assert_eq!(reloaded.occupant_logical_id.as_deref(), Some("1990"));
-        assert_eq!(reloaded.renew_id.as_deref(), Some("2796"));
+
+        assert_eq!(
+            reloaded.backend_session.as_deref(),
+            Some("ses_f7e8c964affeaMRRyT4cVoGkDc")
+        );
+        assert_eq!(reloaded.renew_id, record.renew_id);
     }
 
     #[test]
@@ -2005,19 +1912,7 @@ mod tests {
             repository.session_by_name(&expected.session_name).unwrap(),
             Some(expected.clone())
         );
-        assert_eq!(
-            repository
-                .session_by_occupant_logical_id("logical-agent-id")
-                .unwrap(),
-            Some(expected)
-        );
         assert_eq!(repository.session_by_name("missing").unwrap(), None);
-        assert_eq!(
-            repository
-                .session_by_occupant_logical_id("missing")
-                .unwrap(),
-            None
-        );
     }
 
     #[test]

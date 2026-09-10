@@ -106,7 +106,7 @@ fn open_repo_for_tags(bot: &str, tags_json: &str) -> (SqliteRepository, FakePubl
             bot_id: bot_id.clone(),
             channel_id: CHANNEL.to_owned(),
             session_name: format!("{bot}-foobar"),
-            occupant_logical_id: Some("1990".to_owned()),
+            backend_session: None,
             renew_id: None,
             ask_context_event_id: None,
             ask_context_created_at: None,

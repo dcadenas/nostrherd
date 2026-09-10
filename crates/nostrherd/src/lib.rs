@@ -37,21 +37,6 @@ impl StartedOccupant {
     }
 }
 
-/// Outcome of reconciling one recorded occupant start attempt.
-#[derive(Debug)]
-pub(crate) enum StartReconciliation {
-    /// The exact recorded seat is Ready and live under its public name.
-    Ready(StartedOccupant),
-    /// The recorded logical id is known but its binding ended; continuing it
-    /// needs a fresh launch attempt, never a new identity.
-    FailedStart { logical_agent_id: String },
-    /// No matching declaration is visible; retry only the original keyed request.
-    Missing,
-    /// The attempt cannot be settled from available evidence; starting a
-    /// replacement would risk a duplicate identity.
-    Unsettled(String),
-}
-
 /// Launch coordinates for a corpus occupant.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OccupantLaunch {
@@ -62,19 +47,22 @@ pub struct OccupantLaunch {
     pub cwd: PathBuf,
     pub timeout_ms: u64,
     pub logical_agent_id: Option<String>,
+    /// The backend's own session token, replayed so a restart continues the
+    /// conversation instead of rebuilding it from the corpus (D62).
+    ///
+    /// Opaque. `kind` names any installed agent CLI, and each backend spells
+    /// this differently, so the host stores and replays it exactly as Herdr
+    /// reported it and never parses it.
+    pub backend_session: Option<String>,
 }
 
-/// Durable intent and diagnostic receipt for one occupant launch.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct OccupantStartAttempt {
-    pub key: String,
-    pub launch: OccupantLaunch,
-    pub bootstrap: String,
-    pub sender_id: String,
-    pub receipt: Option<Value>,
-    pub start_error: Option<String>,
-    pub diagnostic: Option<String>,
-    pub completed: bool,
+/// One logical agent that has held a public name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameClaimant {
+    pub logical_agent_id: String,
+    pub created_at_ms: i64,
+    /// Whether Kelpie can address this claimant right now.
+    pub live: bool,
 }
 
 /// Short trusted body used only to finish `kelpie start --tell`.
@@ -403,6 +391,56 @@ impl KelpieClient {
         })
     }
 
+    /// Return the identity to continue for a public name, if one exists.
+    ///
+    /// A logical agent outlives its runtimes, so a name accumulates claimants:
+    /// each incarnation Kelpie ever recorded under it. `whoami` answers only
+    /// while one is live and reports a conflict otherwise, so continuing a
+    /// name after its runtime died means choosing from the history. The newest
+    /// claimant is the one whose conversation the channel was last having.
+    ///
+    /// Returns `None` when no claimant has ever held the name, which is the
+    /// signal to start fresh (D62).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Kelpie cannot be invoked or answers unreadably.
+    pub fn resolve_name(&self, name: &str) -> Result<Option<NameClaimant>, KelpieError> {
+        let output = self.invoke(&["--json", "who", name, "--history"], &[])?;
+        if !output.success {
+            // An unknown name is an answer, not a failure: nothing holds it.
+            if occupant_alias_unbound(&output.receipt) {
+                return Ok(None);
+            }
+            return Err(output.rejected());
+        }
+        let claimants = result(&output.receipt)?
+            .get("claimants")
+            .and_then(Value::as_array)
+            .ok_or_else(|| KelpieError::InvalidReceipt("missing claimants".to_owned()))?;
+        claimants
+            .iter()
+            .map(|claimant| {
+                Ok(NameClaimant {
+                    logical_agent_id: field(claimant, "logical_agent_id")?,
+                    created_at_ms: claimant
+                        .get("created_at_ms")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    live: claimant
+                        .get("live")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+            })
+            .collect::<Result<Vec<_>, KelpieError>>()
+            .map(|claimants| {
+                claimants
+                    .into_iter()
+                    .max_by_key(|claimant| claimant.created_at_ms)
+            })
+    }
+
     /// Start a session occupant in an existing Herdr pane.
     ///
     /// The initial message is a short trusted tell so start and trigger ask
@@ -462,6 +500,9 @@ impl KelpieClient {
         if let Some(logical_agent_id) = &launch.logical_agent_id {
             arguments.extend(["--logical-id".to_owned(), logical_agent_id.clone()]);
         }
+        if let Some(backend_session) = &launch.backend_session {
+            arguments.extend(["--session".to_owned(), backend_session.clone()]);
+        }
         let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
         let output = self.invoke(&arguments, bootstrap.as_bytes())?;
         *receipt = Some(output.receipt.clone());
@@ -493,190 +534,12 @@ impl KelpieClient {
         Ok(started)
     }
 
-    pub(crate) fn dispatch_occupant_start(
-        &self,
-        attempt: &mut OccupantStartAttempt,
-    ) -> Result<StartedOccupant, KelpieError> {
-        let mut receipt = None;
-        let result = self.start_occupant_with_receipt(
-            &attempt.launch,
-            &attempt.bootstrap,
-            Some(&attempt.sender_id),
-            Some(&attempt.key),
-            &mut receipt,
-        );
-        if attempt.receipt.is_none() {
-            attempt.receipt = receipt;
-        }
-        if let Err(error) = &result {
-            attempt.start_error.get_or_insert_with(|| error.to_string());
-        }
-        result
-    }
-
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn reconcile_occupant_start(
-        &self,
-        launch: &mut OccupantLaunch,
-        receipt: Option<&Value>,
-    ) -> Result<StartReconciliation, KelpieError> {
-        if let Some(recorded_id) = receipt
-            .and_then(|receipt| receipt.pointer("/result/logical_agent_id"))
-            .map(Some)
-            .and_then(json_text)
-            .as_deref()
-        {
-            if launch
-                .logical_agent_id
-                .as_deref()
-                .is_some_and(|expected| expected != recorded_id)
-            {
-                return Ok(StartReconciliation::Unsettled(
-                    "start receipt contradicts the recorded logical identity".to_owned(),
-                ));
-            }
-            launch.logical_agent_id = Some(recorded_id.to_owned());
-        }
-        let output = self.invoke(&["--json", "report"], &[])?;
-        if !output.success {
-            return Err(output.rejected());
-        }
-        let agents = result(&output.receipt)?
-            .get("agents")
-            .and_then(Value::as_array)
-            .ok_or_else(|| KelpieError::InvalidReceipt("missing report agents".to_owned()))?;
-        let mut matches = Vec::new();
-        for agent in agents {
-            let Some(incarnations) = agent.get("incarnations").and_then(Value::as_array) else {
-                continue;
-            };
-            for incarnation in incarnations {
-                if incarnation.get("intended_pane_id").and_then(Value::as_str)
-                    == Some(&launch.pane_id)
-                    && incarnation
-                        .get("expected_terminal_id")
-                        .and_then(Value::as_str)
-                        == Some(&launch.terminal_id)
-                {
-                    matches.push((agent, incarnation));
-                }
-            }
-        }
-        if let Some(expected) = launch.logical_agent_id.as_deref() {
-            let seat_present = !matches.is_empty();
-            matches.retain(|(agent, _)| agent["agent_id"].as_str() == Some(expected));
-            if seat_present && matches.is_empty() {
-                return Ok(StartReconciliation::Unsettled(
-                    "recorded seat belongs to a different logical identity".to_owned(),
-                ));
-            }
-        }
-        if matches.is_empty() {
-            return Ok(StartReconciliation::Missing);
-        }
-        if matches.len() > 1 {
-            let logical_id = field(matches[0].0, "agent_id")?;
-            if matches
-                .iter()
-                .any(|(agent, _)| json_text(agent.get("agent_id")).as_deref() != Some(&logical_id))
-            {
-                return Ok(StartReconciliation::Unsettled(
-                    "report shows different logical identities on the recorded seat".to_owned(),
-                ));
-            }
-            // Adoption can leave an ended incarnation beside its Ready successor.
-            // A crash before persisting the adoption receipt must reuse that successor.
-            matches.retain(|(_, incarnation)| {
-                incarnation.get("state").and_then(Value::as_str) == Some("ready")
-            });
-            if matches.len() != 1 {
-                return Ok(StartReconciliation::Unsettled(
-                    "report does not show one Ready successor on the recorded seat".to_owned(),
-                ));
-            }
-        }
-        let (agent, incarnation) = matches[0];
-        let logical_agent_id = field(agent, "agent_id")?;
-        if agent.get("public_name").and_then(Value::as_str) != Some(&launch.name)
-            || incarnation.get("backend_kind").and_then(Value::as_str) != Some(&launch.backend)
-            || incarnation.get("working_directory").and_then(Value::as_str) != launch.cwd.to_str()
-        {
-            return Ok(StartReconciliation::Unsettled(
-                "recorded seat does not match the intended name, backend, and corpus".to_owned(),
-            ));
-        }
-        if launch
-            .logical_agent_id
-            .as_ref()
-            .is_some_and(|expected| expected != &logical_agent_id)
-        {
-            return Ok(StartReconciliation::Unsettled(
-                "report names a different logical agent than the recorded start".to_owned(),
-            ));
-        }
-        launch.logical_agent_id = Some(logical_agent_id.clone());
-        // mark_rejected can fail a start operation without demoting declared.
-        // Use the same evidence for the matched binding and its siblings.
-        let ended = |entry: &Value| {
-            matches!(
-                entry["state"].as_str(),
-                Some("failed" | "retired" | "superseded")
-            ) || (entry["state"].as_str() == Some("declared")
-                && entry
-                    .pointer("/latest_operation/kind")
-                    .and_then(Value::as_str)
-                    == Some("start")
-                && entry
-                    .pointer("/latest_operation/outcome")
-                    .and_then(Value::as_str)
-                    == Some("failed"))
-        };
-        match field(incarnation, "state")?.as_str() {
-            "ready" => {
-                let matched_incarnation = field(incarnation, "incarnation_id")?;
-                let live = self.occupant_whoami(&launch.name)?;
-                if live.logical_agent_id != logical_agent_id
-                    || live.incarnation_id != matched_incarnation
-                {
-                    return Ok(StartReconciliation::Unsettled(
-                        "ready occupant differs from the recorded start seat".to_owned(),
-                    ));
-                }
-                Ok(StartReconciliation::Ready(live))
-            }
-            // A terminal state proves the recorded binding ended; continuing
-            // the same logical id needs a fresh launch attempt (D20), never a
-            // new identity.
-            _ if ended(incarnation) => {
-                let has_other_runtime = agent["incarnations"]
-                    .as_array()
-                    .is_some_and(|incarnations| incarnations.iter().any(|entry| !ended(entry)));
-                if has_other_runtime {
-                    return Ok(StartReconciliation::Unsettled(
-                        "failed start has another unsettled or live incarnation".to_owned(),
-                    ));
-                }
-                Ok(StartReconciliation::FailedStart { logical_agent_id })
-            }
-            "declared" | "starting" | "unknown" | "lost" => self
-                .adopt_occupant(
-                    &launch.pane_id,
-                    &launch.terminal_id,
-                    &launch.name,
-                    &logical_agent_id,
-                )
-                .map(StartReconciliation::Ready),
-            state => Ok(StartReconciliation::Unsettled(format!(
-                "recorded seat incarnation is {state}"
-            ))),
-        }
-    }
-
-    /// Arm wall-clock renew on one occupant's exact incarnation.
+    /// Schedule the occupant's periodic context renew (D27).
     ///
     /// # Errors
     ///
-    /// Returns an error when Kelpie rejects the policy or the receipt is invalid.
+    /// Returns an error when Kelpie cannot arm the schedule or answers
+    /// without a renew id.
     pub fn arm_occupant_renew(
         &self,
         logical_agent_id: &str,
@@ -1299,57 +1162,6 @@ mod tests {
     }
 
     #[test]
-    fn adopt_occupant_continues_recorded_logical_id() {
-        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
-            "logical_agent_id": "occupant-agent",
-            "incarnation_id": "occupant-incarnation-2",
-            "operation_id": "adopt-operation",
-            "outcome": "succeeded"
-        }))]));
-        let client = KelpieClient::with_runner(Arc::clone(&runner));
-
-        let occupant = client
-            .adopt_occupant("w2:p1", "term-9", "bot-foobar", "occupant-agent")
-            .expect("adopt occupant");
-
-        assert_eq!(occupant.logical_agent_id(), "occupant-agent");
-        assert_eq!(occupant.incarnation_id(), "occupant-incarnation-2");
-        assert_eq!(
-            runner.calls.lock().expect("calls lock")[0].0,
-            vec![
-                "--json",
-                "adopt",
-                "--pane",
-                "w2:p1",
-                "--terminal",
-                "term-9",
-                "--name",
-                "bot-foobar",
-                "--logical-id",
-                "occupant-agent"
-            ]
-        );
-    }
-
-    #[test]
-    fn adopt_occupant_rejects_a_different_logical_id() {
-        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
-            "logical_agent_id": "twin-agent",
-            "incarnation_id": "twin-incarnation",
-            "operation_id": "adopt-operation",
-            "outcome": "succeeded"
-        }))]));
-        let client = KelpieClient::with_runner(runner);
-
-        let error = client
-            .adopt_occupant("w2:p1", "term-9", "bot-foobar", "occupant-agent")
-            .expect_err("twin");
-        assert!(error
-            .to_string()
-            .contains("session occupant is not the recorded logical agent"));
-    }
-
-    #[test]
     fn occupant_whoami_treats_an_unbound_alias_as_unavailable() {
         let runner = Arc::new(FakeRunner::new([failure(
             "conflict",
@@ -1386,6 +1198,7 @@ mod tests {
                     cwd: PathBuf::from("/corpus"),
                     timeout_ms: 90_000,
                     logical_agent_id: None,
+                    backend_session: None,
                 },
                 OCCUPANT_BOOTSTRAP,
                 None,
@@ -1468,48 +1281,6 @@ mod tests {
             .0
             .windows(2)
             .any(|pair| pair == ["--prompt", &occupant_renew_resume(snapshot, progress)]));
-    }
-
-    #[test]
-    fn start_occupant_continues_a_recorded_logical_id() {
-        let runner = Arc::new(FakeRunner::new([success(&serde_json::json!({
-            "logical_agent_id": "occupant-agent",
-            "incarnation_id": "occupant-incarnation-2",
-            "runtime_start": {
-                "operation_id": "start-operation",
-                "outcome": "succeeded"
-            },
-            "initial_message": {
-                "message_id": "tell-id",
-                "operation_id": "tell-operation",
-                "outcome": "accepted"
-            }
-        }))]));
-        let client = KelpieClient::with_runner(Arc::clone(&runner));
-        let started = client
-            .start_occupant(
-                &OccupantLaunch {
-                    name: "bot-foobar".to_owned(),
-                    pane_id: "w2:p1".to_owned(),
-                    terminal_id: "term-9".to_owned(),
-                    backend: "opencode".to_owned(),
-                    cwd: PathBuf::from("/corpus"),
-                    timeout_ms: 90_000,
-                    logical_agent_id: Some("occupant-agent".to_owned()),
-                },
-                OCCUPANT_BOOTSTRAP,
-                Some("waiter-agent"),
-            )
-            .expect("continue occupant");
-
-        assert_eq!(started.logical_agent_id(), "occupant-agent");
-        let args = &runner.calls.lock().expect("calls lock")[0].0;
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--logical-id", "occupant-agent"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--sender-id", "waiter-agent"]));
     }
 
     #[test]
@@ -1731,8 +1502,9 @@ pub struct SessionRecord {
     pub bot_id: BotId,
     pub channel_id: String,
     pub session_name: String,
-    pub occupant_logical_id: Option<String>,
     pub renew_id: Option<String>,
+    /// The backend's own session token, replayed on a restart (D62). Opaque.
+    pub backend_session: Option<String>,
     pub ask_context_event_id: Option<EventId>,
     pub ask_context_created_at: Option<i64>,
 }
@@ -1777,22 +1549,6 @@ pub struct TurnReplacement {
 /// Persistence used by the host ingest and turn-processing paths.
 pub trait HostRepository {
     type Error;
-
-    /// Read the latest durable launch attempt for a session.
-    ///
-    /// # Errors
-    /// Returns a persistence error when the record cannot be read.
-    fn occupant_start(
-        &self,
-        session_name: &str,
-    ) -> Result<Option<OccupantStartAttempt>, Self::Error>;
-
-    /// Persist launch intent before calling Kelpie, then retain its receipt.
-    /// Completed attempts atomically bind their logical identity to the session.
-    ///
-    /// # Errors
-    /// Returns a persistence error when the record cannot be saved.
-    fn save_occupant_start(&mut self, attempt: &OccupantStartAttempt) -> Result<(), Self::Error>;
 
     /// Acknowledge an emitted ingest action, returning false if already acknowledged.
     ///
@@ -1906,18 +1662,6 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the session cannot be read.
     fn session_by_name(&self, session_name: &str) -> Result<Option<SessionRecord>, Self::Error>;
-
-    /// Find a session by its bound occupant logical id.
-    ///
-    /// Unknown or ambiguous ids return `None`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an adapter error when the session cannot be read.
-    fn session_by_occupant_logical_id(
-        &self,
-        occupant_logical_id: &str,
-    ) -> Result<Option<SessionRecord>, Self::Error>;
 
     /// Bind the oldest queued turn to a new ask.
     ///

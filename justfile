@@ -185,9 +185,9 @@ smoke:
 # Start on a database an older version wrote, which `smoke` never does.
 #
 # `smoke` only ever installs from nothing, so every upgrade path was untested.
-# Both outages so far were upgrades: a Kelpie id format the stored rows predate,
-# which the host retried forever in silence. Seed the old shape and require the
-# host to reach a working state on its own.
+# Both outages so far were upgrades, and both were a stored occupant identity
+# the host could no longer use. Seed that shape and require the host to reach a
+# working state on its own.
 upgrade-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -201,9 +201,19 @@ upgrade-smoke:
     run init "${root}/mybot" --id mybot --kind opencode
     run --check
 
-    # The pre-integer Kelpie shape: a UUIDv7 agent id, the renew it armed, and
-    # the recorded start attempt carrying that same id in its launch JSON.
+    # Rebuild the pre-D62 shape the migration has to survive: a stored identity
+    # column, a session holding a dead UUIDv7 id, and a recorded start attempt
+    # keyed to a seat that no longer exists.
     sqlite3 "${db}" "
+        ALTER TABLE sessions ADD COLUMN occupant_logical_id TEXT;
+        CREATE TABLE occupant_starts (
+            sequence INTEGER PRIMARY KEY,
+            session_name TEXT NOT NULL,
+            attempt_key TEXT NOT NULL UNIQUE,
+            attempt_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        ) STRICT;
         INSERT INTO sessions(bot_id, channel_id, session_name,
                              occupant_logical_id, renew_id)
         VALUES ('mybot', 'a-channel', 'mybot-a-channel',
@@ -214,17 +224,19 @@ upgrade-smoke:
         VALUES ('mybot-a-channel', 'stale-key', '{}', 0, 0);"
 
     run --check 2>"${root}/notice" || { cat "${root}/notice" >&2; exit 1; }
-    grep -q 'mybot-a-channel forgot occupant' "${root}/notice" \
-        || { echo "upgrade-smoke: the cleared session was not named" >&2
-             cat "${root}/notice" >&2; exit 1; }
 
+    # Nothing that could name a dead identity may survive, and the session
+    # itself must: forgetting the occupant is not forgetting the channel.
     left=$(sqlite3 "${db}" "
-        SELECT (SELECT count(*) FROM sessions
-                WHERE occupant_logical_id IS NOT NULL OR renew_id IS NOT NULL)
-             + (SELECT count(*) FROM occupant_starts);")
+        SELECT (SELECT count(*) FROM pragma_table_info('sessions')
+                WHERE name = 'occupant_logical_id')
+             + (SELECT count(*) FROM sqlite_master
+                WHERE type = 'table' AND name = 'occupant_starts');")
     if [[ "${left}" != "0" ]]; then
-        echo "upgrade-smoke: ${left} unusable row(s) survived the upgrade" >&2
-        sqlite3 -header "${db}" "SELECT * FROM sessions; SELECT * FROM occupant_starts;" >&2
+        echo "upgrade-smoke: a stored occupant identity survived the upgrade" >&2
+        sqlite3 -header "${db}" "SELECT * FROM sessions;" >&2
         exit 1
     fi
-    echo "upgrade-smoke: a pre-integer occupant id was forgotten and named"
+    sqlite3 "${db}" "SELECT session_name FROM sessions;" | grep -qx 'mybot-a-channel' \
+        || { echo "upgrade-smoke: the session itself was lost" >&2; exit 1; }
+    echo "upgrade-smoke: a pre-D62 stored identity was dropped, the session kept"

@@ -28,6 +28,8 @@ const CHANNEL_KIND: u16 = 9;
 struct FakePanes {
     calls: Mutex<Vec<(String, PathBuf)>>,
     released: Mutex<Vec<String>>,
+    /// Panes Herdr already reports as holding a session's name.
+    claims: Mutex<std::collections::HashMap<String, crate::actor::ClaimedPane>>,
 }
 
 impl OccupantPaneAllocator for Arc<FakePanes> {
@@ -50,6 +52,19 @@ impl OccupantPaneAllocator for Arc<FakePanes> {
             .expect("released")
             .push(pane.pane_id.clone());
         Ok(())
+    }
+
+    fn claimed(
+        &self,
+        session_name: &str,
+        _cwd: &Path,
+    ) -> Result<Option<crate::actor::ClaimedPane>, Self::Error> {
+        Ok(self
+            .claims
+            .lock()
+            .expect("claims")
+            .get(session_name)
+            .cloned())
     }
 }
 
@@ -107,6 +122,27 @@ fn start() -> CommandOutput {
             "operation_id": "tell-operation",
             "outcome": "accepted"
         }
+    }))
+}
+
+/// `whoami` for a name no live claimant answers to.
+fn unbound() -> CommandOutput {
+    failure("conflict", "no ready agent for alias bot-foobar")
+}
+
+/// `who --history` for a name Kelpie has never recorded.
+fn no_claimants() -> CommandOutput {
+    success(&serde_json::json!({"claimants": [], "name": "bot-foobar"}))
+}
+
+/// `who --history` for a name whose runtimes have all ended.
+fn dead_claimants() -> CommandOutput {
+    success(&serde_json::json!({
+        "name": "bot-foobar",
+        "claimants": [
+            {"logical_agent_id": "1611", "created_at_ms": 1, "live": false},
+            {"logical_agent_id": "1990", "created_at_ms": 9, "live": false},
+        ]
     }))
 }
 
@@ -237,6 +273,7 @@ impl Harness {
             panes: Arc::new(FakePanes {
                 calls: Mutex::new(Vec::new()),
                 released: Mutex::new(Vec::new()),
+                claims: Mutex::new(std::collections::HashMap::new()),
             }),
             bot: Bot::new(BotId::new("bot").expect("id"), corpus, "opencode")
                 .expect("bot")
@@ -352,7 +389,15 @@ fn flow_01_silence_indexes_without_an_occupant() {
 
 #[test]
 fn flow_02_first_call_starts_bot_foobar_and_asks() {
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let message = trigger_event(FOOBAR, "@daniel bot: hello", None);
     let action = harness.ingest(&message).expect("trigger");
     let mut actor = harness.actor();
@@ -402,6 +447,8 @@ async fn local_relay_contract_before_synthetic_occupant() {
     let keys = Keys::generate();
     let mut harness = Harness::new([
         adopt(),
+        unbound(),
+        no_claimants(),
         start(),
         renewed(),
         whoami(),
@@ -576,7 +623,15 @@ async fn local_relay_contract_before_synthetic_occupant() {
 #[test]
 fn non_uuid_channel_starts_an_occupant_and_publishes_its_answer() {
     let channel = "opaque/group:with spaces";
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let message = trigger_event(channel, "@daniel bot: hello", None);
     let action = harness.ingest(&message).expect("trigger");
     let mut actor = harness.actor();
@@ -592,8 +647,8 @@ fn non_uuid_channel_starts_an_occupant_and_publishes_its_answer() {
         .session(actor.bot().id(), channel)
         .expect("session query")
         .expect("session");
+    // The name is the whole identity (D62); nothing else is recorded for it.
     assert_eq!(session.session_name, "bot-foobar");
-    assert_eq!(session.occupant_logical_id.as_deref(), Some("1990"));
     assert_eq!(
         harness.panes.calls.lock().expect("panes")[0].0,
         "bot-foobar"
@@ -626,7 +681,15 @@ fn non_uuid_channel_starts_an_occupant_and_publishes_its_answer() {
 
 #[test]
 fn flow_03_follow_up_without_prefix_does_not_poke() {
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let first = trigger_event(FOOBAR, "@daniel bot: hello", None);
     let action = harness.ingest(&first).expect("trigger");
     let mut actor = harness.actor();
@@ -652,6 +715,8 @@ fn flow_03_follow_up_without_prefix_does_not_poke() {
 fn flow_04_second_call_reuses_the_same_occupant() {
     let harness = Harness::new([
         adopt(),
+        unbound(),
+        no_claimants(),
         start(),
         renewed(),
         whoami(),
@@ -707,6 +772,8 @@ fn flow_04_second_call_reuses_the_same_occupant() {
 fn ask_context_includes_unprefixed_line_between_triggers() {
     let harness = Harness::new([
         adopt(),
+        unbound(),
+        no_claimants(),
         start(),
         renewed(),
         whoami(),
@@ -788,10 +855,14 @@ fn ask_context_includes_unprefixed_line_between_triggers() {
 fn flow_05_another_channel_is_an_independent_occupant() {
     let harness = Harness::new([
         adopt(),
+        unbound(),
+        no_claimants(),
         start(),
         renewed(),
         whoami(),
         asked("ask-1"),
+        unbound(),
+        no_claimants(),
         start(),
         renewed(),
         whoami(),
@@ -872,7 +943,15 @@ fn flow_05_another_channel_is_an_independent_occupant() {
 
 #[test]
 fn flow_06_dm_is_its_own_channel_session() {
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let dm = trigger_event(DM, "@daniel bot: ping", None);
     let action = harness.ingest(&dm).expect("dm trigger");
     let mut actor = harness.actor();
@@ -889,7 +968,15 @@ fn flow_06_dm_is_its_own_channel_session() {
 
 #[test]
 fn flow_07_thread_stays_on_the_channel_occupant() {
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let thread = "b".repeat(64);
     let message = trigger_event(FOOBAR, "@daniel bot: in thread", Some(&thread));
     let action = harness.ingest(&message).expect("thread trigger");
@@ -922,6 +1009,8 @@ fn flow_07_thread_stays_on_the_channel_occupant() {
 fn flow_08_busy_queues_the_second_turn() {
     let harness = Harness::new([
         adopt(),
+        unbound(),
+        no_claimants(),
         start(),
         renewed(),
         whoami(),
@@ -968,11 +1057,14 @@ fn flow_08_busy_queues_the_second_turn() {
 fn flow_09_gone_pane_continues_the_logical_agent() {
     let harness = Harness::new([
         adopt(),
+        unbound(),
+        no_claimants(),
         start(),
         renewed(),
         whoami(),
         asked("ask-1"),
         failure("conflict", "no ready agent for alias bot-foobar"),
+        dead_claimants(),
         start(),
         renewed(),
     ]);
@@ -1022,6 +1114,8 @@ fn flow_09_gone_pane_continues_the_logical_agent() {
 fn flow_10_edit_answers_latest_text_and_delete_abandons() {
     let harness = Harness::new([
         adopt(),
+        unbound(),
+        no_claimants(),
         start(),
         renewed(),
         whoami(),
@@ -1085,7 +1179,15 @@ fn flow_10_edit_answers_latest_text_and_delete_abandons() {
 
 #[test]
 fn flow_10_claimed_turn_keeps_the_landing_reply() {
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let author = peer().clone();
     let operator = operator();
     let first = event_with_keys(
@@ -1129,7 +1231,15 @@ fn flow_10_claimed_turn_keeps_the_landing_reply() {
 
 #[test]
 fn flow_10_posted_turn_is_left_up_after_delete() {
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let author = peer().clone();
     let operator = operator();
     let first = event_with_keys(
@@ -1206,7 +1316,15 @@ fn occupant_reply(ask_id: &str, disposition: &str, body: &str) -> crate::inbox::
 
 #[test]
 fn flow_11_one_ask_while_the_occupant_works() {
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let message = trigger_event(FOOBAR, "@daniel bot: long job", None);
     let action = harness.ingest(&message).expect("trigger");
     let mut actor = harness.actor();
@@ -1229,10 +1347,19 @@ fn flow_11_one_ask_while_the_occupant_works() {
 /// stamped post after the hold, edits it in place, and the final is a
 /// second post that leaves it up. The host never invents progress.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn flow_11_progress_is_one_edited_post_then_a_final() {
     use nostrherd_domain::progress::{PROGRESS_EDIT_INTERVAL_SECS, PROGRESS_INITIAL_HOLD_SECS};
 
-    let harness = Harness::new([adopt(), start(), renewed(), whoami(), asked("ask-1")]);
+    let harness = Harness::new([
+        adopt(),
+        unbound(),
+        no_claimants(),
+        start(),
+        renewed(),
+        whoami(),
+        asked("ask-1"),
+    ]);
     let relay = Arc::new(crate::progress::RecordingProgressRelay::default());
     let message = trigger_event(FOOBAR, "@daniel bot: long job", None);
     let action = harness.ingest(&message).expect("trigger");
