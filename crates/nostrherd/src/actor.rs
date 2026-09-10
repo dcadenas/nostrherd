@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use nostrherd_domain::{Bot, BotId, EventId, SessionName};
@@ -195,7 +195,6 @@ impl InFlightReaction for ReactionHost {
 pub struct BotActor<R, P> {
     operator_pubkey: String,
     bot: Bot,
-    conduct_path: PathBuf,
     pub(crate) repository: R,
     panes: P,
     reactions: ReactionHost,
@@ -246,17 +245,10 @@ where
 {
     /// Create an actor for one configured bot.
     #[must_use]
-    pub fn new(
-        bot: Bot,
-        repository: R,
-        panes: P,
-        conduct_path: PathBuf,
-        operator_pubkey: String,
-    ) -> Self {
+    pub fn new(bot: Bot, repository: R, panes: P, operator_pubkey: String) -> Self {
         Self {
             operator_pubkey,
             bot,
-            conduct_path,
             repository,
             panes,
             reactions: ReactionHost {
@@ -1434,7 +1426,6 @@ where
         refresh_place_snapshot(
             self.bot.corpus_path(),
             self.bot.id().as_str(),
-            &self.conduct_path,
             &session.session_name,
             &markdown,
         )
@@ -1964,13 +1955,7 @@ mod tests {
         let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
             .expect("repository");
         (
-            BotActor::new(
-                bot(),
-                repository,
-                Arc::clone(&panes),
-                PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
-                "b".repeat(64),
-            ),
+            BotActor::new(bot(), repository, Arc::clone(&panes), "b".repeat(64)),
             kelpie,
             runner,
             panes,
@@ -2262,7 +2247,14 @@ mod tests {
             std::fs::read_to_string(actor.bot().corpus_path().join("startup.md")).expect("startup");
         assert!(startup.contains("<!-- nostrherd-contract -->"));
         assert!(startup.contains("The host stamps `**[bot]**:`"));
-        assert!(startup.contains("skills/bot-conduct/SKILL.md"));
+        assert!(startup.contains(crate::snapshot::BOT_CONDUCT_RELPATH));
+        // The advice ships in the binary, so the corpus copy appears without
+        // anything being installed beside the executable.
+        assert!(actor
+            .bot()
+            .corpus_path()
+            .join(crate::snapshot::BOT_CONDUCT_RELPATH)
+            .is_file());
         assert!(
             std::fs::read_to_string(actor.bot().corpus_path().join("startup.md"))
                 .expect("startup")

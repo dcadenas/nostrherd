@@ -88,7 +88,22 @@ you are willing to speak as.
 
 **5. Rust (stable)** to build nostrherd.
 
-## Build
+## Install
+
+```bash
+cargo install --git https://github.com/dcadenas/nostrherd --tag v0.1.0-alpha.9
+```
+
+That puts `nostrherd` on your `PATH` and is the whole installation. The
+binary carries everything it needs at runtime: the corpus templates and
+the shared occupant conduct advice are compiled in, so there is nothing
+to keep beside it and nothing to copy if you move it.
+
+The tag is worth pinning while this is alpha, so you know which build you
+are running and can read `CHANGELOG.md` for what changed. Omit `--tag` to
+track the tip of `master`.
+
+To work on nostrherd itself rather than run it, clone and build instead:
 
 ```bash
 git clone https://github.com/dcadenas/nostrherd
@@ -96,16 +111,22 @@ cd nostrherd
 cargo build --release
 ```
 
-The rest of this README calls the binary `nostrherd`. Put
-`target/release/nostrherd` on your `PATH`, or write out the full path
-each time.
+## Upgrading
 
-Keep `skills/bot-conduct/SKILL.md` with the installation. Binaries under the
-checkout's `target/` use that checkout's file. If you move the binary elsewhere,
-copy `skills/bot-conduct/SKILL.md` into a `skills/bot-conduct/` directory beside
-the binary. The host resolves this path at runtime, not from its build location
-or the corpus working directory. A missing or unreadable file stops the host
-before connecting to Kelpie or the relay (`--check` remains config/database only).
+```bash
+cargo install --git https://github.com/dcadenas/nostrherd --tag v<new-version> --force
+nostrherd --check
+```
+
+Then restart the host. `--check` opens the registry and database, applies
+any schema migrations, and exits without needing the key or Kelpie, so it
+is the safe way to find out whether the new build accepts your setup
+before you restart into it.
+
+`nostrherd --version` reports the build you are running. Compare it
+against [`CHANGELOG.md`](CHANGELOG.md), which is written as what an
+operator has to do rather than what a commit touched; most entries say
+**Action**: none.
 
 ## Create a bot
 

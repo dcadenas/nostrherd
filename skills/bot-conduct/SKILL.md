@@ -2,8 +2,9 @@
 name: bot-conduct
 description: >
   Reusable judgment for nostrherd occupants: how to speak in a channel
-  regardless of personality. Shipped with the host install and pointed to
-  by the corpus contract block; never copied into corpus repos. A bot's
+  regardless of personality. Compiled into the host, which writes it to
+  each corpus's gitignored `.nostrherd/bot-conduct.md` on start and points
+  the contract block there; edits to that copy do not survive. A bot's
   hand-written personality section overrides by being more specific.
 ---
 

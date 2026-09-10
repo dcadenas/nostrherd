@@ -14,6 +14,21 @@ pub const PLACE_SNAPSHOT_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 /// Future slack matching Buzz's accepted clock drift (D24).
 pub const PLACE_SNAPSHOT_FUTURE_SLACK_SECS: i64 = 900;
 
+/// Shared occupant advice, compiled in so the binary is the whole install.
+///
+/// This used to be read from disk beside the running executable, which made a
+/// bare `cargo install` produce a host that refused to start: the file was in
+/// the checkout, not next to the binary. The host writes it into each corpus
+/// instead, so there is nothing to keep beside the binary and nothing to copy
+/// when it moves.
+const BOT_CONDUCT: &str = include_str!("../../../skills/bot-conduct/SKILL.md");
+
+/// Corpus-relative path the host writes [`BOT_CONDUCT`] to.
+///
+/// Inside the corpus because the contract tells an occupant serving a non-self
+/// requester not to read outside this bot's working repositories.
+pub const BOT_CONDUCT_RELPATH: &str = ".nostrherd/bot-conduct.md";
+
 const STARTUP_BEGIN: &str = "<!-- nostrherd-place-snapshots -->";
 const STARTUP_END: &str = "<!-- /nostrherd-place-snapshots -->";
 const CONTRACT_BEGIN: &str = "<!-- nostrherd-contract -->";
@@ -89,7 +104,6 @@ pub fn render_place_snapshot(
 pub fn refresh_place_snapshot(
     corpus: &Path,
     bot_id: &str,
-    conduct: &Path,
     session_name: &str,
     markdown: &str,
 ) -> io::Result<PathBuf> {
@@ -105,8 +119,25 @@ pub fn refresh_place_snapshot(
     }
     atomic_write(&path, markdown)?;
     fs::create_dir_all(corpus.join(".nostrherd/sessions").join(session_name))?;
-    point_startup_at_snapshots(corpus, bot_id, conduct)?;
+    write_bot_conduct(corpus)?;
+    point_startup_at_snapshots(corpus, bot_id)?;
     Ok(path)
+}
+
+/// Refresh the corpus copy of the compiled-in conduct advice.
+///
+/// Rewritten from the binary on every start, so upgrading the host upgrades the
+/// advice. Hand edits to the corpus copy do not survive; bot-specific advice
+/// belongs in the corpus's own files, which the host never touches.
+fn write_bot_conduct(corpus: &Path) -> io::Result<()> {
+    let path = corpus.join(BOT_CONDUCT_RELPATH);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::read_to_string(&path).is_ok_and(|existing| existing == BOT_CONDUCT) {
+        return Ok(());
+    }
+    atomic_write(&path, BOT_CONDUCT)
 }
 
 fn snapshot_file_stem(session_name: &str) -> Option<&str> {
@@ -119,42 +150,8 @@ fn snapshot_file_stem(session_name: &str) -> Option<&str> {
         .then_some(session_name)
 }
 
-/// Locate readable conduct advice relative to the running host executable.
-///
-/// # Errors
-///
-/// Returns an I/O error if neither the installation nor Cargo checkout ships it.
-pub fn bot_conduct_path(executable: &Path) -> io::Result<PathBuf> {
-    let directory = executable.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "host executable has no parent")
-    })?;
-    let relative = "skills/bot-conduct/SKILL.md";
-    let adjacent = directory.join(relative);
-    if adjacent.is_file() {
-        fs::read_to_string(&adjacent)?;
-        return adjacent.canonicalize();
-    }
-    // Cargo binaries (including test binaries in deps/) use the checkout's assets.
-    if let Some(target) = directory
-        .ancestors()
-        .find(|path| path.file_name().is_some_and(|name| name == "target"))
-    {
-        if let Some(root) = target.parent() {
-            let source = root.join(relative);
-            if source.is_file() {
-                fs::read_to_string(&source)?;
-                return source.canonicalize();
-            }
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "missing skills/bot-conduct/SKILL.md beside the host executable (or in its Cargo checkout)",
-    ))
-}
-
-fn contract_block(bot_id: &str, conduct: &Path) -> String {
-    let conduct = conduct.display();
+fn contract_block(bot_id: &str) -> String {
+    let conduct = BOT_CONDUCT_RELPATH;
     format!(
         "{CONTRACT_BEGIN}
 ## nostrherd contract (host-managed; do not edit or copy)
@@ -178,7 +175,7 @@ fn contract_block(bot_id: &str, conduct: &Path) -> String {
     )
 }
 
-fn point_startup_at_snapshots(corpus: &Path, bot_id: &str, conduct: &Path) -> io::Result<()> {
+fn point_startup_at_snapshots(corpus: &Path, bot_id: &str) -> io::Result<()> {
     let path = corpus.join("startup.md");
     let existing = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -190,7 +187,7 @@ fn point_startup_at_snapshots(corpus: &Path, bot_id: &str, conduct: &Path) -> io
         &updated,
         CONTRACT_BEGIN,
         CONTRACT_END,
-        &contract_block(bot_id, conduct),
+        &contract_block(bot_id),
     )?;
     if updated == existing {
         return Ok(());
@@ -352,14 +349,8 @@ mod tests {
     #[test]
     fn refresh_writes_snapshot_and_points_startup_md() {
         let corpus = temp_corpus();
-        let path = refresh_place_snapshot(
-            &corpus,
-            "bot",
-            Path::new("/synthetic/skills/bot-conduct/SKILL.md"),
-            "bot-foobar",
-            "# Channel snapshot\n",
-        )
-        .expect("write");
+        let path = refresh_place_snapshot(&corpus, "bot", "bot-foobar", "# Channel snapshot\n")
+            .expect("write");
         assert_eq!(path, corpus.join(".nostrherd/places/bot-foobar.md"));
         assert_eq!(
             fs::read_to_string(&path).expect("snapshot"),
@@ -368,6 +359,30 @@ mod tests {
         let startup = fs::read_to_string(corpus.join("startup.md")).expect("startup");
         assert!(startup.contains(".nostrherd/places/<your public Kelpie name>.md"));
         assert!(startup.contains(STARTUP_BEGIN));
+        assert!(startup.contains(BOT_CONDUCT_RELPATH));
+    }
+
+    /// The advice arrives with the binary, not from beside it.
+    ///
+    /// A `cargo install`ed host has no checkout to read, so a corpus that has
+    /// never seen the file must still get it, and an outdated copy must be
+    /// replaced rather than trusted: the contract points every occupant at it.
+    #[test]
+    fn the_conduct_advice_is_written_from_the_binary_and_kept_current() {
+        let corpus = temp_corpus();
+        let conduct = corpus.join(BOT_CONDUCT_RELPATH);
+        refresh_place_snapshot(&corpus, "bot", "bot-foobar", "# Channel snapshot\n")
+            .expect("write");
+        assert_eq!(
+            fs::read_to_string(&conduct).expect("conduct"),
+            BOT_CONDUCT,
+            "the corpus copy is the compiled-in advice"
+        );
+
+        fs::write(&conduct, "stale advice from an older host\n").expect("stale");
+        refresh_place_snapshot(&corpus, "bot", "bot-foobar", "# Channel snapshot\n")
+            .expect("rewrite");
+        assert_eq!(fs::read_to_string(&conduct).expect("conduct"), BOT_CONDUCT);
     }
 
     #[test]
@@ -385,14 +400,7 @@ mod tests {
             assert!(session_progress_relpath(name).is_none(), "{name}");
         }
         let corpus = temp_corpus();
-        let error = refresh_place_snapshot(
-            &corpus,
-            "bot",
-            Path::new("/synthetic/skills/bot-conduct/SKILL.md"),
-            "../other",
-            "x",
-        )
-        .expect_err("unsafe");
+        let error = refresh_place_snapshot(&corpus, "bot", "../other", "x").expect_err("unsafe");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
@@ -403,8 +411,7 @@ mod tests {
         fs::write(corpus.join("startup.md"), original).expect("startup");
         fs::write(corpus.join("AGENTS.md"), "Only the author changes this.\n")
             .expect("personality");
-        let conduct = corpus.join("install with spaces/skills/bot-conduct/SKILL.md");
-        point_startup_at_snapshots(&corpus, "pr", &conduct).expect("refresh");
+        point_startup_at_snapshots(&corpus, "pr").expect("refresh");
         let updated = fs::read_to_string(corpus.join("startup.md")).expect("startup");
         assert!(updated.starts_with("Author preface\n"));
         assert!(updated.contains("\nAuthor middle\n"));
@@ -426,8 +433,8 @@ mod tests {
         ] {
             assert!(updated.contains(required), "missing {required}");
         }
-        assert!(updated.contains(&conduct.display().to_string()));
-        point_startup_at_snapshots(&corpus, "pr", &conduct).expect("repeat");
+        assert!(updated.contains(BOT_CONDUCT_RELPATH));
+        point_startup_at_snapshots(&corpus, "pr").expect("repeat");
         assert_eq!(
             fs::read_to_string(corpus.join("startup.md")).expect("startup"),
             updated
@@ -436,11 +443,6 @@ mod tests {
             fs::read_to_string(corpus.join("AGENTS.md")).expect("personality"),
             "Only the author changes this.\n"
         );
-        let relocated = corpus.join("new install/skills/bot-conduct/SKILL.md");
-        point_startup_at_snapshots(&corpus, "pr", &relocated).expect("relocate");
-        let updated = fs::read_to_string(corpus.join("startup.md")).expect("startup");
-        assert!(updated.contains(&relocated.display().to_string()));
-        assert!(!updated.contains(&conduct.display().to_string()));
     }
 
     #[test]
@@ -453,13 +455,12 @@ mod tests {
         ] {
             let corpus = temp_corpus();
             fs::write(corpus.join("startup.md"), initial).expect("startup");
-            let conduct = corpus.join("skills/bot-conduct/SKILL.md");
-            point_startup_at_snapshots(&corpus, "bot", &conduct).expect("refresh");
+            point_startup_at_snapshots(&corpus, "bot").expect("refresh");
             let updated = fs::read_to_string(corpus.join("startup.md")).expect("startup");
             for marker in [STARTUP_BEGIN, STARTUP_END, CONTRACT_BEGIN, CONTRACT_END] {
                 assert_eq!(updated.matches(marker).count(), 1);
             }
-            point_startup_at_snapshots(&corpus, "bot", &conduct).expect("repeat");
+            point_startup_at_snapshots(&corpus, "bot").expect("repeat");
             assert_eq!(
                 fs::read_to_string(corpus.join("startup.md")).expect("startup"),
                 updated
@@ -477,44 +478,13 @@ mod tests {
         ] {
             let corpus = temp_corpus();
             fs::write(corpus.join("startup.md"), &original).expect("startup");
-            let error = point_startup_at_snapshots(
-                &corpus,
-                "bot",
-                Path::new("/install/skills/bot-conduct/SKILL.md"),
-            )
-            .expect_err("malformed");
+            let error = point_startup_at_snapshots(&corpus, "bot").expect_err("malformed");
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             assert_eq!(
                 fs::read_to_string(corpus.join("startup.md")).expect("startup"),
                 original
             );
         }
-    }
-
-    #[test]
-    fn conduct_path_follows_the_running_installation_not_the_build_directory() {
-        let root = temp_corpus();
-        for layout in ["install one", "relocated install", "checkout"] {
-            let installation = root.join(layout);
-            let conduct = installation.join("skills/bot-conduct/SKILL.md");
-            fs::create_dir_all(conduct.parent().expect("parent")).expect("assets");
-            fs::write(&conduct, "Advice").expect("advice");
-            let exe = installation.join(if layout == "checkout" {
-                "target/debug/deps/test-host"
-            } else {
-                "nostrherd"
-            });
-            assert_eq!(
-                bot_conduct_path(&exe).expect("conduct"),
-                conduct.canonicalize().expect("path")
-            );
-        }
-        assert_eq!(
-            bot_conduct_path(&root.join("missing/nostrherd"))
-                .expect_err("missing assets")
-                .kind(),
-            io::ErrorKind::NotFound
-        );
     }
 
     #[test]

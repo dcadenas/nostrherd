@@ -1312,3 +1312,43 @@ sessions. Reusing the seat the name already points at stops the growth, and the
 host releases a pane when it observes its occupant is gone. One workspace per
 bot rather than per occupant is left as presentation, with no bearing on
 identity.
+
+## D63. The conduct advice is compiled into the binary, not read beside it
+
+Status: accepted
+
+Amends D55, which resolved the advice from disk at runtime. The contract block,
+the marker upsert, the author-owned boundary and everything else in D55 stand;
+only where the advice comes from changes.
+
+D55 had the runtime resolve `skills/bot-conduct/SKILL.md` beside the executable,
+or in the source checkout above its Cargo `target/` directory. That made the
+binary incomplete: `cargo install` produces a bare executable with no `skills/`
+beside it and no checkout to fall back to, so an installed host failed startup
+before connecting to Kelpie or the relay. The only working install was a git
+clone kept forever, because the checkout was what supplied the file, and the
+README carried a rule about copying the directory whenever the binary moved.
+An install shape that cannot be installed is a defect in the artifact, not a
+step for the operator to remember.
+
+The advice is `include_str!`d, alongside `corpus/template-bot`, which the binary
+has always carried. On snapshot refresh the host writes it to the corpus's
+gitignored `.nostrherd/bot-conduct.md` and the contract block names that
+corpus-relative path. Inside the corpus because the contract tells an occupant
+serving a non-self requester not to read outside this bot's working
+repositories; an absolute path into an install directory would contradict the
+rule the same block states. The copy is rewritten from the binary whenever it
+differs, so upgrading the host upgrades the advice and a hand edit does not
+survive a start. Bot-specific advice still overrides by being more specific,
+and it lives in the corpus's own author-owned files, which the host never
+touches.
+
+Nothing resolves a path against the executable any more, so there is no
+adjacent-file failure to report and `HostError::Conduct` is gone. Actors no
+longer receive a resolved path; tests no longer supply a synthetic installation.
+The cost is that editing the advice in a checkout no longer changes a running
+host: it ships in the build, so changing it means rebuilding, which
+`_verify-version-unreleased` already treated as a change to the artifact.
+`just smoke` runs a relocated copy of the binary with no checkout and no
+`skills/` beside it, which is the shape `cargo install` produces, because
+building in place was the one arrangement that could never catch this.

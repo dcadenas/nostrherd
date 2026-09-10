@@ -212,8 +212,8 @@ NOSTRHERD_DISPATCH_PROOF_BIN=/path/to/target/debug/examples/dispatch_proof \
   ./tools/local-relay dispatch-proof /work/new-case /path/to/nostrherd 1
 ```
 
-Ship `skills/bot-conduct/SKILL.md` beside a relocated host binary (D55).
-The case directory retains `host.log`, `host.sqlite` and `report.json`.
+A relocated host binary needs nothing beside it: the conduct advice is compiled
+in and written to the corpus on start (D63). The case directory retains `host.log`, `host.sqlite` and `report.json`.
 For transport-fault proof, `NOSTRHERD_PROOF_KELPIE_DIR` prepends a fixture-only
 CLI wrapper to the host child's PATH without changing the occupant's PATH.
 A wrapper can run the real start but withhold its receipt; the real report

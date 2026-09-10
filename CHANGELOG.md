@@ -6,6 +6,27 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.9
+
+- The binary is the whole install, so `cargo install` works and a git
+  checkout is no longer part of running the host. The occupant conduct advice
+  used to be read at runtime from beside the executable, which meant an
+  installed binary had nothing to read and refused to start; the checkout was
+  what supplied the file. It is compiled in now, and the host writes it to each
+  corpus's gitignored `.nostrherd/bot-conduct.md` on start, where the contract
+  block points every occupant.
+
+  **Action**: install with
+
+      cargo install --git https://github.com/dcadenas/nostrherd --tag v0.1.0-alpha.9 --force
+
+  and restart the host. Nothing needs to be kept beside the binary any more,
+  so a `skills/bot-conduct/` directory copied next to an older installation
+  can be deleted. Upgrading from here is the same command with a new tag.
+
+  Editing `skills/bot-conduct/SKILL.md` in a checkout no longer changes a
+  running host: the advice ships in the build, so changing it means rebuilding.
+
 ## 0.1.0-alpha.8
 
 - A session's name is its identity, and the host converges on one occupant per

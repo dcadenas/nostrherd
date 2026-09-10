@@ -127,7 +127,6 @@ enum HostError {
     Kelpie(KelpieError),
     Actor(ActorError<rusqlite::Error>),
     NoBots,
-    Conduct(std::io::Error),
     NotificationClosed,
     InboxClosed,
     Path(nostrherd::paths::PathError),
@@ -192,9 +191,6 @@ impl fmt::Display for HostError {
             Self::Kelpie(error) => write!(formatter, "{error}"),
             Self::Actor(error) => write!(formatter, "{error}"),
             Self::NoBots => formatter.write_str("bot config has no bots; run nostrherd init <dir> to register one (use --config for a custom registry)"),
-            Self::Conduct(error) => {
-                write!(formatter, "cannot load occupant conduct advice: {error}; install skills/bot-conduct/SKILL.md beside the nostrherd binary, or run the binary from the checkout's target directory")
-            }
             Self::NotificationClosed => formatter.write_str("relay notification channel closed"),
             Self::InboxClosed => formatter.write_str("kelpie inbox closed"),
         }
@@ -208,7 +204,6 @@ impl std::error::Error for HostError {
             Self::Database(error) => Some(error),
             Self::Runtime(error)
             | Self::WaiterKey(error)
-            | Self::Conduct(error)
             | Self::Prompt(error)
             | Self::Io { error, .. } => Some(error),
             Self::Relay(error) => Some(error),
@@ -734,7 +729,6 @@ async fn poll_relay(
 fn start_actors(
     bots: Vec<Bot>,
     operator_pubkey: &str,
-    conduct_path: &Path,
     database: &Path,
     kelpie: &KelpieClient,
     waiter: &HostWaiter<'_>,
@@ -751,7 +745,6 @@ fn start_actors(
                     bot,
                     repository,
                     HerdrPaneAllocator::default(),
-                    conduct_path.to_path_buf(),
                     operator_pubkey.to_owned(),
                 )
                 .with_reactions(Arc::clone(&reactions))
@@ -810,9 +803,6 @@ fn handle_host_delivery(
 
 #[allow(clippy::too_many_lines)]
 async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result<(), HostError> {
-    let executable = std::env::current_exe().map_err(HostError::Conduct)?;
-    let conduct_path =
-        nostrherd::snapshot::bot_conduct_path(&executable).map_err(HostError::Conduct)?;
     let operator_pubkey = operator.keys.public_key().to_hex();
     let kelpie = KelpieClient::default();
     let waiter = register_host_waiter(&kelpie, database)?;
@@ -835,7 +825,6 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
     let mut actors = start_actors(
         bots,
         &operator_pubkey,
-        &conduct_path,
         database,
         &kelpie,
         &waiter,
@@ -1545,7 +1534,6 @@ mod tests {
                     bot.clone(),
                     SqliteRepository::open(&database).expect("db"),
                     HerdrPaneAllocator::default(),
-                    PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
                     "a".repeat(64),
                 )
             })

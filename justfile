@@ -61,9 +61,9 @@ _verify-version-unreleased:
     fi
     # Only what ships counts. A justfile or docs change since the tag leaves
     # every build reporting ${v} identical, so it needs no bump.
-    # `corpus/template-bot` is `include_str!`d into the binary by init.rs, and
-    # the conduct skill is read at runtime from beside the binary, so both are
-    # part of the artifact even though neither lives under crates/.
+    # `corpus/template-bot` and `skills/bot-conduct` are both `include_str!`d
+    # into the binary, so both are part of the artifact even though neither
+    # lives under crates/.
     changed=$(git diff --name-only "${tag}..HEAD" -- \
         crates Cargo.toml Cargo.lock corpus/template-bot skills/bot-conduct)
     if [[ -n "${changed}" ]]; then
@@ -168,19 +168,31 @@ release-push version:
     git push origin "v{{version}}"
 
 # Scaffold a throwaway bot into a temp dir and check it registers and loads.
+#
+# Runs a *relocated* copy of the binary, with no checkout and no `skills/`
+# beside it. That is the shape `cargo install` produces, and it is what the
+# README tells people to do; building in place would never exercise it.
 smoke:
     #!/usr/bin/env bash
     set -euo pipefail
     root=$(mktemp -d)
     trap 'rm -rf "${root}"' EXIT
     cargo build --release --quiet
+    mkdir -p "${root}/home" "${root}/bin"
+    cp ./target/release/nostrherd "${root}/bin/nostrherd"
     run() { env -u XDG_CONFIG_HOME -u XDG_DATA_HOME HOME="${root}/home" \
-        ./target/release/nostrherd "$@"; }
-    mkdir -p "${root}/home"
+        "${root}/bin/nostrherd" "$@"; }
     run init "${root}/mybot" --id mybot --kind opencode
     run --check
     grep -q 'id = "mybot"' "${root}/home/.config/nostrherd/bots.toml"
-    echo "smoke: init registered the bot and --check loaded it"
+    # The occupant advice must travel inside the binary. It used to be read
+    # from beside the executable, so an installed host had nothing to read and
+    # refused to start; the corpus copy is written from this compiled-in text.
+    # -a because grep otherwise decides for itself whether to search a binary,
+    # and answers "no match" for one it declines to read.
+    grep -aqF 'Conduct for nostrherd occupants' "${root}/bin/nostrherd" \
+        || { echo "smoke: the binary does not carry the conduct advice" >&2; exit 1; }
+    echo "smoke: a relocated binary registered the bot, loaded it, and carries the conduct advice"
 
 # Start on a database an older version wrote, which `smoke` never does.
 #

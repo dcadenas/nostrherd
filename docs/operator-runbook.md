@@ -102,10 +102,11 @@ MUST NOT wrap a publish binary and MUST NOT receive the nsec.
 After installing the host-written contract feature, the operator can migrate
 each live corpus separately. This is not performed by the host or by its tests.
 
-1. Keep `skills/bot-conduct/SKILL.md` with the running installation as described
-   in the README. Back up the corpus's author-owned files.
+1. Back up the corpus's author-owned files. Nothing needs to be kept beside the
+   binary: the advice ships inside it (D63).
 2. At an operator-chosen restart, confirm `startup.md` contains one populated
-   `nostrherd-contract` block and one snapshot block, with a readable advice path.
+   `nostrherd-contract` block and one snapshot block, and that the corpus has a
+   `.nostrherd/bot-conduct.md` the host wrote.
 3. Remove old hand-copied protocol sections from both `AGENTS.md` and text
    outside host markers in `startup.md` by hand. Keep personality, bot-specific
    advice and the generated marker blocks. Review the corpus diff before committing.

@@ -296,7 +296,6 @@ impl Harness {
             self.bot.clone(),
             SqliteRepository::open(&self.db_path).expect("actor db"),
             Arc::clone(&self.panes),
-            PathBuf::from("/synthetic/skills/bot-conduct/SKILL.md"),
             self.operator.clone(),
         )
     }
@@ -537,7 +536,7 @@ async fn local_relay_contract_before_synthetic_occupant() {
     assert_eq!(startup.matches("<!-- nostrherd-contract -->").count(), 1);
     assert!(startup.contains("The host stamps `**[bot]**:`"));
     assert!(startup.contains("--final --stdin"));
-    assert!(startup.contains("skills/bot-conduct/SKILL.md"));
+    assert!(startup.contains(crate::snapshot::BOT_CONDUCT_RELPATH));
     assert!(
         std::fs::read_to_string(corpus.join(".nostrherd/places/bot-foobar.md"))
             .expect("snapshot")
