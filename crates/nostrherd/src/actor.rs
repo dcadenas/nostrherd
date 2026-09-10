@@ -4219,6 +4219,10 @@ mod tests {
             recorded.removes.lock().expect("removes").as_slice(),
             [trigger.event_id.as_str()]
         );
+        assert_eq!(
+            actor.posted_channel_for_ask("ask-1").expect("channel"),
+            Some(trigger.channel_id.clone())
+        );
         assert!(runner
             .calls
             .lock()

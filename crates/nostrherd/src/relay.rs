@@ -25,6 +25,7 @@ const BUZZ_DELETE_KIND: u16 = 9_005;
 const GROUP_METADATA_KIND: u16 = 39_000;
 const GROUP_MEMBERS_KIND: u16 = 39_002;
 const PROFILE_KIND: u16 = 0;
+const PROFILE_LOOKUP_BATCH: usize = 8;
 
 /// One host-resolved participant in a channel audience.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -768,13 +769,18 @@ impl RelaySubscriber {
         } else {
             AudienceSource::MemberList
         };
-        let resolved = join_all(participants.into_iter().map(|pubkey| async move {
-            AudienceParticipant {
-                display_name: self.profile_display(&pubkey).await.unwrap_or(None),
-                pubkey,
-            }
-        }))
-        .await;
+        let mut resolved = Vec::with_capacity(participants.len());
+        for batch in participants.chunks(PROFILE_LOOKUP_BATCH) {
+            resolved.extend(
+                join_all(batch.iter().cloned().map(|pubkey| async move {
+                    AudienceParticipant {
+                        display_name: self.profile_display(&pubkey).await.unwrap_or(None),
+                        pubkey,
+                    }
+                }))
+                .await,
+            );
+        }
         Ok(ChannelAudience {
             participants: resolved,
             source,

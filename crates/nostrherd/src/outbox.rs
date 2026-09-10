@@ -979,7 +979,15 @@ where
                             ),
                         );
                     }
-                    return Ok(InboxAction::Hold);
+                    progress::discard_pending(repository, ask_id)
+                        .map_err(OutboxError::Repository)?;
+                    let _ = repository
+                        .set_turn_state(ask_id, TurnState::Failed)
+                        .map_err(OutboxError::Repository)?;
+                    if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+                        reactions.remove(event_id);
+                    }
+                    return Ok(InboxAction::Ack);
                 }
                 complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
             }
@@ -1599,17 +1607,65 @@ mod tests {
                 &mut |message| private.push(message.to_owned()),
             )
             .expect("handle");
-            assert_eq!(action, InboxAction::Hold);
+            assert_eq!(action, InboxAction::Ack);
             assert!(publisher.calls.lock().expect("calls").is_empty());
             assert_eq!(
                 repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
-                TurnState::Open
+                TurnState::Failed
             );
             assert_eq!(private.len(), 1);
             assert!(!private[0].contains(&body));
             assert_eq!(occupant.len(), 1);
             assert!(!occupant[0].contains(&body));
         }
+    }
+
+    #[test]
+    fn scrubbed_progress_and_tell_feed_back_without_publishing() {
+        let guard = OutputGuard::new(
+            Some(PathBuf::from("/home/operator")),
+            PathBuf::from("/run/user/1000/kelpie/kelpie.sock"),
+        );
+
+        let (mut repository, publisher) = open_repo();
+        let mut progress_feedback = Vec::new();
+        let progress = handle_delivery_with_feedback(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &delivery("progress", "ask-1", "read /home/operator/private"),
+            &NoopInFlightReaction,
+            &mut |_, message| progress_feedback.push(message.to_owned()),
+            &guard,
+            &mut |_| {},
+        )
+        .expect("progress");
+        assert_eq!(progress, InboxAction::Ack);
+        assert_eq!(progress_feedback.len(), 1);
+        assert!(repository.progress_post("ask-1").unwrap().is_none());
+        assert!(publisher.calls.lock().expect("calls").is_empty());
+
+        let (mut repository, publisher) = open_repo();
+        let mut tell_feedback = Vec::new();
+        let tell = handle_delivery_with_feedback(
+            &mut repository,
+            &publisher,
+            &mut notices(),
+            &occupant_tell(
+                "tell-guarded",
+                "read /home/operator/private",
+                Some("bot-foobar"),
+                None,
+            ),
+            &NoopInFlightReaction,
+            &mut |_, message| tell_feedback.push(message.to_owned()),
+            &guard,
+            &mut |_| {},
+        )
+        .expect("tell");
+        assert_eq!(tell, InboxAction::Ack);
+        assert_eq!(tell_feedback.len(), 1);
+        assert!(publisher.calls.lock().expect("calls").is_empty());
     }
 
     #[test]

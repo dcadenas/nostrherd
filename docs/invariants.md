@@ -40,8 +40,9 @@ proves queued dispatch fails closed; `local_relay_contract_before_synthetic_occu
 proves refusal, operator/peer stamps and peer queue/restart on an isolated relay.
 `observed_author_fallback_is_explicitly_shared` proves uncertain membership can
 never render private. `mechanical_output_scrub_refuses_secrets_and_operator_paths_privately`
-proves the three output refusals do not publish or echo the body; a refused final
-stays open for corrected output, while refused progress and tells are acknowledged.
+and `scrubbed_progress_and_tell_feed_back_without_publishing` prove the three
+output refusals do not publish or echo the body, and that each refusal feeds back
+to the occupant. Finals fail terminally; progress and tells are acknowledged.
 
 The host contract and snapshot blocks MUST be idempotent and MUST preserve
 author-owned text and `AGENTS.md` (D55):
