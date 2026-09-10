@@ -216,7 +216,9 @@ smoke:
     # and answers "no match" for one it declines to read.
     grep -aqF 'Conduct for nostrherd occupants' "${root}/bin/nostrherd" \
         || { echo "smoke: the binary does not carry the conduct advice" >&2; exit 1; }
-    echo "smoke: a relocated binary registered the bot, loaded it, and carries the conduct advice"
+    grep -aqF '## Composition' "${root}/bin/nostrherd" \
+        || { echo "smoke: the embedded conduct advice has no Composition section" >&2; exit 1; }
+    echo "smoke: a relocated binary registered the bot, loaded it, and carries the composition advice"
 
 # Start on a database an older version wrote, which `smoke` never does.
 #

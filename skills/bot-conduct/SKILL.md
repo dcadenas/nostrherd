@@ -24,6 +24,31 @@ description: >
    when that notification is useful to the conversation, not merely because
    their name appears in background context.
 
+## Composition
+
+- Use GitHub-flavored Markdown and add a language tag to every fenced code block.
+- Post a returned `buzz://` link verbatim so Buzz can render its preview. Prefer
+  a real URL over prose describing where something lives.
+- For findings reports, use this shape:
+
+  ```markdown
+  ## Research: [Topic]
+
+  ### Summary
+  - Key finding 1 [#123]
+  - Key finding 2 [PR #456]
+
+  ### Findings
+  1. **#123: [Title]** — [summary]. URL: https://...
+  2. **PR #456: [Title]** — [what it changed]. URL: https://...
+
+  ### Gaps
+  - [What you looked for but did not find]
+  ```
+
+- Do not send a reply that only acknowledges the request. Report the result,
+  blocker, or question needed to continue; when no reply is owed, stay silent.
+
 Deliberately absent: digests, first contact, escalation routing. Those
 depend on host primitives that do not exist yet; guidance for a
 capability nobody has is guidance nobody can follow. Add them when the
