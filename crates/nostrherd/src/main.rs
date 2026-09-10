@@ -853,11 +853,12 @@ fn start_actors(
     Ok(actors)
 }
 
-fn handle_host_delivery(
+async fn handle_host_delivery(
     actors: &mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
     kelpie: &KelpieClient,
     waiter: &HostWaiter<'_>,
     publisher: &BuzzPublisher,
+    subscriber: &RelaySubscriber,
     inbox: &mut HostInbox,
     delivery: &InboxDelivery,
 ) -> Result<(), HostError> {
@@ -878,7 +879,17 @@ fn handle_host_delivery(
     };
     let action = actor.handle_occupant_delivery(kelpie, waiter, publisher, delivery);
     match action {
-        Ok(InboxAction::Ack) => inbox.ack(delivery.message_id()),
+        Ok(InboxAction::Ack) => {
+            inbox.ack(delivery.message_id());
+            if let Some(ask_id) = delivery.reply_to() {
+                if let Some(channel_id) = actor.posted_channel_for_ask(ask_id)? {
+                    refresh_actor_audience(actor, subscriber, &channel_id).await;
+                    if let Err(error) = actor.resume_if_posted(kelpie, waiter, ask_id) {
+                        eprintln!("queued occupant resume failed: {error}");
+                    }
+                }
+            }
+        }
         Ok(InboxAction::Hold) => {}
         Err(error) => eprintln!("occupant delivery failed: {error}"),
     }
@@ -991,9 +1002,10 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
                         &kelpie,
                         &waiter,
                         &publisher,
+                        &subscriber,
                         &mut inbox,
                         &delivery,
-                    )?;
+                    ).await?;
                 }
                 None => return Err(HostError::InboxClosed),
             }

@@ -572,8 +572,8 @@ where
 
     /// Classify an occupant inbox delivery, publish a final, then ACK.
     ///
-    /// Busy-queue resume runs on the host tick after `posted` is durable, so
-    /// the audience can be refreshed before the next ask.
+    /// Busy-queue resume runs only after `posted` is durable and the host has
+    /// refreshed the audience for the next ask.
     ///
     /// # Errors
     ///
@@ -632,6 +632,23 @@ where
             .turn_by_ask_id(ask_id)
             .map_err(ActorError::Repository)?
             .map(|turn| turn.bot_id))
+    }
+
+    /// Return the channel of a posted ask before resuming its queued sibling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence cannot read the turn.
+    pub fn posted_channel_for_ask(
+        &self,
+        ask_id: &str,
+    ) -> Result<Option<String>, ActorError<R::Error>> {
+        Ok(self
+            .repository
+            .turn_by_ask_id(ask_id)
+            .map_err(ActorError::Repository)?
+            .filter(|turn| turn.state == TurnState::Posted && turn.bot_id == *self.bot.id())
+            .map(|turn| turn.channel_id))
     }
 
     /// Resume this bot's queue after its turn reached `posted`.

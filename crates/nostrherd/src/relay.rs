@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 
+use futures::future::join_all;
 use futures::Stream;
 use nostr_sdk::prelude::{
     Client, ClientNotification, Event, Filter, Kind, PublicKey, SingleLetterTag, SubscriptionId,
@@ -767,13 +768,13 @@ impl RelaySubscriber {
         } else {
             AudienceSource::MemberList
         };
-        let mut resolved = Vec::with_capacity(participants.len());
-        for pubkey in participants {
-            resolved.push(AudienceParticipant {
+        let resolved = join_all(participants.into_iter().map(|pubkey| async move {
+            AudienceParticipant {
                 display_name: self.profile_display(&pubkey).await.unwrap_or(None),
                 pubkey,
-            });
-        }
+            }
+        }))
+        .await;
         Ok(ChannelAudience {
             participants: resolved,
             source,
@@ -1942,6 +1943,8 @@ mod tests {
             ])
             .finalize(&admin)
             .expect("members");
+        // LocalRelay stores arbitrary events. Production NIP-29 relays sign and
+        // enforce this event; D66 delegates membership authority to that relay.
         client.send_event(&members).await.expect("store members");
 
         let subscriber = RelaySubscriber::new(client);

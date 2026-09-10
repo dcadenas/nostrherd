@@ -668,6 +668,13 @@ where
             "nostrherd refused occupant tell {} before channel publish: {reason}.",
             delivery.message_id()
         ));
+        occupant_feedback(
+            &session.session_name,
+            &format!(
+                "your tell {} did not publish: mechanical output screening found {reason}.",
+                delivery.message_id()
+            ),
+        );
         return Ok(InboxAction::Ack);
     }
     let destination = session.clone();
@@ -925,6 +932,19 @@ where
                 operator_feedback(&format!(
                     "nostrherd refused progress for ask {ask_id} before channel publish: {reason}."
                 ));
+                if let Some(turn) = turn.as_ref() {
+                    if let Some(session) = repository
+                        .session(&turn.bot_id, &turn.channel_id)
+                        .map_err(OutboxError::Repository)?
+                    {
+                        occupant_feedback(
+                            &session.session_name,
+                            &format!(
+                                "your progress for ask {ask_id} did not publish: mechanical output screening found {reason}."
+                            ),
+                        );
+                    }
+                }
                 return Ok(InboxAction::Ack);
             }
             if let Some(turn) = turn {
@@ -948,15 +968,18 @@ where
                     operator_feedback(&format!(
                         "nostrherd refused the final for ask {ask_id} before channel publish: {reason}."
                     ));
-                    progress::discard_pending(repository, ask_id)
-                        .map_err(OutboxError::Repository)?;
-                    let _ = repository
-                        .set_turn_state(ask_id, TurnState::Failed)
-                        .map_err(OutboxError::Repository)?;
-                    if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
-                        reactions.remove(event_id);
+                    if let Some(session) = repository
+                        .session(&turn.bot_id, &turn.channel_id)
+                        .map_err(OutboxError::Repository)?
+                    {
+                        occupant_feedback(
+                            &session.session_name,
+                            &format!(
+                                "your final for ask {ask_id} did not publish: mechanical output screening found {reason}. Send a revised final without that content."
+                            ),
+                        );
                     }
-                    return Ok(InboxAction::Ack);
+                    return Ok(InboxAction::Hold);
                 }
                 complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
             }
@@ -1561,13 +1584,14 @@ mod tests {
         for body in cases {
             let (mut repository, publisher) = open_repo();
             let mut private = Vec::new();
+            let mut occupant = Vec::new();
             let action = handle_delivery_with_feedback(
                 &mut repository,
                 &publisher,
                 &mut notices(),
                 &delivery("final", "ask-1", &body),
                 &NoopInFlightReaction,
-                &mut |_, _| {},
+                &mut |_, message| occupant.push(message.to_owned()),
                 &OutputGuard::new(
                     Some(PathBuf::from("/home/operator")),
                     PathBuf::from("/run/user/1000/kelpie/kelpie.sock"),
@@ -1575,14 +1599,16 @@ mod tests {
                 &mut |message| private.push(message.to_owned()),
             )
             .expect("handle");
-            assert_eq!(action, InboxAction::Ack);
+            assert_eq!(action, InboxAction::Hold);
             assert!(publisher.calls.lock().expect("calls").is_empty());
             assert_eq!(
                 repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
-                TurnState::Failed
+                TurnState::Open
             );
             assert_eq!(private.len(), 1);
             assert!(!private[0].contains(&body));
+            assert_eq!(occupant.len(), 1);
+            assert!(!occupant[0].contains(&body));
         }
     }
 

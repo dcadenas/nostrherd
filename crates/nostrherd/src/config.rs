@@ -9,6 +9,8 @@ use nostr_sdk::prelude::PublicKey;
 use nostrherd_domain::{Bot, BotId};
 use serde::Deserialize;
 
+use crate::WAITER_NAME;
+
 /// Configured bots available to the host process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BotRegistry {
@@ -92,7 +94,11 @@ impl BotRegistry {
                 .as_deref()
                 .map(str::trim)
                 .map(str::to_owned)
-                .filter(|session| !session.is_empty() && !session.chars().any(char::is_whitespace));
+                .filter(|session| {
+                    !session.is_empty()
+                        && !session.chars().any(char::is_whitespace)
+                        && session != WAITER_NAME
+                });
             if record.operator_session.is_some() && operator_session.is_none() {
                 return Err(ConfigError::InvalidBot { id });
             }
@@ -175,7 +181,7 @@ mod tests {
         let registry =
             BotRegistry::from_toml(&format!("{prefix}operator_session = 'nostrherd-dev'")).unwrap();
         assert_eq!(registry.bots()[0].operator_session(), Some("nostrherd-dev"));
-        for value in ["''", "'two words'"] {
+        for value in ["''", "'two words'", "'nostrherd'"] {
             assert!(
                 BotRegistry::from_toml(&format!("{prefix}operator_session = {value}")).is_err()
             );

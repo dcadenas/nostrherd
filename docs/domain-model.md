@@ -66,7 +66,7 @@ timer ledger (D44, D45).
 - `Place` — `Channel(id)` | `Dm(pubkey)` | `GroupDm(id)` (shape TBD).
 - `TriggerMatch` — first token `{bot-id}:` after an optional mention,
   plus either operator authorship or an operator `p`-tag from a requester
-  allowlisted for that bot (D8, D9, D34, D57).
+  admitted by that bot's requester policy (D8, D9, D34, D57, D66).
   A non-prefix reply in an open thread is not a match.
 - `ChannelAudience` — current member-list roster when available, otherwise
   observed effective authors; uncertain and observed-only audiences are shared.
