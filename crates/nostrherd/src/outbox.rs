@@ -975,7 +975,7 @@ where
                         occupant_feedback(
                             &session.session_name,
                             &format!(
-                                "your final for ask {ask_id} did not publish: mechanical output screening found {reason}. Send a revised final without that content."
+                                "your final for ask {ask_id} did not publish and the turn is closed: mechanical output screening found {reason}. Keep that content out of future channel output."
                             ),
                         );
                     }
@@ -1622,6 +1622,7 @@ mod tests {
 
     #[test]
     fn scrubbed_progress_and_tell_feed_back_without_publishing() {
+        let blocked = "read /home/operator/private";
         let guard = OutputGuard::new(
             Some(PathBuf::from("/home/operator")),
             PathBuf::from("/run/user/1000/kelpie/kelpie.sock"),
@@ -1633,7 +1634,7 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &delivery("progress", "ask-1", "read /home/operator/private"),
+            &delivery("progress", "ask-1", blocked),
             &NoopInFlightReaction,
             &mut |_, message| progress_feedback.push(message.to_owned()),
             &guard,
@@ -1642,6 +1643,7 @@ mod tests {
         .expect("progress");
         assert_eq!(progress, InboxAction::Ack);
         assert_eq!(progress_feedback.len(), 1);
+        assert!(!progress_feedback[0].contains(blocked));
         assert!(repository.progress_post("ask-1").unwrap().is_none());
         assert!(publisher.calls.lock().expect("calls").is_empty());
 
@@ -1651,12 +1653,7 @@ mod tests {
             &mut repository,
             &publisher,
             &mut notices(),
-            &occupant_tell(
-                "tell-guarded",
-                "read /home/operator/private",
-                Some("bot-foobar"),
-                None,
-            ),
+            &occupant_tell("tell-guarded", blocked, Some("bot-foobar"), None),
             &NoopInFlightReaction,
             &mut |_, message| tell_feedback.push(message.to_owned()),
             &guard,
@@ -1665,6 +1662,7 @@ mod tests {
         .expect("tell");
         assert_eq!(tell, InboxAction::Ack);
         assert_eq!(tell_feedback.len(), 1);
+        assert!(!tell_feedback[0].contains(blocked));
         assert!(publisher.calls.lock().expect("calls").is_empty());
     }
 
