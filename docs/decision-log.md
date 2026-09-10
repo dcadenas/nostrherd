@@ -1238,3 +1238,77 @@ without edits.
 
 This does not fix the renderer hole. Any client applying CommonMark to chat
 still blanks a human's `[note]: draft`. That belongs in the client.
+
+## D62. A session's name is its identity; the host converges on one per channel
+
+Status: accepted
+
+Amends D20, which refused to allocate a replacement occupant whenever a start
+was unsettled, and supersedes the stored-identity half of D56.
+
+The host recorded `sessions.occupant_logical_id` and treated it as the identity.
+That pointer went stale twice in one week and stopped a channel dead both times.
+Kelpie renumbered logical agents from `UUIDv7` to integers and did not carry the
+old ids across, so every stored id became one the daemon refuses before any
+lookup; the host retried it once a second, forever, in silence. Clearing those
+ids then exposed the second failure: Herdr still held the session's name on the
+pane of the occupant that had died, so the fresh start was refused with
+`agent_name_taken` and D20's guard turned the refusal into a permanent stop.
+
+The name is already a total, stable key and needs nothing added to make it one.
+A bot id is unique in the registry, a NIP-29 room is unique per relay, and the
+schema has always enforced the result with `sessions.session_name UNIQUE` and
+`UNIQUE(bot_id, channel_id)`. So the name identifies the session, and the host
+stores no Kelpie logical id at all. An identifier that is never stored cannot go
+stale, which removes the entire class of failure rather than handling it.
+
+Uniqueness is also what makes convergence safe. D20 refused replacements to stop
+a bot owning two identities at once; when the name is the identity, a replacement
+cannot duplicate anything, because there cannot be two holders of one name. That
+is why this entry replaces D20's refusal rather than merely relaxing it: the
+hazard D20 guarded against is now unrepresentable, and the refusal only ever
+stops the bot from working.
+
+The host therefore converges on every trigger, in three branches and no special
+cases:
+
+- Nothing holds the name: start, and record nothing but the name.
+- A live runtime holds it: address it. No start, no handoff. This is the warm
+  path and the only one that keeps the occupant's in-memory context.
+- A dead runtime holds it: restart under the same identity, replacing the
+  recorded incarnation. Kelpie's `handoff --replace` already does exactly this,
+  marking the predecessor `superseded` so it is retired out of the identity
+  rather than left half-owning its obligations.
+
+Any state not listed resolves to one of those three. A bot is never left without
+a session, so an unanticipated state costs a restart, never a silent stop.
+
+The host also persists the backend session token and replays it on a restart.
+Today it starts a fresh backend every time and rebuilds continuity from
+`.nostrherd/sessions/<session>/` (D56), so a restart loses whatever the occupant
+had not written down. Kelpie's `start` and `adopt` both accept `--session`, and
+Herdr already records the token per pane, so the identity can carry its
+conversation forward instead of reconstructing it.
+
+That token is opaque. `kind` is free-form configuration naming any installed
+agent CLI, not an enum, and each backend spells its session differently:
+opencode reports `ses_f7e8c964affeaMRRyT4cVoGkDc`, Claude a UUID, both under the
+same `agent_session.value` field. The host stores and replays the token exactly
+as given and never parses, formats, or validates it. Backend-specific knowledge
+stays in Kelpie and Herdr, which is where the backend is actually launched.
+
+Two upstream gaps block the middle of this, and neither is worked around here.
+Kelpie cannot resolve a name to the identity to continue: `who` returns a
+conflict rather than an answer once several dead claimants hold a name, and
+`adopt` requires an exact pane and terminal, so `handoff --replace` cannot be
+reached from a name alone. Herdr cannot release a name from a pane whose agent
+has died: `agent rename <pane> --clear` answers `agent_not_found`, leaving
+`herdr pane close` as the only release and a husk holding the name until then.
+
+Pane hygiene is a consequence of this entry, not a premise of it. Nothing in the
+host has ever called `OccupantPaneAllocator::release`; every occupant ever
+started leaked its workspace, which is why nine panes sit in two corpora for six
+sessions. Reusing the seat the name already points at stops the growth, and the
+host releases a pane when it observes its occupant is gone. One workspace per
+bot rather than per occupant is left as presentation, with no bearing on
+identity.
