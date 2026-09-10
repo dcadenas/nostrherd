@@ -55,21 +55,25 @@ impl OutputGuard {
         if self
             .kelpie_socket
             .as_deref()
-            .is_some_and(|path| contains_path(body, path))
+            .is_some_and(|path| contains_nonempty_path(body, path))
         {
             return Some("Kelpie socket path");
         }
         self.home
             .as_deref()
-            .filter(|path| contains_path(body, path))
+            .filter(|path| contains_home_path(body, path))
             .map(|_| "absolute home path")
     }
 }
 
-fn contains_path(body: &str, path: &Path) -> bool {
+fn contains_nonempty_path(body: &str, path: &Path) -> bool {
+    !path.as_os_str().is_empty() && body.contains(path.to_string_lossy().as_ref())
+}
+
+fn contains_home_path(body: &str, path: &Path) -> bool {
     path.parent()
         .is_some_and(|parent| !parent.as_os_str().is_empty())
-        && body.contains(path.to_string_lossy().as_ref())
+        && contains_nonempty_path(body, path)
 }
 
 fn contains_nsec(body: &str) -> bool {
@@ -1629,6 +1633,15 @@ mod tests {
             PathBuf::from("/run/user/1000/kelpie/kelpie.sock"),
         );
         assert_eq!(guard.refusal("see https://example.test/status"), None);
+    }
+
+    #[test]
+    fn relative_kelpie_socket_is_still_screened() {
+        let guard = OutputGuard::new(None, PathBuf::from("kelpie.sock"));
+        assert_eq!(
+            guard.refusal("socket is kelpie.sock"),
+            Some("Kelpie socket path")
+        );
     }
 
     #[test]
