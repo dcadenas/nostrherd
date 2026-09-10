@@ -92,7 +92,7 @@ you are willing to speak as.
 ## Install
 
 ```bash
-cargo install --git https://github.com/dcadenas/nostrherd --tag v0.1.0-alpha.11
+cargo install --git https://github.com/dcadenas/nostrherd --tag v0.1.0-alpha.12
 ```
 
 That puts `nostrherd` on your `PATH` and is the whole installation. The
@@ -287,16 +287,32 @@ Now say `mybot: hello` in that channel. Two cases differ:
 
 - **You, from the configured account.** The host sees your own message
   and answers.
-- **An allowlisted person.** Their message must also `p`-tag your account, which
+- **Another relay member.** Their message must also `p`-tag your account, which
   most clients do when you `@`-mention it. A plain `mybot: hello` from
   someone who has not mentioned you is ignored on purpose, so a bot is
   never woken by a channel it happens to be reading.
 
-Everyone else is ignored as a requester, even if they mention you. The occupant
-sees `self: hello` for your request or `[<full npub>]: hello` for an allowlisted
-person. Default non-self conduct allows answering questions, but not writes,
-reads outside the bot's working repositories, or disclosure of private information.
-That conduct is guidance, not a sandbox; the host enforces the requester allowlist.
+An empty `allowed_requesters` list admits anyone who can reach the channel. A
+non-empty list is exact in addition to you; list only your own public key for an
+operator-only bot. Relay membership is the trust boundary, delegated to the
+relay administrators.
+
+The occupant sees `self: hello` for your request or `[<full npub>]: hello` for
+another member. Each ask also says whether the current audience is shared, and
+the channel snapshot lists known participants with display names when available.
+The host prefers the NIP-29 member list; observed-author or unknown fallbacks are
+always called shared because silent readers may exist.
+
+Who asked controls what the occupant may do. Who can read controls what it may
+say. Channel conduct forbids secrets and, in shared rooms, internal paths,
+configuration, transports, and permission reasoning. This is host-written
+conduct, not host enforcement. As a mechanical accident check, the host refuses
+an nsec-shaped value, its Kelpie socket path, or an absolute path under your home
+before publication.
+
+Optional `operator_session = "<Kelpie session name>"` gives the occupant a
+private Kelpie destination for operator-only notes. It never enters the relay;
+without it, the occupant has no private outlet.
 
 A stamped `**[mybot]**:` reply should land in the thread. If nothing happens,
 check that Herdr and `kelpied` are running and that the host log shows
@@ -324,7 +340,7 @@ does about it.
 | the same bot in another channel | A separate conversation, with seven days of that channel's history |
 | a direct message | Works like any channel |
 
-Nothing here is rate limited. A bot that agrees to post every five
+Requester admission is not rate limited. A bot that agrees to post every five
 minutes will post every five minutes, under your name, until asked to
 stop. How often a bot should speak, and when it should stay quiet, is
 written in that bot's corpus alongside its personality.

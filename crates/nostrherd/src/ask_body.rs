@@ -4,6 +4,7 @@ use nostr_sdk::prelude::{PublicKey, ToBech32};
 use nostrherd_domain::EventId;
 use serde::{Deserialize, Serialize};
 
+use crate::relay::ChannelAudience;
 use crate::snapshot::render_indexed_event_line;
 use crate::IndexedRelayEvent;
 
@@ -59,6 +60,7 @@ pub fn ask_body_request(body: &str) -> &str {
 
 /// Compose one Kelpie ask body for a trigger.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn render_ask_body(
     request: &str,
     session_name: &str,
@@ -67,10 +69,14 @@ pub fn render_ask_body(
     trigger_event_id: &EventId,
     trigger_created_at: i64,
     events: &[IndexedRelayEvent],
+    audience: &ChannelAudience,
+    operator_pubkey: &str,
 ) -> RenderedAsk {
     let mut body = String::from(request);
     body.push_str("\n\n## Context\n\n");
     body.push_str(CONTEXT_TRUST);
+    body.push('\n');
+    body.push_str(&audience.summary(operator_pubkey));
     body.push('\n');
 
     let Some(cursor) = cursor else {
@@ -172,6 +178,10 @@ fn next_cursor(
 mod tests {
     use super::*;
 
+    fn shared_audience() -> ChannelAudience {
+        ChannelAudience::from_observed(&[])
+    }
+
     #[test]
     fn requester_stamp_uses_host_identity_not_request_text() {
         let operator = "a".repeat(64);
@@ -229,6 +239,8 @@ mod tests {
             &event_id('a'),
             10,
             &[event(channel, 9, "older line", 'b')],
+            &shared_audience(),
+            &"a".repeat(64),
         );
         assert_eq!(ask_body_request(&rendered.body), "hello");
         assert!(rendered.body.contains("## Context"));
@@ -260,6 +272,8 @@ mod tests {
                 event(other, 30, "secret dm", 'c'),
                 event(channel, 40, "bot: later", 'd'),
             ],
+            &shared_audience(),
+            &"a".repeat(64),
         );
         assert_eq!(ask_body_request(&rendered.body), "later");
         assert!(rendered.body.contains("and the PR?"));
@@ -285,6 +299,8 @@ mod tests {
             &event_id('b'),
             11,
             &[event(channel, 10, "bot: hello", 'a')],
+            &shared_audience(),
+            &"a".repeat(64),
         );
         assert!(rendered
             .body
@@ -310,6 +326,8 @@ mod tests {
                 event(channel, 11, "peer-b", 'b'),
                 event(channel, 12, "peer-c", 'c'),
             ],
+            &shared_audience(),
+            &"a".repeat(64),
         );
         assert!(!rendered.body.contains("peer-a"));
         assert!(!rendered.body.contains("peer-b"));
@@ -348,9 +366,31 @@ mod tests {
             &trigger,
             1000,
             &events,
+            &shared_audience(),
+            &"a".repeat(64),
         );
         assert!(!rendered.body.contains("oldest-dropped"));
         assert!(rendered.body.contains("newest-kept"));
         assert!(rendered.body.contains("Context truncated"));
+    }
+
+    #[test]
+    fn observed_author_fallback_is_explicitly_shared() {
+        let channel = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        let observed = vec![event(channel, 9, "operator line", 'b')];
+        let audience = ChannelAudience::from_observed(&observed);
+        let rendered = render_ask_body(
+            "hello",
+            "bot-foobar",
+            channel,
+            None,
+            &event_id('a'),
+            10,
+            &observed,
+            &audience,
+            &"b".repeat(64),
+        );
+        assert!(rendered.body.contains("Audience: shared channel"));
+        assert!(rendered.body.contains("silent readers may exist"));
     }
 }

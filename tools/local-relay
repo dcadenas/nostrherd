@@ -90,8 +90,12 @@ ensure_envchain() {
   }
   < "$PROOF/operator.nsec" envchain --set "$NS_OP" NOSTRHERD_PRIVATE_KEY >/dev/null 2>&1
   printf 'ws://127.0.0.1:13001\n' | envchain --set "$NS_OP" NOSTRHERD_RELAY_URL >/dev/null 2>&1
+  < "$PROOF/operator.nsec" envchain --set "$NS_OP" BUZZ_PRIVATE_KEY >/dev/null 2>&1
+  printf 'ws://127.0.0.1:13001\n' | envchain --set "$NS_OP" BUZZ_RELAY_URL >/dev/null 2>&1
   < "$PROOF/peer.nsec" envchain --set "$NS_PEER" NOSTRHERD_PRIVATE_KEY >/dev/null 2>&1
   printf 'ws://127.0.0.1:13001\n' | envchain --set "$NS_PEER" NOSTRHERD_RELAY_URL >/dev/null 2>&1
+  < "$PROOF/peer.nsec" envchain --set "$NS_PEER" BUZZ_PRIVATE_KEY >/dev/null 2>&1
+  printf 'ws://127.0.0.1:13001\n' | envchain --set "$NS_PEER" BUZZ_RELAY_URL >/dev/null 2>&1
 }
 
 wait_healthy() {

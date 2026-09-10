@@ -21,7 +21,7 @@ use nostrherd::actor::{ActorError, BotActor};
 use nostrherd::config::{BotRegistry, ConfigError};
 use nostrherd::herdr::{HerdrError, HerdrPaneAllocator};
 use nostrherd::inbox::{default_socket, spawn_inbox, HostInbox, InboxDelivery};
-use nostrherd::outbox::{BuzzPublisher, InFlightReaction, InboxAction};
+use nostrherd::outbox::{BuzzPublisher, InFlightReaction, InboxAction, OutputGuard};
 use nostrherd::progress::{BackgroundProgressRelay, ProgressRelay};
 use nostrherd::relay::{
     IngestAction, IngestError, RelayIngest, RelaySubscribeError, RelaySubscriber,
@@ -414,6 +414,23 @@ fn action_bot_id(
     }
 }
 
+fn action_channel_id(
+    repository: &SqliteRepository,
+    action: &IngestAction,
+) -> Result<Option<String>, HostError> {
+    match action {
+        IngestAction::TurnCandidate { channel_id, .. } => Ok(Some(channel_id.clone())),
+        IngestAction::Edit {
+            target_event_id, ..
+        }
+        | IngestAction::Delete {
+            target_event_id, ..
+        } => Ok(repository
+            .active_turn_for_event(target_event_id)?
+            .map(|turn| turn.channel_id)),
+    }
+}
+
 fn actor_for_bot<'a>(
     actors: &'a mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
     bot_id: &BotId,
@@ -472,6 +489,48 @@ async fn channel_display_for(
     }
 }
 
+async fn refresh_actor_audience(
+    actor: &mut BotActor<SqliteRepository, HerdrPaneAllocator>,
+    subscriber: &RelaySubscriber,
+    channel_id: &str,
+) {
+    let observed = match actor.audience_events(channel_id) {
+        Ok(events) => events,
+        Err(error) => {
+            eprintln!("audience index lookup failed: {error}");
+            return;
+        }
+    };
+    match subscriber.channel_audience(channel_id, &observed).await {
+        Ok(audience) => actor.set_audience(channel_id, audience),
+        Err(error) => {
+            eprintln!("audience lookup failed; treating channel as shared: {error}");
+            actor.set_audience(
+                channel_id,
+                nostrherd::relay::ChannelAudience::from_observed(&observed),
+            );
+        }
+    }
+}
+
+async fn refresh_actor_audiences(
+    actors: &mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
+    subscriber: &RelaySubscriber,
+) {
+    for actor in actors {
+        let channels = match actor.pending_scope() {
+            Ok(scope) => scope.channel_ids,
+            Err(error) => {
+                eprintln!("audience scope lookup failed: {error}");
+                continue;
+            }
+        };
+        for channel_id in channels {
+            refresh_actor_audience(actor, subscriber, &channel_id).await;
+        }
+    }
+}
+
 async fn observe_event(
     actors: &mut [BotActor<SqliteRepository, HerdrPaneAllocator>],
     kelpie: &KelpieClient,
@@ -485,8 +544,12 @@ async fn observe_event(
     let event_id = EventId::parse_hex(&event.id.to_hex()).expect("SDK event ids are 32 bytes");
     if let Some(action) = action {
         let event_id = ingest_event_id(&action).clone();
+        let action_channel = action_channel_id(ingest.repository_mut(), &action)?;
         if let Some(bot_id) = action_bot_id(ingest.repository_mut(), &action)? {
             if let Some(actor) = actor_for_bot(actors, &bot_id) {
+                if let Some(channel_id) = action_channel.as_deref() {
+                    refresh_actor_audience(actor, subscriber, channel_id).await;
+                }
                 let display =
                     channel_display_for(actor, subscriber, operator_pubkey, &action).await;
                 match actor.handle_ingest(kelpie, waiter, &action, &display) {
@@ -514,6 +577,7 @@ async fn observe_event(
         let Some(actor) = actor_for_bot(actors, &fire.bot_id) else {
             continue;
         };
+        refresh_actor_audience(actor, subscriber, &fire.channel_id).await;
         match actor.handle_watch_fire(kelpie, waiter, &fire) {
             Ok(outcome) => eprintln!(
                 "observed watch fire {} {outcome:?}",
@@ -764,14 +828,13 @@ fn start_actors(
     bots: Vec<Bot>,
     operator_pubkey: &str,
     database: &Path,
-    kelpie: &KelpieClient,
-    waiter: &HostWaiter<'_>,
     publisher: &BuzzPublisher,
+    output_guard: &OutputGuard,
 ) -> Result<Vec<BotActor<SqliteRepository, HerdrPaneAllocator>>, HostError> {
     let reactions: Arc<dyn InFlightReaction> = Arc::new(publisher.clone());
     let progress_relay: Arc<dyn ProgressRelay> =
         Arc::new(BackgroundProgressRelay::new(Arc::new(publisher.clone())));
-    let mut actors = bots
+    let actors = bots
         .into_iter()
         .map(|bot| {
             SqliteRepository::open(database).map(|repository| {
@@ -783,14 +846,10 @@ fn start_actors(
                 )
                 .with_reactions(Arc::clone(&reactions))
                 .with_progress_relay(Arc::clone(&progress_relay))
+                .with_output_guard(output_guard.clone())
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    for actor in &mut actors {
-        if let Err(error) = actor.resume_queued(kelpie, waiter) {
-            eprintln!("queued occupant resume failed: {error}");
-        }
-    }
     Ok(actors)
 }
 
@@ -819,16 +878,7 @@ fn handle_host_delivery(
     };
     let action = actor.handle_occupant_delivery(kelpie, waiter, publisher, delivery);
     match action {
-        Ok(InboxAction::Ack) => {
-            if let Some(ask_id) = delivery.reply_to() {
-                for actor in actors.iter_mut() {
-                    if let Err(error) = actor.resume_if_posted(kelpie, waiter, ask_id) {
-                        eprintln!("queued occupant resume failed: {error}");
-                    }
-                }
-            }
-            inbox.ack(delivery.message_id());
-        }
+        Ok(InboxAction::Ack) => inbox.ack(delivery.message_id()),
         Ok(InboxAction::Hold) => {}
         Err(error) => eprintln!("occupant delivery failed: {error}"),
     }
@@ -851,24 +901,28 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
     client.connect().and_wait(CONNECT_TIMEOUT).await;
     // Constructed inside the runtime so the sync actor layer can bridge
     // publishes onto the client (D43).
+    let output_guard = OutputGuard::new(
+        std::env::var_os("HOME").map(PathBuf::from),
+        default_socket(),
+    );
     let publisher = BuzzPublisher::new(
         client.clone(),
         operator.keys.clone(),
         operator.relay_url.clone(),
-    );
-    let mut actors = start_actors(
-        bots,
-        &operator_pubkey,
-        database,
-        &kelpie,
-        &waiter,
-        &publisher,
-    )?;
+    )
+    .with_output_guard(output_guard.clone());
+    let mut actors = start_actors(bots, &operator_pubkey, database, &publisher, &output_guard)?;
     let bots = actors
         .iter()
         .map(|actor| actor.bot().clone())
         .collect::<Vec<_>>();
     let subscriber = RelaySubscriber::new(client);
+    refresh_actor_audiences(&mut actors, &subscriber).await;
+    for actor in &mut actors {
+        if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
+            eprintln!("queued occupant resume failed: {error}");
+        }
+    }
     let mut notifications = pin!(subscriber.notifications());
     let mut ingest = RelayIngest::new(
         operator_pubkey.clone(),
@@ -907,6 +961,9 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
                 None => return Err(HostError::NotificationClosed),
             },
             _ = refresh.tick() => {
+                if poll.last_queued_resume.elapsed() >= RESUME_QUEUED_EVERY {
+                    refresh_actor_audiences(&mut actors, &subscriber).await;
+                }
                 poll_relay(
                     &mut actors,
                     &kelpie,
@@ -1056,7 +1113,7 @@ fn init_guidance(
         format!(" --config {}", shell_path(path))
     });
     let _ = write!(text,
-        "  nostrherd{flags} --check\n  nostrherd{flags}\nFrom your configured account, say \"{id}: hello\" in a channel it can post in.\n\nOnly you can wake this bot by default. To let others ask, see \"Let others ask\" in {} (allowed_requesters).\n",
+        "  nostrherd{flags} --check\n  nostrherd{flags}\nFrom your configured account, say \"{id}: hello\" in a channel it can post in.\n\nAnyone who can reach the channel may ask by default. To restrict requesters or add a private operator session, see \"Requester policy\" in {} (`allowed_requesters`, `operator_session`).\n",
         dir.join("README.md").display()
     );
     text
@@ -1204,6 +1261,7 @@ mod tests {
         assert!(ready.contains("  nostrherd --check\n  nostrherd\n"));
         assert!(ready.contains("mybot: hello"));
         assert!(ready.contains("allowed_requesters"));
+        assert!(ready.contains("Anyone who can reach the channel"));
         assert!(ready.contains("/bots/mybot/README.md"));
         let partial = init_guidance(dir, "mybot", None, false, &["NOSTRHERD_RELAY_URL"]);
         assert!(!partial.contains("NOSTRHERD_PRIVATE_KEY"));

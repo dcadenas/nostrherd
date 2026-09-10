@@ -1,5 +1,6 @@
 //! Per-bot actor: start a corpus occupant, then ask on each trigger.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -11,8 +12,10 @@ use crate::ask_body::{render_ask_body, AskContextCursor, TriggerRequest};
 use crate::inbox::InboxDelivery;
 use crate::outbox::{
     self, InFlightReaction, InboxAction, NoopInFlightReaction, OutboundPublisher, OutboxError,
+    OutputGuard,
 };
 use crate::progress::{self, NoopProgressRelay, ProgressRelay};
+use crate::relay::ChannelAudience;
 use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
 use crate::watch::{parse_watch_command, WatchCommand, WatchFire, WatchRecord};
 use crate::{
@@ -199,6 +202,8 @@ pub struct BotActor<R, P> {
     panes: P,
     reactions: ReactionHost,
     progress_relay: ProgressHost,
+    audiences: HashMap<String, ChannelAudience>,
+    output_guard: OutputGuard,
 }
 
 /// Progress relay sink with a `Debug` that does not describe the adapter.
@@ -257,6 +262,8 @@ where
             progress_relay: ProgressHost {
                 inner: Arc::new(NoopProgressRelay),
             },
+            audiences: HashMap::new(),
+            output_guard: OutputGuard::default(),
         }
     }
 
@@ -274,10 +281,34 @@ where
         self
     }
 
+    /// Apply mechanical output screening before channel publication.
+    #[must_use]
+    pub fn with_output_guard(mut self, output_guard: OutputGuard) -> Self {
+        self.output_guard = output_guard;
+        self
+    }
+
     /// Return the configured bot.
     #[must_use]
     pub fn bot(&self) -> &Bot {
         &self.bot
+    }
+
+    /// Cache host-resolved audience evidence for the next ask in a channel.
+    pub fn set_audience(&mut self, channel_id: impl Into<String>, audience: ChannelAudience) {
+        self.audiences.insert(channel_id.into(), audience);
+    }
+
+    /// Return indexed channel events used for audience fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persistence cannot read the channel index.
+    pub fn audience_events(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<IndexedRelayEvent>, ActorError<R::Error>> {
+        self.channel_events_for_occupant(channel_id)
     }
 
     /// Return whether this bot already has a session for `channel_id`.
@@ -541,14 +572,15 @@ where
 
     /// Classify an occupant inbox delivery, publish a final, then ACK.
     ///
-    /// Busy-queue resume happens only after `posted` is durable.
+    /// Busy-queue resume runs on the host tick after `posted` is durable, so
+    /// the audience can be refreshed before the next ask.
     ///
     /// # Errors
     ///
     /// Returns an error when persistence, publish, or queued resume fails.
     pub fn handle_occupant_delivery<Pub: OutboundPublisher>(
         &mut self,
-        kelpie: &KelpieClient,
+        _kelpie: &KelpieClient,
         waiter: &HostWaiter<'_>,
         publisher: &Pub,
         delivery: &InboxDelivery,
@@ -563,6 +595,15 @@ where
                 eprintln!("operator notice: occupant feedback to {session_name} failed: {error}");
             }
         };
+        let mut operator_feedback = |body: &str| {
+            if let Some(session_name) = self.bot.operator_session() {
+                if let Err(error) = waiter.tell_occupant(session_name, body) {
+                    eprintln!(
+                        "operator notice: private feedback to {session_name} failed: {error}"
+                    );
+                }
+            }
+        };
         let action = outbox::handle_delivery_with_feedback(
             &mut self.repository,
             publisher,
@@ -570,16 +611,13 @@ where
             delivery,
             &self.reactions,
             &mut occupant_feedback,
+            &self.output_guard,
+            &mut operator_feedback,
         )
         .map_err(|error| match error {
             OutboxError::Repository(error) => ActorError::Repository(error),
             OutboxError::Publish(error) => ActorError::Outbox(error.to_string()),
         })?;
-        if action == InboxAction::Ack {
-            if let Some(ask_id) = delivery.reply_to() {
-                self.resume_if_posted(kelpie, waiter, ask_id)?;
-            }
-        }
         Ok(action)
     }
 
@@ -1174,6 +1212,8 @@ where
             context_event_id,
             trigger_created_at,
             &events,
+            &self.audience_for(channel_id, &events),
+            &self.operator_pubkey,
         );
         let idempotency_key = format!("{}:{}", queued.event_id.as_str(), queued.sequence);
         let receipt = self.ask_queued_with_recovery(
@@ -1416,20 +1456,30 @@ where
             ))
         })?;
         let events = self.channel_events_for_occupant(&session.channel_id)?;
+        let audience = self.audience_for(&session.channel_id, &events);
         let markdown = render_place_snapshot(
             &session.session_name,
             &session.channel_id,
             crate::unix_now().map_err(ActorError::Snapshot)?,
             &events,
+            &audience,
+            &self.operator_pubkey,
         );
         refresh_place_snapshot(
             self.bot.corpus_path(),
-            self.bot.id().as_str(),
+            &self.bot,
             &session.session_name,
             &markdown,
         )
         .map_err(ActorError::Snapshot)?;
         Ok(relpath)
+    }
+
+    fn audience_for(&self, channel_id: &str, events: &[IndexedRelayEvent]) -> ChannelAudience {
+        self.audiences
+            .get(channel_id)
+            .cloned()
+            .unwrap_or_else(|| ChannelAudience::from_observed(events))
     }
 
     pub(crate) fn ensure_session(
@@ -1886,6 +1936,10 @@ mod tests {
             let (mut actor, kelpie, runner, panes) = actor([adopt()]);
             actor.operator_pubkey = "a".repeat(64);
             let work = work('c', "status", None);
+            actor.bot = actor
+                .bot
+                .clone()
+                .with_allowed_requesters(vec![actor.operator_pubkey.clone()]);
             actor.ensure_session(&work.channel_id, "Foobar").unwrap();
             if indexed {
                 index_work(&mut actor.repository, &work);

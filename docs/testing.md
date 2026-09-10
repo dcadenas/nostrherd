@@ -26,21 +26,28 @@ SPEC flow or compatibility with every agent and relay version.
 
 ## Unit
 
-Issue 87's requester tests cover absent/empty allowlists, hex/npub normalization,
-invalid configuration, per-bot authorization, mention requirements, effective
+Issue 94's requester tests cover open absent/empty allowlists, exact non-empty
+lists, operator-only configuration, hex/npub normalization, invalid
+configuration, per-bot authorization, mention requirements, effective
 author attribution, and host stamps independent of request text.
 `queued_requester_checks_cover_legacy_rows_revocation_and_missing_identity`
 covers queued legacy rows, removed authorization and unavailable identity.
 Existing edit and queue tests assert requester stamps alongside their flow checks.
 
-`./tools/local-relay contract-proof` also proves requester authorization: a
-non-allowlisted peer is indexed without a wake; the operator is stamped `self:`;
-an allowlisted peer queues, survives SQLite reopen, retains its full npub stamp,
+`./tools/local-relay contract-proof` also proves requester authorization: an
+operator-only bot refuses a peer; the operator is stamped `self:`; a peer admitted
+by an empty list queues, survives SQLite reopen, retains its full npub stamp,
 and receives exactly one stamped relay reply. The transport to the occupant is
 synthetic. This is not live Herdr/Kelpie or agent-conduct enforcement proof.
 
-Historical peer-trigger recipes below require adding the throwaway peer public
-key to that bot's `allowed_requesters` before starting the host (D57).
+Historical peer-trigger recipes below may use an empty requester list. A
+non-empty `allowed_requesters` list must include the throwaway peer (D66).
+
+`observed_author_fallback_is_explicitly_shared` is the under-reporting regression:
+one observed author and no member list still produces a shared Audience line.
+`mechanical_output_scrub_refuses_secrets_and_operator_paths_privately` covers an
+nsec-shaped value, the configured Kelpie socket and an absolute operator-home
+path without publishing or repeating the refused body.
 
 Issue 79's snapshot tests cover idempotent contract and snapshot upserts,
 author-owned text and `AGENTS.md` preservation, template initialization,

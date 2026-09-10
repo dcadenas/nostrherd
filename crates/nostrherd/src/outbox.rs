@@ -6,6 +6,7 @@
 //! which the relay dedups.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,52 @@ pub enum InboxAction {
     Ack,
     /// Leave the delivery queued so a later valid final can still arrive.
     Hold,
+}
+
+/// Mechanical accident checks applied before occupant prose can be published.
+#[derive(Debug, Clone, Default)]
+pub struct OutputGuard {
+    home: Option<PathBuf>,
+    kelpie_socket: Option<PathBuf>,
+}
+
+impl OutputGuard {
+    /// Configure the operator paths that must not appear in channel output.
+    #[must_use]
+    pub fn new(home: Option<PathBuf>, kelpie_socket: PathBuf) -> Self {
+        Self {
+            home,
+            kelpie_socket: Some(kelpie_socket),
+        }
+    }
+
+    fn refusal(&self, body: &str) -> Option<&'static str> {
+        if contains_nsec(body) {
+            return Some("possible nsec");
+        }
+        if self
+            .kelpie_socket
+            .as_deref()
+            .is_some_and(|path| contains_path(body, path))
+        {
+            return Some("Kelpie socket path");
+        }
+        self.home
+            .as_deref()
+            .filter(|path| contains_path(body, path))
+            .map(|_| "absolute home path")
+    }
+}
+
+fn contains_path(body: &str, path: &Path) -> bool {
+    !path.as_os_str().is_empty() && body.contains(path.to_string_lossy().as_ref())
+}
+
+fn contains_nsec(body: &str) -> bool {
+    body.to_ascii_lowercase()
+        .as_bytes()
+        .windows(63)
+        .any(|window| window.starts_with(b"nsec1") && window.iter().all(u8::is_ascii_alphanumeric))
 }
 
 /// How long a retryable publish failure waits before the tick resends (D48).
@@ -140,6 +187,8 @@ pub enum PublishError {
     NotAccepted { detail: String },
     /// A relay explicitly rejected the event.
     Rejected { detail: String },
+    /// Mechanical output screening refused occupant prose.
+    OutputRefused { reason: &'static str },
 }
 
 impl fmt::Display for PublishError {
@@ -152,6 +201,9 @@ impl fmt::Display for PublishError {
                 write!(formatter, "relay did not accept the event: {detail}")
             }
             Self::Rejected { detail } => write!(formatter, "relay rejected the event: {detail}"),
+            Self::OutputRefused { reason } => {
+                write!(formatter, "outbound content refused: {reason}")
+            }
         }
     }
 }
@@ -271,6 +323,7 @@ pub struct BuzzPublisher {
     keys: Keys,
     relay_url: String,
     handle: tokio::runtime::Handle,
+    output_guard: OutputGuard,
 }
 
 impl fmt::Debug for BuzzPublisher {
@@ -288,7 +341,15 @@ impl BuzzPublisher {
             keys,
             relay_url: relay_url.into(),
             handle: tokio::runtime::Handle::current(),
+            output_guard: OutputGuard::default(),
         }
+    }
+
+    /// Apply mechanical output screening to every channel event.
+    #[must_use]
+    pub fn with_output_guard(mut self, output_guard: OutputGuard) -> Self {
+        self.output_guard = output_guard;
+        self
     }
 
     /// Sign and send one Buzz-shaped event; returns its event id.
@@ -302,6 +363,9 @@ impl BuzzPublisher {
     /// Returns an error when the event cannot be signed or no relay
     /// accepts it.
     pub async fn send_buzz(&self, event: &BuzzEvent) -> Result<String, PublishError> {
+        if let Some(reason) = self.output_guard.refusal(event.content()) {
+            return Err(PublishError::OutputRefused { reason });
+        }
         let mut builder = EventBuilder::new(Kind::Custom(event.kind()), event.content());
         for tag in event.tags() {
             let tag = Tag::parse(tag.iter().map(String::as_str))
@@ -382,6 +446,9 @@ impl OutboundPublisher for BuzzPublisher {
     type Error = PublishError;
 
     fn prepare(&self, attempt: &OutboundAttempt) -> Result<PreparedOutbound, Self::Error> {
+        if let Some(reason) = self.output_guard.refusal(&attempt.body) {
+            return Err(PublishError::OutputRefused { reason });
+        }
         let created_at = attempt
             .prepared_created_at
             .unwrap_or_else(|| crate::unix_now().unwrap_or_default());
@@ -569,6 +636,8 @@ fn handle_occupant_tell<R, P>(
     notice: &mut impl FnMut(&str),
     occupant_feedback: &mut impl FnMut(&str, &str),
     delivery: &InboxDelivery,
+    output_guard: &OutputGuard,
+    operator_feedback: &mut impl FnMut(&str),
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
 where
     R: HostRepository,
@@ -590,6 +659,17 @@ where
         );
         return Ok(InboxAction::Ack);
     };
+    if let Some(reason) = output_guard.refusal(&body) {
+        notice(&format!(
+            "occupant tell {} was refused by mechanical output screening: {reason}",
+            delivery.message_id()
+        ));
+        operator_feedback(&format!(
+            "nostrherd refused occupant tell {} before channel publish: {reason}.",
+            delivery.message_id()
+        ));
+        return Ok(InboxAction::Ack);
+    }
     let destination = session.clone();
     publish_initiated(
         repository,
@@ -783,6 +863,8 @@ where
         delivery,
         reactions,
         &mut |_, _| {},
+        &OutputGuard::default(),
+        &mut |_| {},
     )
 }
 
@@ -792,6 +874,7 @@ where
 ///
 /// Returns an error when persistence or publish fails. A publish failure does
 /// not ACK, so reconnect can retry the same outbound attempt.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_delivery_with_feedback<R, P, I>(
     repository: &mut R,
     publisher: &P,
@@ -799,6 +882,8 @@ pub fn handle_delivery_with_feedback<R, P, I>(
     delivery: &InboxDelivery,
     reactions: &I,
     occupant_feedback: &mut impl FnMut(&str, &str),
+    output_guard: &OutputGuard,
+    operator_feedback: &mut impl FnMut(&str),
 ) -> Result<InboxAction, OutboxError<R::Error, P::Error>>
 where
     R: HostRepository,
@@ -806,7 +891,15 @@ where
     I: InFlightReaction,
 {
     if delivery.kind() == "tell" {
-        return handle_occupant_tell(repository, publisher, notice, occupant_feedback, delivery);
+        return handle_occupant_tell(
+            repository,
+            publisher,
+            notice,
+            occupant_feedback,
+            delivery,
+            output_guard,
+            operator_feedback,
+        );
     }
     let Some(ask_id) = delivery.reply_to() else {
         return Ok(InboxAction::Ack);
@@ -825,6 +918,15 @@ where
         }
         Decision::AckWithoutPublish => Ok(InboxAction::Ack),
         Decision::Progress { body } => {
+            if let Some(reason) = output_guard.refusal(&body) {
+                notice(&format!(
+                    "progress for ask {ask_id} was refused by mechanical output screening: {reason}"
+                ));
+                operator_feedback(&format!(
+                    "nostrherd refused progress for ask {ask_id} before channel publish: {reason}."
+                ));
+                return Ok(InboxAction::Ack);
+            }
             if let Some(turn) = turn {
                 progress::record_progress(
                     repository,
@@ -839,6 +941,23 @@ where
         }
         Decision::Publish { body } => match turn {
             Some(turn) => {
+                if let Some(reason) = output_guard.refusal(&body) {
+                    notice(&format!(
+                        "final for ask {ask_id} was refused by mechanical output screening: {reason}"
+                    ));
+                    operator_feedback(&format!(
+                        "nostrherd refused the final for ask {ask_id} before channel publish: {reason}."
+                    ));
+                    progress::discard_pending(repository, ask_id)
+                        .map_err(OutboxError::Repository)?;
+                    let _ = repository
+                        .set_turn_state(ask_id, TurnState::Failed)
+                        .map_err(OutboxError::Repository)?;
+                    if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+                        reactions.remove(event_id);
+                    }
+                    return Ok(InboxAction::Ack);
+                }
                 complete_outbound_with(repository, publisher, notice, &turn, Some(&body), reactions)
             }
             None => Ok(InboxAction::Hold),
@@ -1433,6 +1552,41 @@ mod tests {
     }
 
     #[test]
+    fn mechanical_output_scrub_refuses_secrets_and_operator_paths_privately() {
+        let cases = [
+            format!("credential nsec1{}", "q".repeat(58)),
+            "socket /run/user/1000/kelpie/kelpie.sock".to_owned(),
+            "read /home/operator/private/notes".to_owned(),
+        ];
+        for body in cases {
+            let (mut repository, publisher) = open_repo();
+            let mut private = Vec::new();
+            let action = handle_delivery_with_feedback(
+                &mut repository,
+                &publisher,
+                &mut notices(),
+                &delivery("final", "ask-1", &body),
+                &NoopInFlightReaction,
+                &mut |_, _| {},
+                &OutputGuard::new(
+                    Some(PathBuf::from("/home/operator")),
+                    PathBuf::from("/run/user/1000/kelpie/kelpie.sock"),
+                ),
+                &mut |message| private.push(message.to_owned()),
+            )
+            .expect("handle");
+            assert_eq!(action, InboxAction::Ack);
+            assert!(publisher.calls.lock().expect("calls").is_empty());
+            assert_eq!(
+                repository.turn_by_ask_id("ask-1").unwrap().unwrap().state,
+                TurnState::Failed
+            );
+            assert_eq!(private.len(), 1);
+            assert!(!private[0].contains(&body));
+        }
+    }
+
+    #[test]
     fn host_wake_final_publishes_without_a_reply_or_mention() {
         let (mut repository, publisher) = open_repo();
         repository.execute_batch_for_test(
@@ -1478,6 +1632,26 @@ mod tests {
         assert!(matches!(
             publisher.prepare(&attempt),
             Err(PublishError::Build(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concrete_publisher_refuses_a_persisted_operator_path() {
+        let publisher = BuzzPublisher::new(
+            Client::builder().build(),
+            Keys::generate(),
+            "ws://127.0.0.1:1",
+        )
+        .with_output_guard(OutputGuard::new(
+            Some(PathBuf::from("/home/operator")),
+            PathBuf::from("/run/user/1000/kelpie/kelpie.sock"),
+        ));
+        let attempt = OutboundAttempt::new("ask", "read /home/operator/private", "channel");
+        assert!(matches!(
+            publisher.prepare(&attempt),
+            Err(PublishError::OutputRefused {
+                reason: "absolute home path"
+            })
         ));
     }
 
@@ -2129,6 +2303,8 @@ mod tests {
             &occupant_tell("tell-bad", "   ", Some("bot-foobar"), None),
             &NoopInFlightReaction,
             &mut |name, body| feedback.push((name.to_owned(), body.to_owned())),
+            &OutputGuard::default(),
+            &mut |_| {},
         )
         .expect("handle");
         assert_eq!(action, InboxAction::Ack);

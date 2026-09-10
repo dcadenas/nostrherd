@@ -69,16 +69,23 @@ envchain nostrherd nostrherd \
 id = "bot"
 corpus = "/path/to/corpus-repo"
 kind = "opencode"
-allowed_requesters = [] # operator-only
+allowed_requesters = [] # anyone who can reach and mention you
+# operator_session = "your-private-kelpie-session"
 ```
 
-To accept another person's requests, add their full hex public key or npub to
-that bot's `allowed_requesters` array and restart the host. They must also
-p-tag the operator. Absent or empty lists permit only the operator; invalid
+An absent or empty requester list admits anyone who can reach the channel and
+p-tag the operator. A non-empty list is exact in addition to the operator; list
+only the operator's full hex key or npub for operator-only behavior. Invalid
 keys reject configuration. Refused requesters create no turn or reaction.
 Queued work is rechecked against the current list before dispatch; already-open
 asks retain their lifecycle. The occupant sees `self:` for the operator and a
-full npub prefix for an allowlisted requester (D57).
+full npub prefix for another requester (D66).
+
+Set `operator_session` to a live Kelpie name when the occupant needs a private
+route for operator-only notes. The host-managed contract names it. Output to the
+channel is screened for an nsec-shaped value, the selected Kelpie socket path,
+and absolute paths under the operator home; refusals are reported without
+echoing the body.
 
 `--check` loads config and database, then exits. It needs neither the
 envchain wrap nor Kelpie.

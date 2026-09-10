@@ -6,6 +6,27 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.12
+
+- Bots now receive a current audience summary with every ask and a participant
+  roster in each channel snapshot (D66). A NIP-29 member list wins when the relay
+  supplies one; observed-author and unknown fallbacks are always identified as
+  shared because silent readers may exist. Host-managed conduct separates what
+  a requester may ask the bot to do from what is appropriate to say to everyone
+  who can read the channel.
+- Empty `allowed_requesters` now admits anyone who can reach the channel and
+  mention the operator. A non-empty list remains exact in addition to the
+  operator; list only the operator's public key to preserve operator-only use.
+  Optional `operator_session` names a private Kelpie destination for notes that
+  must not be published.
+- Before channel publication, the host refuses an nsec-shaped value, its Kelpie
+  socket path, or an absolute operator-home path. Refusal notices do not repeat
+  the body and use `operator_session` when configured.
+
+  **Action**: review every bot registry before restarting. Add the operator's
+  public key to bots that must remain operator-only. Optionally configure
+  `operator_session`, then run `nostrherd --check` and restart the host.
+
 ## 0.1.0-alpha.11
 
 - Kelpie picks the identity a restarted occupant continues, instead of the host

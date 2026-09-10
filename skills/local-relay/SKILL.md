@@ -65,10 +65,10 @@ and does not invoke a send crate.
 
 ## Trigger as the peer
 
-Before starting the host, put the throwaway peer's full public key or npub in
-that bot's `allowed_requesters` array in `bots.toml`. An absent or empty list
-allows only the operator (D57). Channel membership alone does not authorize a
-request. A refused peer message is indexed without an occupant wake or reaction.
+An absent or empty `allowed_requesters` list admits the throwaway peer. A
+non-empty list must contain its full public key or npub; listing only the
+operator makes the bot operator-only (D66). The peer must still mention the
+operator. A refused peer message is indexed without an occupant wake or reaction.
 
 ```bash
 ./tools/local-relay trigger --content 'hello from peer'
@@ -92,5 +92,6 @@ a Herdr agent with that name as the host. Occupant panes still use
 Herdr. If a leftover Ready alias `nostrherd` blocks `waiter.register`,
 retire that incarnation.
 
-`envchain NAMESPACE CMD` injects Buzz vars into CMD. The binaries only
+The proof namespaces carry `NOSTRHERD_*` for the host and `BUZZ_*` for the Buzz
+verification client, derived from the same throwaway keys. The binaries only
 read the environment (D29). There is no `--envchain` flag.

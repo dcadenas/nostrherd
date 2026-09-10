@@ -461,7 +461,10 @@ async fn local_relay_contract_before_synthetic_occupant() {
         asked("ask-2"),
     ]);
     harness.operator = keys.public_key().to_hex();
-    harness.bot = harness.bot.clone().with_allowed_requesters(Vec::new());
+    harness.bot = harness
+        .bot
+        .clone()
+        .with_allowed_requesters(vec![harness.operator.clone()]);
     let refused = event_with_keys(
         peer(),
         9,
@@ -476,10 +479,7 @@ async fn local_relay_contract_before_synthetic_occupant() {
         .unwrap();
     assert!(harness.ingest(fetched.first().unwrap()).is_none());
     assert!(harness.panes.calls.lock().unwrap().is_empty());
-    harness.bot = harness
-        .bot
-        .clone()
-        .with_allowed_requesters(vec![peer().public_key().to_hex()]);
+    harness.bot = harness.bot.clone().with_allowed_requesters(Vec::new());
     let corpus = harness.bot.corpus_path();
     let personality = "Answer briefly and keep the author's personality.\n";
     std::fs::write(corpus.join("AGENTS.md"), personality).expect("personality");
@@ -593,6 +593,9 @@ async fn local_relay_contract_before_synthetic_occupant() {
         1
     );
     assert_eq!(turns(&actor, FOOBAR)[0].state, TurnState::Posted);
+    actor
+        .handle_turn_completed(&harness.kelpie, &waiter)
+        .expect("host tick resumes queued peer request");
     assert_eq!(
         peer_request(std::str::from_utf8(&harness.ask_bodies()[1]).unwrap()),
         "self: peer proof"

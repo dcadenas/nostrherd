@@ -89,6 +89,7 @@ pub struct Bot {
     outbound_prefix: String,
     occupant_kind: String,
     allowed_requesters: Vec<String>,
+    operator_session: Option<String>,
 }
 
 impl Bot {
@@ -108,6 +109,7 @@ impl Bot {
             outbound_prefix,
             occupant_kind,
             allowed_requesters: Vec::new(),
+            operator_session: None,
         })
     }
 
@@ -148,17 +150,30 @@ impl Bot {
         &self.allowed_requesters
     }
 
-    /// Authorize the operator or an explicitly allowlisted requester.
+    /// Configure a private Kelpie destination for operator-only notes.
+    #[must_use]
+    pub fn with_operator_session(mut self, session: Option<String>) -> Self {
+        self.operator_session = session;
+        self
+    }
+
+    #[must_use]
+    pub fn operator_session(&self) -> Option<&str> {
+        self.operator_session.as_deref()
+    }
+
+    /// Authorize the operator, anyone under an empty list, or a listed requester.
     #[must_use]
     pub fn authorizes(&self, operator: &str, author: &str) -> bool {
         requester_authorized(operator, author, &self.allowed_requesters)
     }
 }
 
-/// Authorize an effective author against the operator and additional requester keys.
+/// Authorize an effective author against the operator and requester policy.
 #[must_use]
 pub fn requester_authorized(operator: &str, author: &str, allowed: &[String]) -> bool {
     author.eq_ignore_ascii_case(operator)
+        || allowed.is_empty()
         || allowed.iter().any(|key| key.eq_ignore_ascii_case(author))
 }
 

@@ -27,6 +27,7 @@ struct FileBot {
     kind: String,
     #[serde(default)]
     allowed_requesters: Vec<String>,
+    operator_session: Option<String>,
 }
 
 /// Failure while reading bot configuration.
@@ -86,6 +87,15 @@ impl BotRegistry {
             let id = record.id.clone();
             let bot_id =
                 BotId::new(&record.id).ok_or_else(|| ConfigError::InvalidBot { id: id.clone() })?;
+            let operator_session = record
+                .operator_session
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_owned)
+                .filter(|session| !session.is_empty() && !session.chars().any(char::is_whitespace));
+            if record.operator_session.is_some() && operator_session.is_none() {
+                return Err(ConfigError::InvalidBot { id });
+            }
             let bot = Bot::new(bot_id, record.corpus, record.kind)
                 .ok_or(ConfigError::InvalidBot { id: id.clone() })?
                 .with_allowed_requesters(
@@ -98,7 +108,8 @@ impl BotRegistry {
                                 .map_err(|_| ConfigError::InvalidBot { id: id.clone() })
                         })
                         .collect::<Result<Vec<_>, _>>()?,
-                );
+                )
+                .with_operator_session(operator_session);
             if bots.iter().any(|existing: &Bot| existing.id() == bot.id()) {
                 return Err(ConfigError::DuplicateBot { id });
             }
@@ -125,7 +136,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requester_allowlist_defaults_to_operator_only_and_normalizes_keys() {
+    fn requester_allowlist_defaults_to_everyone_and_normalizes_keys() {
         use nostr_sdk::prelude::ToBech32;
         let prefix = "[[bots]]\nid = 'bot'\ncorpus = '/corpus/bot'\nkind = 'opencode'\n";
         let operator = "a".repeat(64);
@@ -133,7 +144,7 @@ mod tests {
         for suffix in ["", "allowed_requesters = []"] {
             let registry = BotRegistry::from_toml(&format!("{prefix}{suffix}")).unwrap();
             assert!(registry.bots()[0].authorizes(&operator, &operator));
-            assert!(!registry.bots()[0].authorizes(&operator, &peer));
+            assert!(registry.bots()[0].authorizes(&operator, &peer));
         }
         let npub = PublicKey::parse(&peer).unwrap().to_bech32().unwrap();
         for key in [peer.to_ascii_uppercase(), npub] {
@@ -149,6 +160,24 @@ mod tests {
         for value in ["['not-a-public-key']", "['']", "'all'", "[7]"] {
             assert!(
                 BotRegistry::from_toml(&format!("{prefix}allowed_requesters = {value}")).is_err()
+            );
+        }
+
+        let operator_only =
+            BotRegistry::from_toml(&format!("{prefix}allowed_requesters = ['{operator}']"))
+                .unwrap();
+        assert!(!operator_only.bots()[0].authorizes(&operator, &peer));
+    }
+
+    #[test]
+    fn operator_session_is_optional_and_must_be_one_token() {
+        let prefix = "[[bots]]\nid = 'bot'\ncorpus = '/corpus/bot'\nkind = 'opencode'\n";
+        let registry =
+            BotRegistry::from_toml(&format!("{prefix}operator_session = 'nostrherd-dev'")).unwrap();
+        assert_eq!(registry.bots()[0].operator_session(), Some("nostrherd-dev"));
+        for value in ["''", "'two words'"] {
+            assert!(
+                BotRegistry::from_toml(&format!("{prefix}operator_session = {value}")).is_err()
             );
         }
     }

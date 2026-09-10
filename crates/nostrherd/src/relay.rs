@@ -1,5 +1,6 @@
 //! Read-only relay subscription and event classification.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 
@@ -21,7 +22,85 @@ const MESSAGE_EDIT_KIND: u16 = 40_003;
 const NIP09_DELETE_KIND: u16 = 5;
 const BUZZ_DELETE_KIND: u16 = 9_005;
 const GROUP_METADATA_KIND: u16 = 39_000;
+const GROUP_MEMBERS_KIND: u16 = 39_002;
 const PROFILE_KIND: u16 = 0;
+
+/// One host-resolved participant in a channel audience.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudienceParticipant {
+    pub pubkey: String,
+    pub display_name: Option<String>,
+}
+
+/// Evidence used to describe who can read a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudienceSource {
+    /// The relay returned a NIP-29 member list.
+    MemberList,
+    /// Only authors observed in indexed channel traffic are known.
+    ObservedAuthors,
+    /// The host has no participant evidence.
+    Unknown,
+}
+
+/// Current best-effort channel audience supplied by the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelAudience {
+    pub participants: Vec<AudienceParticipant>,
+    pub source: AudienceSource,
+}
+
+impl ChannelAudience {
+    /// Build the conservative fallback from indexed channel authors.
+    #[must_use]
+    pub fn from_observed(events: &[IndexedRelayEvent]) -> Self {
+        let mut seen = HashSet::new();
+        let participants = events
+            .iter()
+            .filter(|event| seen.insert(event.author_pubkey.to_ascii_lowercase()))
+            .map(|event| AudienceParticipant {
+                pubkey: event.author_pubkey.to_ascii_lowercase(),
+                display_name: None,
+            })
+            .collect::<Vec<_>>();
+        Self {
+            source: if participants.is_empty() {
+                AudienceSource::Unknown
+            } else {
+                AudienceSource::ObservedAuthors
+            },
+            participants,
+        }
+    }
+
+    /// Whether output must be treated as visible to a shared audience.
+    #[must_use]
+    pub fn is_shared(&self, operator_pubkey: &str) -> bool {
+        self.source != AudienceSource::MemberList
+            || self.participants.len() != 1
+            || !self.participants[0]
+                .pubkey
+                .eq_ignore_ascii_case(operator_pubkey)
+    }
+
+    /// Render the one-line audience instruction included in every ask.
+    #[must_use]
+    pub fn summary(&self, operator_pubkey: &str) -> String {
+        let classification = if self.is_shared(operator_pubkey) {
+            "shared channel"
+        } else {
+            "operator-only channel according to the current relay member list"
+        };
+        let evidence = match self.source {
+            AudienceSource::MemberList => "relay member list",
+            AudienceSource::ObservedAuthors => {
+                "observed authors only; silent readers may exist, so this remains shared"
+            }
+            AudienceSource::Unknown => "membership unknown, so this remains shared",
+        };
+        format!("Audience: {classification} ({evidence}).")
+    }
+}
 
 /// Relay event emitted to the per-bot actor layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -659,6 +738,48 @@ impl RelaySubscriber {
         ))
     }
 
+    /// Resolve the current member roster, falling back to observed authors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an SDK error when the member-list fetch cannot complete. A failed
+    /// profile lookup leaves that participant's display name unavailable.
+    pub async fn channel_audience(
+        &self,
+        channel_id: &str,
+        observed: &[IndexedRelayEvent],
+    ) -> Result<ChannelAudience, RelaySubscribeError> {
+        let events = self
+            .fetch_filtered(Some(group_members_filter(channel_id)))
+            .await?;
+        let mut participants = newest_event(&events)
+            .map(event_tags)
+            .map(|tags| distinct_pubkeys(tag_values(&tags, "p")))
+            .unwrap_or_default();
+        let source = if participants.is_empty() {
+            let fallback = ChannelAudience::from_observed(observed);
+            participants = fallback
+                .participants
+                .into_iter()
+                .map(|participant| participant.pubkey)
+                .collect();
+            fallback.source
+        } else {
+            AudienceSource::MemberList
+        };
+        let mut resolved = Vec::with_capacity(participants.len());
+        for pubkey in participants {
+            resolved.push(AudienceParticipant {
+                display_name: self.profile_display(&pubkey).await.unwrap_or(None),
+                pubkey,
+            });
+        }
+        Ok(ChannelAudience {
+            participants: resolved,
+            source,
+        })
+    }
+
     async fn profile_display(&self, pubkey: &str) -> Result<Option<String>, RelaySubscribeError> {
         let events = self.fetch_filtered(profile_filter(pubkey)).await?;
         Ok(newest_event(&events).and_then(|event| parse_profile_display(&event.content)))
@@ -832,6 +953,22 @@ fn place_metadata_filter(channel_id: &str) -> Filter {
         .kind(Kind::Custom(GROUP_METADATA_KIND))
         .identifier(channel_id)
         .limit(10)
+}
+
+fn group_members_filter(channel_id: &str) -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(GROUP_MEMBERS_KIND))
+        .identifier(channel_id)
+        .limit(10)
+}
+
+fn distinct_pubkeys<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .filter(|value| is_pubkey(value))
+        .map(str::to_ascii_lowercase)
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
 }
 
 fn profile_filter(pubkey: &str) -> Option<Filter> {
@@ -1239,7 +1376,7 @@ mod tests {
     }
 
     #[test]
-    fn requester_authorization_is_per_bot_and_requires_peer_mention() {
+    fn requester_policy_is_per_bot_and_peers_still_require_a_mention() {
         let operator = Keys::generate();
         let peer = Keys::generate();
         let stranger = Keys::generate();
@@ -1256,7 +1393,7 @@ mod tests {
         for (keys, token, mention, allowed) in [
             (&operator, "bot:", false, true),
             (&operator, "pr:", false, true),
-            (&peer, "bot:", true, false),
+            (&peer, "bot:", true, true),
             (&peer, "pr:", true, true),
             (&peer, "pr:", false, false),
             (&stranger, "pr:", true, false),
@@ -1429,6 +1566,7 @@ mod tests {
             relay.public_key().to_hex(),
             FakeRepository::default(),
         );
+        ingest.allowed_requesters = vec![(BotId::new("bot").unwrap(), vec![operator.clone()])];
         let impersonated = event_with_keys(
             &other,
             9,
@@ -1770,6 +1908,53 @@ mod tests {
             serde_json::json!(["ab12cd34-5678-90ab-cdef-0123456789ab"])
         );
         assert_eq!(metadata_json["limit"], 10);
+
+        let members_json =
+            serde_json::to_value(group_members_filter("ab12cd34-5678-90ab-cdef-0123456789ab"))
+                .unwrap();
+        assert_eq!(members_json["kinds"], serde_json::json!([39_002]));
+        assert_eq!(
+            members_json["#d"],
+            serde_json::json!(["ab12cd34-5678-90ab-cdef-0123456789ab"])
+        );
+    }
+
+    #[tokio::test]
+    async fn member_list_wins_and_profile_names_are_resolved() {
+        let relay = LocalRelay::new();
+        relay.run().await.expect("run relay");
+        let client = Client::new();
+        client
+            .add_relay(relay.url().await)
+            .await
+            .expect("add relay");
+        client.connect().and_wait(Duration::from_secs(3)).await;
+        let member = Keys::generate();
+        let admin = Keys::generate();
+        let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Reader"}"#)
+            .finalize(&member)
+            .expect("profile");
+        client.send_event(&profile).await.expect("store profile");
+        let members = EventBuilder::new(Kind::Custom(GROUP_MEMBERS_KIND), "")
+            .tags([
+                tag(&["d", "channel"]),
+                tag(&["p", &member.public_key().to_hex()]),
+            ])
+            .finalize(&admin)
+            .expect("members");
+        client.send_event(&members).await.expect("store members");
+
+        let subscriber = RelaySubscriber::new(client);
+        let audience = subscriber
+            .channel_audience("channel", &[])
+            .await
+            .expect("audience");
+        assert_eq!(audience.source, AudienceSource::MemberList);
+        assert_eq!(audience.participants.len(), 1);
+        assert_eq!(
+            audience.participants[0].display_name.as_deref(),
+            Some("Reader")
+        );
     }
 
     #[tokio::test]

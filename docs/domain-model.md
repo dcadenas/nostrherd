@@ -10,8 +10,9 @@ in `nostrherd`.
 ### Bot
 
 Configured personality. Identity is `BotId` (stable slug, e.g. `bot`).
-Holds: corpus repo path, inbound trigger, outbound prefix, occupant
-kind and additional allowed requester public keys (empty means operator-only).
+Holds: corpus repo path, inbound trigger, outbound prefix, occupant kind,
+requester public keys (empty means any relay member), and an optional private
+operator Kelpie session.
 Does not hold live Kelpie ids (those are session runtime).
 
 One actor in the host process maps 1:1 to one `Bot`.
@@ -67,6 +68,8 @@ timer ledger (D44, D45).
   plus either operator authorship or an operator `p`-tag from a requester
   allowlisted for that bot (D8, D9, D34, D57).
   A non-prefix reply in an open thread is not a match.
+- `ChannelAudience` — current member-list roster when available, otherwise
+  observed effective authors; uncertain and observed-only audiences are shared.
 - `TurnState` / `TurnTransition` — parsed tokens. Illegal changes are
   `None`.
 

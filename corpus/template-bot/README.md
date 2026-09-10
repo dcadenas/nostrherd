@@ -50,13 +50,20 @@ same path to both commands.
 From the operator's account, say `{{BOT_ID}}: hello` in a channel it can post in,
 and confirm a stamped reply lands.
 
-## Let others ask
+## Requester policy
 
-By default only the operator can wake this bot. To admit other people, add
-`allowed_requesters = ["<full npub or hex public key>"]` to this bot's
-registry entry and restart the host. Use public keys, never secret keys.
-An allowed requester must also mention the operator with a Nostr `p` tag
-alongside `{{BOT_ID}}:`. Channel membership alone is not enough.
+By default anyone who can reach the channel can wake this bot. A non-operator
+must still mention the operator with a Nostr `p` tag alongside
+`{{BOT_ID}}:`. Relay membership is the trust boundary.
+
+To restrict requests, add `allowed_requesters = ["<full npub or hex public
+key>"]` to this bot's registry entry and restart the host. A non-empty list is
+exact; list only the operator's public key for operator-only use. Use public
+keys, never secret keys.
+
+Optionally add `operator_session = "<Kelpie session name>"` to give the
+occupant a private Kelpie destination for notes to the operator. Without it,
+the bot has no private outlet and must keep private notes out of channel output.
 
 ## Try its boundaries
 

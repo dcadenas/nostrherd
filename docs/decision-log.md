@@ -1420,3 +1420,40 @@ This raises the floor to Kelpie `0.2.0-alpha.6`. Herdr's dead-pane gap is
 untouched — `agent rename --clear` still answers `agent_not_found` on an
 agentless pane — so the pane reclaim in `restart_occupant` stays load-bearing
 rather than being a workaround waiting to be removed.
+
+## D66. Audience-aware output and relay-member requesters
+
+Status: accepted (issue 94)
+
+Amends D5, D55 and D57. Request authority and output audience are separate.
+`self:` still identifies the operator and a full npub identifies anyone else;
+non-self requests remain question-only conduct. Every ask now names the current
+audience, and every place snapshot includes the participant roster. Channel
+output never carries secrets. In a shared channel, occupants answer the request
+without exposing internal transports, paths, configuration or permission
+reasoning. The nsec operator and pane operator are the same human, and
+`nostrherd` is the routing program rather than a correspondent. These are
+host-written conduct instructions, not host enforcement.
+
+The roster first uses the newest usable NIP-29 kind-39002 member list and resolves
+profile display names. Without a usable list it falls back to distinct effective
+authors already indexed for the channel. Observed authors under-report silent
+readers, so that fallback is always classified shared, including when only one
+author was observed. No evidence also means shared.
+
+An empty `allowed_requesters` admits anyone who can reach and mention the operator
+in the channel. A non-empty list is exact in addition to the operator; listing
+only the operator keeps operator-only behavior. Relay membership is the trust
+boundary, delegated to relay administrators. This changes admission but does not
+weaken confidentiality conduct for a trusted shared audience.
+
+Optional per-bot `operator_session` names a Kelpie destination the occupant can
+tell privately instead of publishing. The host contract carries that exact route;
+without it there is no private outlet.
+
+The host mechanically refuses occupant prose containing a possible nsec, the
+selected Kelpie socket path, or an absolute path under the operator home. It
+reports a generic reason privately when `operator_session` is configured and in
+the operator notice channel, never echoing the body. The concrete publisher also
+checks, covering persisted retries and progress edits. This catches accidents;
+it is not general content enforcement.
