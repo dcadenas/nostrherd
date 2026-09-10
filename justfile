@@ -28,7 +28,7 @@ version:
     @grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/'
 
 # Consistency checks that no compiler or test catches.
-verify: _verify-license _verify-stamp _verify-kelpie-pin _verify-version-unreleased _verify-changelog
+verify: _verify-license _verify-stamp _verify-kelpie-pin _verify-readme-tag _verify-version-unreleased _verify-changelog
     @echo "verify: ok"
 
 # Every released version needs an entry someone can read to decide whether to
@@ -71,6 +71,24 @@ _verify-version-unreleased:
         echo "${changed}" | sed 's/^/          /' >&2
         echo "        Two builds would report ${v}. Cut the next one with:" >&2
         echo "          just release <next-version>" >&2
+        exit 1
+    fi
+
+# The README's install command pins a tag, and a pinned tag goes stale on every
+# release. It sat two versions behind once, which hands a new installer an old
+# host and no hint that it is old.
+_verify-readme-tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+    pinned=$(rg -o 'nostrherd --tag v\S+' README.md | head -1 | sed 's/.*--tag v//')
+    if [[ -z "${pinned}" ]]; then
+        echo "verify: README no longer pins an install tag" >&2
+        exit 1
+    fi
+    if [[ "${pinned}" != "${v}" ]]; then
+        echo "verify: README installs v${pinned}, but this is ${v}" >&2
+        echo "        Update the 'cargo install --git ... --tag' line in README.md." >&2
         exit 1
     fi
 
@@ -144,6 +162,12 @@ release new_version:
     if ! grep -q "^## {{new_version}}\$" CHANGELOG.md; then
         echo "release: add a '## {{new_version}}' section to CHANGELOG.md first." >&2
         echo "         Say what an operator has to do, not what changed in git." >&2
+        exit 1
+    fi
+    # Same reason as the CHANGELOG check: fail before the bump, so a forgotten
+    # README leaves the tree untouched rather than half-released.
+    if ! grep -q -- "--tag v{{new_version}}" README.md; then
+        echo "release: point README.md's install command at v{{new_version}} first." >&2
         exit 1
     fi
     sed -i '0,/^version = ".*"/s//version = "{{new_version}}"/' Cargo.toml
