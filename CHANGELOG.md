@@ -6,6 +6,27 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.18
+
+- Occupants can reach channel history older than the 7-day snapshot
+  (D72). `nostrherd search --session <name> -- <query>` run in an
+  occupant's pane asks the running host for a NIP-50 search of kind-9
+  text in that session's channel. The host issues it on the relay
+  connection it already holds, because this relay requires AUTH on every
+  REQ; the subcommand never reads the key and never publishes. A
+  completed search with no hits reads "No results", a failure reads
+  "Could not check" — they are deliberately not the same. The 7-day
+  snapshot window is unchanged.
+- The lookup socket is chmod 0600 after bind. Left to the umask it landed
+  at 0755, so only a 0700 `$XDG_RUNTIME_DIR` was keeping other local
+  users out, and `NOSTRHERD_LOOKUP_SOCKET` pointed elsewhere had nothing.
+
+  **Action**: none, and nothing to configure. The contract naming the
+  grammar rewrites on the next occupant start. Note the limitation in
+  the README's known gaps: a search is not scoped to the calling bot, so
+  an occupant can read the indexed history of a channel it does not
+  serve. Every occupant already runs as your unix user.
+
 ## 0.1.0-alpha.17
 
 - Bot replies now address the person who asked, by `@Label` (D71). The
