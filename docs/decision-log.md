@@ -1655,3 +1655,11 @@ fails. Search is the capability the relay already has.
 
 Out of scope here: presence kind 20001, thread-scoped occupant
 sessions, gift-wrapped DMs, persistent search subscriptions.
+
+The lookup socket is operator-local. v1 names the session on the
+command line the way the contract names other occupant duties; the host
+does not persist pane identity on `sessions`, so it cannot bind a
+search to a Herdr pane without a new column. Occupants already share a
+unix user. Place-file isolation across channels remains I2 on
+host-written snapshots. The socket binds only under `XDG_RUNTIME_DIR`
+or `NOSTRHERD_LOOKUP_SOCKET`, never under `/tmp`.

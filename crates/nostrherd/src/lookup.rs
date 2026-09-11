@@ -1,7 +1,7 @@
 //! Occupant-facing channel search issued by the running host (D72).
 
 use std::fmt::Write as _;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -23,6 +23,7 @@ pub const NO_RESULTS_HEADING: &str = "## No results";
 pub const COULD_NOT_CHECK_HEADING: &str = "## Could not check";
 
 const MAX_QUERY_CHARS: usize = 512;
+const MAX_REQUEST_BYTES: u64 = 8192;
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One kind-9 hit the occupant can name as a checked surface.
@@ -239,27 +240,26 @@ pub fn resolve_lookup(
 }
 
 /// Conventional lookup socket path.
+///
+/// Absent unless `NOSTRHERD_LOOKUP_SOCKET` or `XDG_RUNTIME_DIR` is set. The
+/// host does not bind under `/tmp`.
 #[must_use]
-pub fn default_lookup_socket() -> PathBuf {
+pub fn default_lookup_socket() -> Option<PathBuf> {
     lookup_socket_path(
         std::env::var_os("NOSTRHERD_LOOKUP_SOCKET"),
         std::env::var_os("XDG_RUNTIME_DIR"),
-        &std::env::temp_dir(),
     )
 }
 
 fn lookup_socket_path(
     explicit: Option<std::ffi::OsString>,
     runtime: Option<std::ffi::OsString>,
-    temp: &Path,
-) -> PathBuf {
+) -> Option<PathBuf> {
     if let Some(path) = explicit.filter(|value| !value.is_empty()) {
-        return PathBuf::from(path);
+        return Some(PathBuf::from(path));
     }
-    let runtime = runtime
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| temp.join("nostrherd-client"), PathBuf::from);
-    runtime.join("nostrherd/lookup.sock")
+    let runtime = runtime.filter(|value| !value.is_empty())?;
+    Some(PathBuf::from(runtime).join("nostrherd/lookup.sock"))
 }
 
 /// Ask the running host to search one session's channel.
@@ -273,8 +273,8 @@ pub fn request_lookup(socket: &Path, session: &str, query: &str) -> LookupOutcom
         Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => LookupOutcome::Failed {
             reason: "host lookup socket is not listening".to_owned(),
         },
-        Err(error) => LookupOutcome::Failed {
-            reason: error.to_string(),
+        Err(_) => LookupOutcome::Failed {
+            reason: "host lookup socket is not listening".to_owned(),
         },
     }
 }
@@ -293,10 +293,11 @@ fn request_lookup_io(socket: &Path, session: &str, query: &str) -> io::Result<Lo
     BufReader::new(stream).read_line(&mut line)?;
     if line.trim().is_empty() {
         return Ok(LookupOutcome::Failed {
-            reason: "host sent an empty lookup reply".to_owned(),
+            reason: "lookup reply is invalid".to_owned(),
         });
     }
-    let response = serde_json::from_str::<WireResponse>(line.trim()).map_err(json_error)?;
+    let response = serde_json::from_str::<WireResponse>(line.trim())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "lookup reply is invalid"))?;
     Ok(response.into())
 }
 
@@ -334,7 +335,12 @@ fn serve_lookup(
     let listener = UnixListener::bind(socket)?;
     for incoming in listener.incoming() {
         match incoming {
-            Ok(stream) => handle_connection(stream, database, subscriber, handle),
+            Ok(stream) => {
+                let database = database.to_path_buf();
+                let subscriber = subscriber.clone();
+                let handle = handle.clone();
+                thread::spawn(move || handle_connection(stream, &database, &subscriber, &handle));
+            }
             Err(error) => eprintln!("channel lookup accept failed: {error}"),
         }
     }
@@ -360,14 +366,20 @@ fn answer_connection(
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(stream.try_clone()?.take(MAX_REQUEST_BYTES));
     let mut line = String::new();
     reader.read_line(&mut line)?;
-    let outcome = match serde_json::from_str::<WireRequest>(line.trim()) {
-        Ok(request) => lookup_from_host(&request, database, subscriber, handle),
-        Err(error) => LookupOutcome::Failed {
-            reason: error.to_string(),
-        },
+    let outcome = if line.ends_with('\n') {
+        match serde_json::from_str::<WireRequest>(line.trim()) {
+            Ok(request) => lookup_from_host(&request, database, subscriber, handle),
+            Err(_) => LookupOutcome::Failed {
+                reason: "lookup request is invalid".to_owned(),
+            },
+        }
+    } else {
+        LookupOutcome::Failed {
+            reason: "lookup request is invalid".to_owned(),
+        }
     };
     let encoded = serde_json::to_string(&WireResponse::from(outcome)).map_err(json_error)?;
     let mut writer = stream;
@@ -387,8 +399,8 @@ fn lookup_from_host(
             Ok(repository) => repository
                 .session_by_name(session)
                 .map(|found| found.map(|record| record.channel_id))
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
+                .map_err(|_| "host database unavailable".to_owned()),
+            Err(_) => Err("host database unavailable".to_owned()),
         },
         |channel_id, query| {
             handle.block_on(async {
@@ -407,7 +419,7 @@ fn lookup_from_host(
                             })
                             .collect()
                     })
-                    .map_err(|error| error.to_string())
+                    .map_err(|_| "channel search failed".to_owned())
             })
         },
     )
@@ -551,12 +563,22 @@ mod tests {
     #[test]
     fn default_socket_honors_explicit_override() {
         let path = lookup_socket_path(
-            Some("/tmp/custom-lookup.sock".into()),
+            Some("/run/user/1/custom-lookup.sock".into()),
             Some("/run/user/1".into()),
-            Path::new("/tmp"),
         );
-        assert_eq!(path, PathBuf::from("/tmp/custom-lookup.sock"));
-        let nested = lookup_socket_path(None, Some("/run/user/1".into()), Path::new("/tmp"));
-        assert_eq!(nested, PathBuf::from("/run/user/1/nostrherd/lookup.sock"));
+        assert_eq!(
+            path.as_deref(),
+            Some(std::path::Path::new("/run/user/1/custom-lookup.sock"))
+        );
+        let nested = lookup_socket_path(None, Some("/run/user/1".into()));
+        assert_eq!(
+            nested.as_deref(),
+            Some(std::path::Path::new("/run/user/1/nostrherd/lookup.sock"))
+        );
+        assert_eq!(lookup_socket_path(None, None), None);
+        assert_eq!(
+            lookup_socket_path(None, Some(std::ffi::OsString::new())),
+            None
+        );
     }
 }

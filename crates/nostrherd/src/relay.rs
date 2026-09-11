@@ -727,7 +727,7 @@ impl<R: HostRepository> RelayIngest<R> {
 }
 
 /// Read-only Nostr subscription for channel messages, edits, and deletes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RelaySubscriber {
     client: Client,
 }

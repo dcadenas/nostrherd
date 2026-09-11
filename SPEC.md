@@ -27,8 +27,8 @@ selected by convention, posting with a visible bot stamp.
    (channel, DM, …). Start or reuse via Kelpie.
 5. Inject a Kelpie **ask** whose waiter is `nostrherd`. Body is the
     host-stamped requester and trigger remainder, then a marked Context section of unread
-   channel events. `from=` MUST be `nostrherd`, never a relay pubkey.
-    6. Occupant answers a trigger with `kelpie reply --final` and unstamped
+    channel events. `from=` MUST be `nostrherd`, never a relay pubkey.
+6. Occupant answers a trigger with `kelpie reply --final` and unstamped
     prose. It MAY `kelpie tell nostrherd` for a bot-initiated channel
     post (D38). It MAY report progress with `kelpie reply --progress`;
     the host relays that as one edited stamped post (D42). It MAY look up

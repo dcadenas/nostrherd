@@ -943,11 +943,16 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
         .map(|actor| actor.bot().clone())
         .collect::<Vec<_>>();
     let subscriber = RelaySubscriber::new(client.clone());
-    nostrherd::lookup::spawn_lookup_server(
-        nostrherd::lookup::default_lookup_socket(),
-        database.to_path_buf(),
-        RelaySubscriber::new(client),
-    );
+    match nostrherd::lookup::default_lookup_socket() {
+        Some(socket) => nostrherd::lookup::spawn_lookup_server(
+            socket,
+            database.to_path_buf(),
+            RelaySubscriber::new(client),
+        ),
+        None => eprintln!(
+            "channel lookup socket skipped: set XDG_RUNTIME_DIR or NOSTRHERD_LOOKUP_SOCKET"
+        ),
+    }
     refresh_actor_audiences(&mut actors, &subscriber).await;
     for actor in &mut actors {
         if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
@@ -1252,11 +1257,12 @@ fn prompt(label: &str, default: Option<&str>) -> Result<String, HostError> {
 
 fn run_search(args: &SearchArgs) -> Result<(), HostError> {
     let query = args.query.join(" ");
-    let outcome = nostrherd::lookup::request_lookup(
-        &nostrherd::lookup::default_lookup_socket(),
-        &args.session,
-        &query,
-    );
+    let outcome = match nostrherd::lookup::default_lookup_socket() {
+        Some(socket) => nostrherd::lookup::request_lookup(&socket, &args.session, &query),
+        None => nostrherd::lookup::LookupOutcome::Failed {
+            reason: "host lookup socket is not listening".to_owned(),
+        },
+    };
     let rendered = nostrherd::lookup::render_lookup(&outcome);
     println!("{rendered}");
     match outcome {
