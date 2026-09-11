@@ -60,7 +60,7 @@ pub struct OccupantLaunch {
 pub const OCCUPANT_BOOTSTRAP: &str =
     "Read startup.md before answering. Wait for Kelpie asks from nostrherd.";
 
-/// Wall-clock renew interval for a session occupant (D27).
+/// Occupancy-budget renew interval for a session occupant (D27, D69).
 pub const OCCUPANT_RENEW_EVERY: &str = "45m";
 
 /// Prepare prompt stored on one session's occupant renew policy.

@@ -541,6 +541,9 @@ async fn local_relay_contract_before_synthetic_occupant() {
     assert_eq!(startup.matches("<!-- nostrherd-contract -->").count(), 1);
     assert!(startup.contains("The host stamps `**[bot]**:`"));
     assert!(startup.contains("--final --stdin"));
+    assert!(startup.contains("arms a host watch"));
+    assert!(startup.contains("cancel watch"));
+    assert!(startup.contains("no wildcard"));
     assert!(startup.contains(crate::snapshot::BOT_CONDUCT_RELPATH));
     assert!(
         std::fs::read_to_string(corpus.join(".nostrherd/places/bot-foobar.md"))

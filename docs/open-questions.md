@@ -14,3 +14,5 @@ by guessing.
 | Q7 | Mechanism for relaying occupant progress prose (stamped or not, reply-in-thread vs new post, rate caps) | Channel noise, D17/D33 host behavior | decided (D42) |
 | Q8 | Presence proxy: author-activity watches waking occupants | Wake path, ingest filters | decided (D45, D46) |
 | Q9 | Host-side recurring schedules for occupants | Scheduler, turns, D12 | decided (D44): they live in Kelpie, not the host |
+| Q10 | Should D56 continuity depend on occupancy-budget renew, or on a trigger that fires on ordinary idle-bot usage? | Continuity, D56, D69 | later |
+| Q11 | Should renew wait for an in-flight turn before prepare? If not, is a mid-turn checkpoint accurate enough to resume from? | Renew, D56, D69 | later |

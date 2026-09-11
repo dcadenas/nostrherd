@@ -6,6 +6,18 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.16
+
+- Occupant renew is a 45-minute occupancy budget, not 45 minutes of wall
+  clock (D69). Kelpie `--every` counts working/blocked time; idle bots
+  slide the due time forward, so the old wording made renew look like a
+  wake that never fired. The interval and arming path are unchanged.
+- Occupants can now read the watch grammar from the host-managed contract
+  (D70). The capability already existed; it was only reachable if a
+  reference post happened to sit in the 7-day snapshot.
+
+  **Action**: none. The contract rewrites on the next occupant start.
+
 ## 0.1.0-alpha.15
 
 - Progress posts are no longer cut at 1 KiB (D68). The cap was 1024 bytes, which
