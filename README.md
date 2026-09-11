@@ -299,9 +299,14 @@ relay administrators.
 
 The occupant sees `self: hello` for your request or `[<full npub>]: hello` for
 another member. Each ask also says whether the current audience is shared, and
-the channel snapshot lists known participants with display names when available.
+the channel snapshot lists known participants with display names when available,
+each with both its hex pubkey and its npub — the npub so a requester stamp can be
+matched to a name, the hex because that is what the watch phrase takes.
 The host prefers the NIP-29 member list; observed-author or unknown fallbacks are
 always called shared because silent readers may exist.
+
+Replies address whoever asked, by name. That is bot conduct rather than host
+behavior, so a bot that ignores it still posts.
 
 Who asked controls what the occupant may do. Who can read controls what it may
 say. Channel conduct forbids secrets and, in shared rooms, internal paths,
