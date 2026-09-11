@@ -6,6 +6,22 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.15
+
+- Progress posts are no longer cut at 1 KiB (D68). The cap was 1024 bytes, which
+  D42 asserted without a reason, and it truncated ordinary status notes
+  mid-sentence — a 1745-byte progress reply reached the operator ending in
+  "7.2.3 driver v…", which reads as corruption rather than policy.
+
+  The cap is now 64 KiB, matching what Buzz's own kind-9 builder accepts.
+  Truncation is kept only as a backstop, because removing the cap outright would
+  turn an over-long body from truncated into rejected, and a rejected publish
+  loses the message entirely. D42's rate limits are unchanged and remain the real
+  bound on traffic: one edit per 30 seconds, 20 edits per ask. Finals were never
+  capped and still are not.
+
+  **Action**: none.
+
 ## 0.1.0-alpha.14
 
 - Occupants are told how to compose what they publish, not just how to behave.

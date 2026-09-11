@@ -133,7 +133,7 @@ event, best-effort `⏳` add/remove on the trigger, and occupant-tell
 routing (D38). That is not a live relay proof.
 
 `crates/domain/src/progress.rs` proves the D42 policy on its own: the
-1024-byte cap on a char boundary with a trailing `…`, the 20 s hold from
+64 KiB cap on a char boundary with a trailing `…` (D68), the 20 s hold from
 the turn's open time, the 30 s edit interval, and the 20-edit cap.
 `crates/nostrherd/src/progress.rs` proves the host side against SQLite:
 the row is recorded before the ACK and never relayed from the delivery

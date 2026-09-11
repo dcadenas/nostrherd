@@ -13,7 +13,15 @@ pub const PROGRESS_EDIT_INTERVAL_SECS: i64 = 30;
 pub const PROGRESS_EDIT_CAP: u32 = 20;
 
 /// Byte cap of one relayed progress body, trailing marker included.
-pub const PROGRESS_BODY_MAX_BYTES: usize = 1024;
+///
+/// This is the protocol ceiling, not an editorial one. Buzz's own kind-9
+/// builder rejects content over 64 KiB, and a rejected publish loses the
+/// message entirely, so the host truncates rather than let that happen.
+/// Nothing here is trying to keep progress short: D42 already bounds the
+/// traffic by rate (one edit per 30 s, 20 edits per ask), which is the limit
+/// that has a reason. The earlier 1 KiB value had none, and cut ordinary
+/// status notes mid-sentence.
+pub const PROGRESS_BODY_MAX_BYTES: usize = 64 * 1024;
 
 /// Marker appended to a truncated body.
 pub const PROGRESS_ELLIPSIS: &str = "…";

@@ -1228,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_body_is_trimmed_and_capped_at_1024_bytes() {
+    fn progress_body_is_trimmed_and_capped_at_the_protocol_ceiling() {
         let mut repository = open_repo();
         let turn = open_turn_at(&mut repository, 1_000);
         let long = format!("  {}  ", "z".repeat(PROGRESS_BODY_MAX_BYTES * 2));

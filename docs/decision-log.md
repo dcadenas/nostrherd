@@ -1486,3 +1486,33 @@ in canonical input order and caps the final list at 50, mirroring buzz-sdk
 `build_message`; wire order remains `h`, thread `e` tags, then `p` tags. The
 durable legacy `mention` column stores that ordered set as comma-separated hex
 pubkeys, so existing single-pubkey rows remain readable and retry the same event.
+
+## D68. The progress body cap is the protocol ceiling, not an editorial one
+
+Status: accepted
+
+Amends D42, which capped a relayed progress body at 1024 bytes. The rate limits
+in D42 are unchanged: one edit per 30 seconds, at most 20 edits per ask.
+
+D42 stated the 1024-byte cap without a reason, next to rate limits that have
+one. Nothing about the transport needed it. In practice it cut ordinary status
+notes mid-sentence — an occupant's 1745-byte progress reply reached the operator
+truncated at "7.2.3 driver v…" — and the operator reasonably read that as
+corruption rather than policy. A limit nobody can justify, that damages normal
+output, is not a limit worth keeping.
+
+The cap is now 64 KiB, which is what Buzz's own kind-9 builder accepts
+(`check_content(content, 64 * 1024)` in `crates/buzz-sdk/src/builders.rs`).
+
+Truncation is kept, and only as a backstop. Removing the cap outright would not
+produce unlimited progress; it would move the failure from truncation to
+rejection, and a rejected publish loses the message entirely. Delivering a
+truncated body is strictly better than delivering nothing, so the host cuts on a
+char boundary and appends `…` exactly as before. What changed is that reaching
+the cap now means the body is genuinely enormous rather than merely a paragraph.
+
+Traffic is still bounded, by D42's rate limits rather than by body size. That is
+the bound with a rationale: 20 edits per ask at one per 30 seconds, regardless of
+how long each body is.
+
+Finals were never capped and still are not.
