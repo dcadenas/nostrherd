@@ -6,6 +6,20 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.17
+
+- Bot replies now address the person who asked, by `@Label` (D71). The
+  requester was already notified on every reply; what changes is that the
+  prose names them, so the answer reads as addressed and the client
+  renders a mention chip. General text that is not answering anyone in
+  particular stays untagged.
+- The Audience roster in each snapshot now prints both a participant's
+  64-hex pubkey and its npub. Without that, an occupant handed a
+  `[npub1…]:` requester stamp had no way to match it to a roster entry
+  and could only guess a label.
+
+  **Action**: none. Both land on the next occupant start.
+
 ## 0.1.0-alpha.16
 
 - Occupant renew is a 45-minute occupancy budget, not 45 minutes of wall

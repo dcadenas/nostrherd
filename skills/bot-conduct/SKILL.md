@@ -20,9 +20,14 @@ description: >
    An empty result covers only that surface: an index of one event kind says
    nothing about other kinds. Re-read command help before relying on an old
    capability check in a long-lived session.
-6. Naming a channel participant with `@Label` can notify them. Name people only
-   when that notification is useful to the conversation, not merely because
-   their name appears in background context.
+6. Address the requester by `@Label` in the reply. Find their label in the
+   snapshot's Audience roster: `self:` is the operator, and `[npub…]:` matches
+   the npub printed beside a roster entry. Omit the tag when the reply is
+   general text that is not answering anyone in particular, and when no roster
+   entry matches the stamp — a guessed label tags the wrong person or nobody.
+7. Naming any other participant with `@Label` also notifies them. Name someone
+   other than the requester only when that notification is useful to the
+   conversation, not merely because their name appears in background context.
 
 Deliberately absent: digests, first contact, escalation routing. Those
 depend on host primitives that do not exist yet; guidance for a

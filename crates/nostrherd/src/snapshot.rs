@@ -6,6 +6,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use nostr_sdk::prelude::{PublicKey, ToBech32};
+
 use crate::relay::ChannelAudience;
 use crate::IndexedRelayEvent;
 
@@ -91,7 +93,21 @@ pub fn render_place_snapshot(
                 .as_deref()
                 .unwrap_or("name unavailable")
                 .replace(['\n', '\r'], " ");
-            let _ = writeln!(body, "- {display}: {}", participant.pubkey);
+            // Both encodings, because they answer different questions. The
+            // requester stamp is an npub and the watch grammar takes 64-hex,
+            // so a roster carrying only one of them leaves the occupant unable
+            // to match the person who asked against the person it can name.
+            let npub = PublicKey::parse(&participant.pubkey)
+                .ok()
+                .and_then(|key| key.to_bech32().ok());
+            match npub {
+                Some(npub) => {
+                    let _ = writeln!(body, "- {display}: {} ({npub})", participant.pubkey);
+                }
+                None => {
+                    let _ = writeln!(body, "- {display}: {}", participant.pubkey);
+                }
+            }
         }
         body.push('\n');
     }
@@ -306,6 +322,30 @@ mod tests {
 
     fn shared_audience() -> ChannelAudience {
         ChannelAudience::from_observed(&[])
+    }
+
+    #[test]
+    fn roster_carries_both_encodings_so_a_requester_stamp_can_be_matched() {
+        let hex = "a".repeat(64);
+        let audience = ChannelAudience {
+            source: crate::relay::AudienceSource::MemberList,
+            participants: vec![crate::relay::AudienceParticipant {
+                pubkey: hex.clone(),
+                display_name: Some("Asker".to_owned()),
+                aliases: vec!["Asker".to_owned()],
+            }],
+        };
+        let npub = PublicKey::parse(&hex)
+            .expect("key")
+            .to_bech32()
+            .expect("npub");
+
+        let body = render_place_snapshot("bot-x", "channel-x", 1_700_000_000, &[], &audience, &hex);
+
+        // The stamp an occupant is handed is `[npub…]:`; the watch grammar and
+        // this roster otherwise speak only hex. Both have to be present or the
+        // occupant cannot tell who asked.
+        assert!(body.contains(&format!("- Asker: {hex} ({npub})")), "{body}");
     }
 
     fn bot(id: &str) -> nostrherd_domain::Bot {

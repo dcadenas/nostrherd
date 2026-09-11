@@ -1562,3 +1562,30 @@ evaluates the watch; a match arrives as a typed watch wake.
 
 This documents an existing capability. It does not add presence, a
 member-set selector, or a new refresh trigger.
+
+## D71. A reply addresses the person who asked
+
+Status: accepted
+
+Amends D67. D67 made `@Label` in bot prose resolve to a `p` tag, and the
+conduct rule that came with it was written defensively: name people only
+when the notification is useful. That was the right rule for naming a
+third party and the wrong default for the requester, who is already
+`p`-tagged on every reply (`resolved_mentions`). For them the tag adds a
+rendered chip and an addressed answer, not a second notification.
+
+Conduct now tells an occupant to address the requester by `@Label`, and
+keeps the D67 caution for anyone else. It exempts general text that is
+not answering a particular person, since tagging someone into prose that
+is not for them is the noise D67 was guarding against.
+
+This required a snapshot change to be followable at all. The requester
+stamp is an npub (`TriggerRequest::stamped`) and the Audience roster
+printed 64-hex, so an occupant handed `[npub1…]:` had nothing to match it
+against and could only guess a label. The roster now prints both
+encodings per participant: hex, which the watch grammar takes, and the
+npub, which the stamp uses.
+
+Guessing stays forbidden. With no roster entry matching the stamp, the
+occupant omits the tag rather than inventing a label — a wrong `@Label`
+either tags the wrong participant or resolves to nobody.
