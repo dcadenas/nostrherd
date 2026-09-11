@@ -376,6 +376,14 @@ Five primitives, composed:
 
 - Digesting many events into one message, and escalating to a human,
   are not built.
+- **Channel search is not scoped to the calling bot.** An occupant names
+  the session it is searching on the command line, and the host does not
+  check that against the pane the command came from. A bot can therefore
+  read the indexed history of a channel it does not serve, including one
+  whose members are different people. Every occupant already runs as your
+  unix user, so this is a limit on what the host enforces, not a way in
+  from outside. Binding a search to its pane needs identity the host does
+  not currently store.
 
 ## Development
 

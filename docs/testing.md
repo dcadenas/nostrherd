@@ -62,6 +62,12 @@ relocated installation paths, missing advice and malformed markers.
 Issue 97 extends the contract with the watch-management grammar (D70);
 `startup_contract_preserves_author_text_and_refreshes_both_blocks_idempotently`
 and `./tools/local-relay contract-proof` assert that text.
+Issue 99 adds occupant channel search (D72). The same contract test names
+the grammar. `empty_search_is_not_rendered_as_failure` and
+`failed_search_is_not_rendered_as_empty` prove a miss is not a failure.
+`search_runs_without_operator_env` proves the subcommand does not read
+`NOSTRHERD_PRIVATE_KEY`. The contract-proof also issues a NIP-50-shaped
+kind-9 search on LocalRelay.
 The ordinary actor first-call test exercises the same writer before launch.
 `./tools/local-relay contract-proof` sends a trigger through nostr-sdk LocalRelay,
 exercises the host writer with synthetic occupant transport, and verifies the

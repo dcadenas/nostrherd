@@ -1429,6 +1429,7 @@ pub mod config;
 pub mod herdr;
 pub mod inbox;
 pub mod init;
+pub mod lookup;
 pub mod outbox;
 pub mod paths;
 pub mod progress;
