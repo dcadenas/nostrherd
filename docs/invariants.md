@@ -52,6 +52,11 @@ author-owned text and `AGENTS.md` (D55):
 `malformed_startup_markers_leave_the_file_untouched`.
 D70's watch-grammar text is asserted by
 `startup_contract_preserves_author_text_and_refreshes_both_blocks_idempotently`.
+D72's search grammar and empty-versus-failed rendering are asserted by
+that contract test, `empty_search_is_not_rendered_as_failure`,
+`failed_search_is_not_rendered_as_empty`,
+`search_runs_without_operator_env`, and
+`local_relay_contract_before_synthetic_occupant`.
 The advice path MUST follow the running installation:
 `conduct_path_follows_the_running_installation_not_the_build_directory`.
 

@@ -28,10 +28,11 @@ selected by convention, posting with a visible bot stamp.
 5. Inject a Kelpie **ask** whose waiter is `nostrherd`. Body is the
     host-stamped requester and trigger remainder, then a marked Context section of unread
    channel events. `from=` MUST be `nostrherd`, never a relay pubkey.
-6. Occupant answers a trigger with `kelpie reply --final` and unstamped
+    6. Occupant answers a trigger with `kelpie reply --final` and unstamped
     prose. It MAY `kelpie tell nostrherd` for a bot-initiated channel
     post (D38). It MAY report progress with `kelpie reply --progress`;
-    the host relays that as one edited stamped post (D42). The host is
+    the host relays that as one edited stamped post (D42). It MAY look up
+    older kind-9 text in its channel with `nostrherd search` (D72). The host is
     the only Nostr publisher: it stamps `**[{bot-id}]**:`, posts from
     sqlite coordinates, then `inbox.ack`.
 7. Persist host state (sessions, turns, processed events) in SQLite.
@@ -139,7 +140,11 @@ an alias shared by distinct pubkeys or a person outside the channel.
 ## Occupant reply
 
 The occupant is an ordinary Kelpie peer of waiter `nostrherd`. Snapshot
-and renew stay. It MUST answer a trigger ask with `kelpie reply --final`
+and renew stay. It MAY look up older kind-9 channel text with
+`nostrherd search --session <its public Kelpie name> -- <query>` (D72).
+That command MUST NOT receive the operator nsec and MUST NOT publish.
+Empty matches and failed lookups MUST render as distinct occupant text.
+It MUST answer a trigger ask with `kelpie reply --final`
 and unstamped prose. The final body MUST come from `--stdin` or
 `--file`, never from a shell-expanded argument. It MUST NOT stamp
 `**[{id}]**:` on that path, and MUST NOT receive the operator nsec. Cancel

@@ -1589,3 +1589,69 @@ npub, which the stamp uses.
 Guessing stays forbidden. With no roster entry matching the stamp, the
 occupant omits the tag rather than inventing a label — a wrong `@Label`
 either tags the wrong participant or resolves to nobody.
+
+## D72. Occupants look up older channel history through a host NIP-50 search
+
+Status: accepted (issue 99)
+
+The 7-day place snapshot (D27) stays the default context. Occupants
+need a way to reach older kind-9 channel text that already lives on
+the relay. The host issues that lookup. Occupants never receive
+`NOSTRHERD_PRIVATE_KEY` and never wrap the host with envchain.
+
+Chosen mechanism: a host-provided lookup the occupant runs in its pane
+during a turn (issue option 2).
+
+The occupant invokes `nostrherd search --session <its public Kelpie
+name> -- <query>` as a subcommand of the existing binary (no new crate
+path, `Cargo.toml` untouched). That subcommand MUST NOT read
+`NOSTRHERD_PRIVATE_KEY`, MUST NOT publish, and MUST NOT open a second
+host. It talks to the already-running host over a unix socket the host
+owns. The host issues a one-shot NIP-50 REQ on the NIP-42 connection it
+already holds (D43): `{"search":"<query>","kinds":[9],"#h":["<session
+channel>"],"limit":20}`, then EOSE. Not a persistent subscription.
+
+Buzz requires AUTH on every REQ (`crates/buzz-relay/src/handlers/req.rs`
+closes an unauthenticated subscribe with `auth-required: not
+authenticated`; the documented `nak` NIP-50 example uses `--auth
+--sec`). A pane process therefore cannot search this relay without a
+key. The host's connection is already authenticated, so the REQ stays
+there.
+
+Scope is this session's channel only. Gift-wrapped DMs (kind 1059) are
+not indexed in search; the contract MUST say so. A search that returns
+EOSE with zero events is "No results". A missing socket, CLOSED,
+timeout, or host error is "Could not check" with a reason. Those two
+MUST NOT render the same (conduct rule 5). The snapshot header
+"Window: last 7 days" stays accurate. The Audience roster encoding
+from D71 is unchanged.
+
+The host-managed contract names the grammar, the way D70 did for
+watches, so the capability is reachable from the binary rather than by
+snapshot coincidence. This is not a trigger phrase, not a `kelpie tell
+nostrherd` (D38 is a channel post), and not a `kelpie ask` to the
+socket waiter (D41).
+
+Rejected option 1 (trigger-request search, like `watch`): cheapest and
+consistent with the existing grammar, but it does not solve the stated
+problem. The occupant still cannot look something up mid-answer. The
+human has to know to ask.
+
+Rejected option 3 (widen or configure the snapshot window): priced
+before this choice. A Python replica of `render_indexed_event_line`
+(`crates/nostrherd/src/snapshot.rs`) measured occupant-facing size, not
+CPU. Header ~381 bytes. One short kind-9 line ~163 bytes. 700 short
+events (100/day for 7 days) ~114 KiB in 0.2 ms. 2100 (30-day at that
+rate) ~343 KiB. 7000 ~1.1 MiB. The same counts at 1 KiB content are
+~791 KiB, ~2.4 MiB, ~7.9 MiB. Render time is not the cost. Occupant
+context is: D19/D27 reread the whole snapshot on start and each turn,
+with no query. Widening `PLACE_SNAPSHOT_WINDOW_SECS` also does not
+fetch relay history the host never ingested. Empty-index replay is
+`now - 900s` (`EMPTY_REPLAY_OVERLAP_SECS`, D24). There is no
+`relay_events` prune and no backfill. Making a longer window actually
+reach older relay events would also change D24 and dump that volume
+into every occupant turn. Anything older than the new window still
+fails. Search is the capability the relay already has.
+
+Out of scope here: presence kind 20001, thread-scoped occupant
+sessions, gift-wrapped DMs, persistent search subscriptions.

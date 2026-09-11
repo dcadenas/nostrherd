@@ -65,6 +65,18 @@ struct Args {
 enum Command {
     /// Scaffold a new bot corpus in a directory.
     Init(InitArgs),
+    /// Search this session's channel through the running host (D72).
+    Search(SearchArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+struct SearchArgs {
+    /// Occupant public Kelpie name for this session.
+    #[arg(long)]
+    session: String,
+    /// Channel search text.
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    query: Vec<String>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -139,6 +151,7 @@ enum HostError {
         error: std::io::Error,
     },
     MissingInitArg(String),
+    LookupFailed,
     Init(nostrherd::init::InitError),
     Prompt(std::io::Error),
     RegisteredId(String),
@@ -162,6 +175,7 @@ impl fmt::Display for HostError {
                 )
             }
             Self::Init(error) => write!(formatter, "{error}"),
+            Self::LookupFailed => formatter.write_str("channel search could not be checked"),
             Self::Prompt(error) => write!(formatter, "{error}"),
             Self::RegisteredId(id) => write!(
                 formatter,
@@ -229,6 +243,7 @@ impl std::error::Error for HostError {
             | Self::NotificationClosed
             | Self::InboxClosed
             | Self::MissingInitArg(_)
+            | Self::LookupFailed
             | Self::RegisteredId(_)
             | Self::RegisteredCorpus { .. }
             | Self::Init(_) => None,
@@ -927,7 +942,12 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
         .iter()
         .map(|actor| actor.bot().clone())
         .collect::<Vec<_>>();
-    let subscriber = RelaySubscriber::new(client);
+    let subscriber = RelaySubscriber::new(client.clone());
+    nostrherd::lookup::spawn_lookup_server(
+        nostrherd::lookup::default_lookup_socket(),
+        database.to_path_buf(),
+        RelaySubscriber::new(client),
+    );
     refresh_actor_audiences(&mut actors, &subscriber).await;
     for actor in &mut actors {
         if let Err(error) = actor.resume_queued(&kelpie, &waiter) {
@@ -1014,8 +1034,10 @@ async fn serve(operator: OperatorEnv, bots: Vec<Bot>, database: &Path) -> Result
 }
 
 fn run(args: &Args) -> Result<(), HostError> {
-    if let Some(Command::Init(init)) = &args.command {
-        return run_init(init);
+    match &args.command {
+        Some(Command::Init(init)) => return run_init(init),
+        Some(Command::Search(search)) => return run_search(search),
+        None => {}
     }
     let config = match args.config.clone() {
         Some(config) => config,
@@ -1225,6 +1247,21 @@ fn prompt(label: &str, default: Option<&str>) -> Result<String, HostError> {
         if let Some(default) = default {
             return Ok(default.to_owned());
         }
+    }
+}
+
+fn run_search(args: &SearchArgs) -> Result<(), HostError> {
+    let query = args.query.join(" ");
+    let outcome = nostrherd::lookup::request_lookup(
+        &nostrherd::lookup::default_lookup_socket(),
+        &args.session,
+        &query,
+    );
+    let rendered = nostrherd::lookup::render_lookup(&outcome);
+    println!("{rendered}");
+    match outcome {
+        nostrherd::lookup::LookupOutcome::Failed { .. } => Err(HostError::LookupFailed),
+        _ => Ok(()),
     }
 }
 
@@ -1780,6 +1817,28 @@ mod tests {
             error.to_string().contains(env!("CARGO_PKG_VERSION")),
             "{error}"
         );
+    }
+
+    #[test]
+    fn search_runs_without_operator_env() {
+        let _lock = lock_env();
+        let _restore = EnvRestore::capture();
+        std::env::remove_var("NOSTRHERD_PRIVATE_KEY");
+        std::env::remove_var("NOSTRHERD_RELAY_URL");
+        let socket = temp_path("lookup").with_extension("sock");
+        std::env::set_var("NOSTRHERD_LOOKUP_SOCKET", &socket);
+        let error = run(&Args::parse_from([
+            "nostrherd",
+            "search",
+            "--session",
+            "bot-foobar",
+            "--",
+            "hello",
+        ]))
+        .expect_err("missing host");
+        assert!(matches!(error, HostError::LookupFailed), "{error}");
+        assert!(!matches!(error, HostError::MissingEnv(_)), "{error}");
+        std::env::remove_var("NOSTRHERD_LOOKUP_SOCKET");
     }
 
     #[test]

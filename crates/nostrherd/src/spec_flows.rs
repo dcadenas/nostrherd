@@ -547,6 +547,11 @@ async fn local_relay_contract_before_synthetic_occupant() {
     assert!(startup.contains("co-authors on the same watch"));
     assert!(startup.contains("neither `expires` nor `max`"));
     assert!(startup.contains("ordinary trigger ask"));
+    assert!(startup.contains("nostrherd search --session"));
+    assert!(startup.contains("gift-wrapped DMs are not indexed"));
+    assert!(startup.contains("Could not check"));
+    assert!(startup.contains("No results"));
+    assert!(startup.contains("MUST NOT be wrapped with envchain"));
     assert!(startup.contains(crate::snapshot::BOT_CONDUCT_RELPATH));
     assert!(
         std::fs::read_to_string(corpus.join(".nostrherd/places/bot-foobar.md"))
@@ -629,6 +634,38 @@ async fn local_relay_contract_before_synthetic_occupant() {
         .iter()
         .any(|tag| tag.as_slice().get(1) == Some(&allowed.id.to_hex())));
     assert_eq!(turns(&actor, FOOBAR)[1].state, TurnState::Posted);
+    let subscriber = RelaySubscriber::new(client.clone());
+    let found = subscriber
+        .search_channel(FOOBAR, "contract proof")
+        .await
+        .expect("search");
+    assert!(
+        found
+            .iter()
+            .any(|event| event.content.contains("contract proof")),
+        "NIP-50-shaped search must reach the trigger already on the relay"
+    );
+    let empty = subscriber
+        .search_channel(FOOBAR, "nonexistent_gibberish_xyz123_zzzzzz")
+        .await
+        .expect("empty search");
+    assert!(
+        empty.is_empty(),
+        "a completed miss must be empty, not an error"
+    );
+    let no_results = crate::lookup::render_lookup(&crate::lookup::LookupOutcome::NoResults {
+        session: "bot-foobar".to_owned(),
+        channel_id: FOOBAR.to_owned(),
+        query: "nonexistent_gibberish_xyz123_zzzzzz".to_owned(),
+    });
+    let failed = crate::lookup::render_lookup(&crate::lookup::LookupOutcome::Failed {
+        reason: "host lookup socket is not listening".to_owned(),
+    });
+    assert!(no_results.contains(crate::lookup::NO_RESULTS_HEADING));
+    assert!(!no_results.contains(crate::lookup::COULD_NOT_CHECK_HEADING));
+    assert!(failed.contains(crate::lookup::COULD_NOT_CHECK_HEADING));
+    assert!(!failed.contains(crate::lookup::NO_RESULTS_HEADING));
+    assert_ne!(no_results, failed);
     client.disconnect().await;
     relay.shutdown();
 }

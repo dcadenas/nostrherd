@@ -875,6 +875,20 @@ impl RelaySubscriber {
             .await
     }
 
+    /// Issue a one-shot NIP-50 search for kind 9 in one channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an SDK error when the fetch cannot complete.
+    pub async fn search_channel(
+        &self,
+        channel_id: &str,
+        query: &str,
+    ) -> Result<Vec<Event>, RelaySubscribeError> {
+        self.fetch_filtered(Some(channel_search_filter(channel_id, query)))
+            .await
+    }
+
     /// Resolve a readable place label from Buzz group metadata.
     ///
     /// Kind 39000 supplies the channel `name`. A generic 1-1 `DM` title
@@ -1076,6 +1090,14 @@ fn operator_authored_filter(operator_pubkey: &str, since: Timestamp) -> Option<F
             .author(pubkey)
             .since(since),
     )
+}
+
+fn channel_search_filter(channel_id: &str, query: &str) -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(CHANNEL_MESSAGE_KIND))
+        .custom_tag(SingleLetterTag::LOWERCASE_H, channel_id)
+        .search(query)
+        .limit(crate::lookup::SEARCH_LIMIT)
 }
 
 fn channel_filter(channel_ids: &[String], since: Timestamp) -> Option<Filter> {
@@ -2105,6 +2127,14 @@ mod tests {
         );
         assert_eq!(channel_json["since"], 42);
         assert!(channel_filter(&[], since).is_none());
+
+        let search_json =
+            serde_json::to_value(channel_search_filter("channel-a", "old thread")).unwrap();
+        assert_eq!(search_json["search"], "old thread");
+        assert_eq!(search_json["kinds"], serde_json::json!([9]));
+        assert_eq!(search_json["#h"], serde_json::json!(["channel-a"]));
+        assert_eq!(search_json["limit"], crate::lookup::SEARCH_LIMIT);
+        assert!(search_json.get("since").is_none());
 
         let mutation_json =
             serde_json::to_value(mutation_filter(&[active], since).expect("filter")).unwrap();
