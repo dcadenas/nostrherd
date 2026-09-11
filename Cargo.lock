@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "nostrherd"
-version = "0.1.0-alpha.16"
+version = "0.1.0-alpha.17"
 dependencies = [
  "chrono",
  "clap",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "nostrherd-domain"
-version = "0.1.0-alpha.16"
+version = "0.1.0-alpha.17"
 
 [[package]]
 name = "num-traits"
