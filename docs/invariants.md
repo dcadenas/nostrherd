@@ -57,6 +57,8 @@ that contract test, `empty_search_is_not_rendered_as_failure`,
 `failed_search_is_not_rendered_as_empty`,
 `search_runs_without_operator_env`, and
 `local_relay_contract_before_synthetic_occupant`.
+The lookup socket MUST NOT be reachable by another user:
+`the_lookup_socket_is_not_reachable_by_another_user`.
 The advice path MUST follow the running installation:
 `conduct_path_follows_the_running_installation_not_the_build_directory`.
 

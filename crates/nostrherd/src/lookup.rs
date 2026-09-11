@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -320,12 +321,14 @@ pub fn spawn_lookup_server(socket: PathBuf, database: PathBuf, subscriber: Relay
     });
 }
 
-fn serve_lookup(
-    socket: &Path,
-    database: &Path,
-    subscriber: &RelaySubscriber,
-    handle: &tokio::runtime::Handle,
-) -> io::Result<()> {
+/// Bind the lookup socket so only this user can connect to it.
+///
+/// `bind` takes the socket's mode from the umask, which is commonly
+/// world-readable. The conventional parent is `$XDG_RUNTIME_DIR`, already 0700,
+/// but `NOSTRHERD_LOOKUP_SOCKET` can name any path, so the directory is not
+/// something to rely on. Narrowing the socket costs nothing where it was
+/// already unreachable and is the whole protection where it was not.
+fn bind_private_socket(socket: &Path) -> io::Result<UnixListener> {
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -335,6 +338,17 @@ fn serve_lookup(
         Err(error) => return Err(error),
     }
     let listener = UnixListener::bind(socket)?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+fn serve_lookup(
+    socket: &Path,
+    database: &Path,
+    subscriber: &RelaySubscriber,
+    handle: &tokio::runtime::Handle,
+) -> io::Result<()> {
+    let listener = bind_private_socket(socket)?;
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
@@ -437,6 +451,32 @@ mod tests {
             channel_id: "ab12cd34-5678-90ab-cdef-0123456789ab".to_owned(),
             query: "old thread".to_owned(),
         }
+    }
+
+    #[test]
+    fn the_lookup_socket_is_not_reachable_by_another_user() {
+        let dir = std::env::temp_dir().join(format!(
+            "nostrherd-lookup-mode-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        // Deliberately world-traversable, so the socket's own mode is the only
+        // thing under test. The real parent is 0700 and would hide a wide mode.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("dir mode");
+        let socket = dir.join("lookup.sock");
+
+        let listener = bind_private_socket(&socket).expect("bind");
+
+        let mode = std::fs::metadata(&socket)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "socket mode {mode:o}");
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

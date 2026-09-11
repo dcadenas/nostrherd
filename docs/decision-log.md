@@ -1663,3 +1663,19 @@ search to a Herdr pane without a new column. Occupants already share a
 unix user. Place-file isolation across channels remains I2 on
 host-written snapshots. The socket binds only under `XDG_RUNTIME_DIR`
 or `NOSTRHERD_LOOKUP_SOCKET`, never under `/tmp`.
+
+The socket is chmod 0600 immediately after bind. `bind` takes its mode
+from the umask, which on this machine yields 0755, so the conventional
+0700 parent was doing all the work and an explicit
+`NOSTRHERD_LOOKUP_SOCKET` elsewhere would have had none.
+`the_lookup_socket_is_not_reachable_by_another_user` pins the mode.
+
+Accepted limitation: a search is not scoped to the calling bot. The
+session is named on the command line and the host cannot tie it to the
+pane that ran the command, so an occupant can read the indexed history
+of a channel it does not serve, including one with different members.
+This narrows the audience separation D66 enforces on publication, and it
+is recorded in the README's known gaps rather than only here, because it
+is the kind of thing an operator has to know before adding a bot to a
+room whose members differ. Closing it needs pane identity on `sessions`
+plus peer credentials on the socket; that is a separate change.
