@@ -267,14 +267,16 @@ fn lookup_socket_path(
 pub fn request_lookup(socket: &Path, session: &str, query: &str) -> LookupOutcome {
     match request_lookup_io(socket, session, query) {
         Ok(outcome) => outcome,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => LookupOutcome::Failed {
-            reason: "host lookup socket is not listening".to_owned(),
-        },
-        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => LookupOutcome::Failed {
-            reason: "host lookup socket is not listening".to_owned(),
-        },
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::ConnectionRefused =>
+        {
+            LookupOutcome::Failed {
+                reason: "host lookup socket is not listening".to_owned(),
+            }
+        }
         Err(_) => LookupOutcome::Failed {
-            reason: "host lookup socket is not listening".to_owned(),
+            reason: "lookup did not complete".to_owned(),
         },
     }
 }
@@ -475,7 +477,27 @@ mod tests {
         ));
         let rendered = render_lookup(&request_lookup(&socket, "bot-foobar", "hello"));
         assert!(rendered.contains(COULD_NOT_CHECK_HEADING), "{rendered}");
+        assert!(
+            rendered.contains("host lookup socket is not listening"),
+            "{rendered}"
+        );
         assert!(!rendered.contains(NO_RESULTS_HEADING), "{rendered}");
+    }
+
+    #[test]
+    fn host_database_failure_is_classified_without_a_path() {
+        let outcome = resolve_lookup(
+            "bot-foobar",
+            "hello",
+            |_| Err("host database unavailable".to_owned()),
+            |_, _| panic!("search must not run when the database is unavailable"),
+        );
+        let rendered = render_lookup(&outcome);
+        assert_eq!(
+            rendered,
+            format!("{COULD_NOT_CHECK_HEADING}\nCould not check: host database unavailable\n")
+        );
+        assert!(!rendered.contains('/'), "{rendered}");
     }
 
     #[test]
@@ -558,6 +580,51 @@ mod tests {
         let rendered = render_lookup(&request_lookup(&socket, "bot-missing", "hello"));
         assert!(rendered.contains(COULD_NOT_CHECK_HEADING), "{rendered}");
         assert!(!rendered.contains(NO_RESULTS_HEADING), "{rendered}");
+    }
+
+    #[test]
+    fn lookup_server_unopenable_database_is_classified_without_a_path() {
+        use nostr_sdk::prelude::Client;
+
+        use crate::relay::RelaySubscriber;
+
+        let root = std::env::temp_dir().join(format!(
+            "nostrherd-lookup-dbfail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let blocked = root.join("blocked");
+        std::fs::create_dir_all(&blocked).expect("blocked db path");
+        let socket = root.join("lookup.sock");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _enter = runtime.enter();
+        spawn_lookup_server(
+            socket.clone(),
+            blocked.clone(),
+            RelaySubscriber::new(Client::new()),
+        );
+        let started = std::time::Instant::now();
+        while !socket.exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "lookup socket did not bind"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let rendered = render_lookup(&request_lookup(&socket, "bot-foobar", "hello"));
+        assert!(
+            rendered.contains("Could not check: host database unavailable"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains('/'), "{rendered}");
+        assert!(!rendered.contains("blocked"), "{rendered}");
     }
 
     #[test]
