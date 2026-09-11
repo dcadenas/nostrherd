@@ -71,12 +71,13 @@ points at the place snapshot file instead of restating the 7-day
 window. Place snapshots still refresh on start and each turn (D19,
 D27).
 
-## D6. Renew is wall-clock
+## D6. Renew is time, not tokens
 
 Status: accepted
 
 Bound occupant context with Kelpie `--every`. Durable channel context
-is files the host writes. Token-count renew is later.
+is files the host writes. Token-count renew is later. D69 records that
+`--every` counts accumulated occupancy, not calendar wall-clock.
 
 ## D7. herdr-acp is out of this path for v1
 
@@ -343,7 +344,7 @@ host MUST acknowledge the event and MUST NOT open a Turn, start an
 occupant, or send an ask. Silence here is not D8 untriggered traffic;
 it is a classified trigger with nothing to answer.
 
-## D27. Place snapshots are last 7 days; renew is every 45 minutes
+## D27. Place snapshots are last 7 days; renew is a 45-minute occupancy budget
 
 Status: accepted
 
@@ -355,7 +356,8 @@ upper slack is Buzz's accepted clock drift from D24). Corpus
 `startup.md` points at `.nostrherd/places/<your public Kelpie name>.md`.
 Occupant start and each new Turn refresh that file. The occupant
 self-renews (`kelpie renew --every 45m --on-timeout abort` on its own
-incarnation). The host MUST NOT arm occupant renew with `--sender-id`
+incarnation). Kelpie `--every` counts accumulated working/blocked
+occupancy, not calendar wall-clock (D69). The host MUST NOT arm occupant renew with `--sender-id`
 of waiter `nostrherd` (D32). Prepare writes the session checkpoint (D56). Resume reads
 `startup.md` and the snapshot. D19's MUST is the file contents, not
 occupant filesystem isolation: occupants share the corpus cwd (D7).
@@ -444,7 +446,7 @@ crate and occupant send recipes.
 
 Status: accepted
 
-Amends D27. Snapshot files stay. The occupant arms its own wall-clock
+Amends D27. Snapshot files stay. The occupant arms its own occupancy-budget
 renew. The host MUST NOT arm occupant renew with `--sender-id` of
 waiter `nostrherd`, so this inbox only sees channel asks the host
 created. The host may still schedule the policy on the occupant's
@@ -1516,3 +1518,47 @@ the bound with a rationale: 20 edits per ask at one per 30 seconds, regardless o
 how long each body is.
 
 Finals were never capped and still are not.
+
+## D69. Renew `--every` is occupancy, not wall-clock
+
+Status: accepted (issue 97)
+
+Amends D6, D27 and D32. D6's substance stands: occupant context is bounded
+by Kelpie `--every`, not by token count. The interval is not calendar
+wall-clock.
+
+Kelpie `--every` counts accumulated working/blocked occupancy. Idle time
+does not exhaust it; the projected due time slides forward while the occupant
+waits. `OCCUPANT_RENEW_EVERY = "45m"` is a 45-minute occupancy budget.
+On ordinary idle-bot usage that is weeks of wall clock, not 45 minutes.
+
+D27's earlier "renew is every 45 minutes" and D32's "wall-clock renew" were
+misread as a wake surface. Renew is not one. No host change makes it one.
+The D56 progress-checkpoint path remains armed on that occupancy budget.
+
+Whether continuity should depend on a trigger that rarely fires, and
+whether prepare should wait for an in-flight turn, are later questions
+(Q10, Q11). Presence is not a workaround for this (D45).
+
+## D70. Watch grammar lives in the host-managed contract
+
+Status: accepted (issue 97)
+
+Amends D46 and D55. Watch management is still exact trigger phrases
+parsed by the host (D46). Occupants could not learn those phrases from
+the contract: it mentioned typed watch wakes without stating that a
+trigger can arm one, or how. That knowledge only survived inside the
+7-day snapshot when a reference post happened to sit there.
+
+The host-managed contract block names the v1 grammar, rewritten from
+the binary on every start (D63): create `watch <64-hex-pubkey[,64-hex-pubkey...]>
+[here] [kind 9|40002] [cooldown <minutes>] [expires <minutes>] [max <fires>]`,
+cancel `cancel watch <64-hex-pubkey>`. Cancel of one author on a multi-author
+watch cancels the whole watch. Authors are hex pubkeys known in advance;
+v1 has no name lookup and no wildcard. A declaration with no explicit
+expiry or fire limit defaults to one fire; cooldown defaults to 30 minutes.
+The arming request is an ordinary trigger ask. After that the host
+evaluates the watch; a match arrives as a typed watch wake.
+
+This documents an existing capability. It does not add presence, a
+member-set selector, or a new refresh trigger.

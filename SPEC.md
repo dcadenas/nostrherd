@@ -35,7 +35,7 @@ selected by convention, posting with a visible bot stamp.
     the only Nostr publisher: it stamps `**[{bot-id}]**:`, posts from
     sqlite coordinates, then `inbox.ack`.
 7. Persist host state (sessions, turns, processed events) in SQLite.
-8. Bound occupant context with Kelpie renew (wall-clock). Durable
+8. Bound occupant context with Kelpie renew (occupancy budget, D69). Durable
    context lives in files, not only in the model.
 
 ## Non-goals
