@@ -1409,6 +1409,7 @@ where
             timeout_ms: OCCUPANT_START_TIMEOUT_MS,
             logical_agent_id: continue_as.map(str::to_owned),
             backend_session: session.backend_session.clone(),
+            model: self.bot.occupant_model().map(str::to_owned),
         };
         let key = format!(
             "nostrherd:{}:{}:{}",

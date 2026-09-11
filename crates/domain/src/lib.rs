@@ -90,6 +90,7 @@ pub struct Bot {
     occupant_kind: String,
     allowed_requesters: Vec<String>,
     operator_session: Option<String>,
+    occupant_model: Option<String>,
 }
 
 impl Bot {
@@ -110,6 +111,7 @@ impl Bot {
             occupant_kind,
             allowed_requesters: Vec::new(),
             operator_session: None,
+            occupant_model: None,
         })
     }
 
@@ -148,6 +150,22 @@ impl Bot {
     #[must_use]
     pub fn allowed_requesters(&self) -> &[String] {
         &self.allowed_requesters
+    }
+
+    /// Configure the model this bot's occupant runs on.
+    ///
+    /// Absent means the agent CLI picks, which is its own configured default.
+    /// The string is the backend's own spelling and is passed through
+    /// untouched, because only the backend knows which names it accepts.
+    #[must_use]
+    pub fn with_occupant_model(mut self, model: Option<String>) -> Self {
+        self.occupant_model = model;
+        self
+    }
+
+    #[must_use]
+    pub fn occupant_model(&self) -> Option<&str> {
+        self.occupant_model.as_deref()
     }
 
     /// Configure a private Kelpie destination for operator-only notes.

@@ -6,6 +6,26 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.19
+
+- A bot may name the model its occupant runs on (D73). Add `model` to its
+  registry entry, spelled the way that bot's agent CLI spells it:
+
+  ```toml
+  model = "llama.cpp/my-local-model"
+  ```
+
+  Omit it and nothing changes: the CLI stays on its own default, which is
+  how every bot behaved before. The host forwards the value to the agent
+  CLI as its own `--model` argument and does not check it against a list
+  of known models, because only that CLI knows what it accepts. It must
+  be one whitespace-free token; an empty or multi-word value is rejected
+  as a configuration error.
+
+  **Action**: none unless you want it. The point of the field is giving
+  one bot a different model without moving your agent CLI's global
+  default, which would move every other agent on the machine with it.
+
 ## 0.1.0-alpha.18
 
 - Occupants can reach channel history older than the 7-day snapshot

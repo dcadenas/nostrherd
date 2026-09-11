@@ -1679,3 +1679,30 @@ is recorded in the README's known gaps rather than only here, because it
 is the kind of thing an operator has to know before adding a bot to a
 room whose members differ. Closing it needs pane identity on `sessions`
 plus peer credentials on the socket; that is a separate change.
+
+## D73. A bot may name the model its occupant runs on
+
+Status: accepted
+
+The registry described a bot's agent CLI (`kind`) but not which model that
+CLI should use, so every occupant ran on the CLI's global default. Giving
+one bot a different model meant changing that default, which moves every
+other agent on the machine at the same time — the blast radius of a
+per-bot decision was the whole fleet.
+
+`model` is an optional registry field. Absent, nothing changes and the CLI
+stays on its default; that is the behaviour every existing bot keeps. Set,
+the host forwards it to Kelpie as `--arg --model --arg <name>`, which
+Kelpie hands to the agent CLI as its own argv entries, plus
+`--requested-model` so the intent is recorded. No shell is involved, so a
+model name is never interpreted.
+
+The host does not validate the name against a list of models. Only the
+backend knows which names it accepts, and a registry that refused a model
+the CLI supports would be the defect. The one constraint is structural:
+a single whitespace-free token, because it is forwarded as one argument.
+An empty or multi-word value is a configuration error, the same way
+`operator_session` already treats one.
+
+Requested model is intent, not attribution. Kelpie records it; it is not
+evidence of what actually ran, and this decision does not add any.

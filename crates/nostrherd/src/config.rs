@@ -30,6 +30,7 @@ struct FileBot {
     #[serde(default)]
     allowed_requesters: Vec<String>,
     operator_session: Option<String>,
+    model: Option<String>,
 }
 
 /// Failure while reading bot configuration.
@@ -102,6 +103,19 @@ impl BotRegistry {
             if record.operator_session.is_some() && operator_session.is_none() {
                 return Err(ConfigError::InvalidBot { id });
             }
+            // One whitespace-free token, because it is forwarded as a single
+            // argv entry. The host does not check the name against a list of
+            // models: only the agent CLI knows what it accepts, and a registry
+            // that refused a model the backend supports would be the bug.
+            let model = record
+                .model
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_owned)
+                .filter(|model| !model.is_empty() && !model.chars().any(char::is_whitespace));
+            if record.model.is_some() && model.is_none() {
+                return Err(ConfigError::InvalidBot { id });
+            }
             let bot = Bot::new(bot_id, record.corpus, record.kind)
                 .ok_or(ConfigError::InvalidBot { id: id.clone() })?
                 .with_allowed_requesters(
@@ -115,7 +129,8 @@ impl BotRegistry {
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 )
-                .with_operator_session(operator_session);
+                .with_operator_session(operator_session)
+                .with_occupant_model(model);
             if bots.iter().any(|existing: &Bot| existing.id() == bot.id()) {
                 return Err(ConfigError::DuplicateBot { id });
             }
@@ -184,6 +199,29 @@ mod tests {
         for value in ["''", "'two words'", "'nostrherd'"] {
             assert!(
                 BotRegistry::from_toml(&format!("{prefix}operator_session = {value}")).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn model_is_optional_and_must_be_one_token() {
+        let prefix = "[[bots]]\nid = 'bot'\ncorpus = '/corpus/bot'\nkind = 'opencode'\n";
+        let registry =
+            BotRegistry::from_toml(&format!("{prefix}model = 'llama.cpp/local-qwen'")).unwrap();
+        assert_eq!(
+            registry.bots()[0].occupant_model(),
+            Some("llama.cpp/local-qwen")
+        );
+
+        // Absent is the common case and must stay valid: it leaves the agent
+        // CLI on whatever it is already configured to use.
+        let unset = BotRegistry::from_toml(prefix).unwrap();
+        assert_eq!(unset.bots()[0].occupant_model(), None);
+
+        for value in ["''", "'   '", "'two words'"] {
+            assert!(
+                BotRegistry::from_toml(&format!("{prefix}model = {value}")).is_err(),
+                "accepted {value}"
             );
         }
     }

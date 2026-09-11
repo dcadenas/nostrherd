@@ -71,7 +71,19 @@ corpus = "/path/to/corpus-repo"
 kind = "opencode"
 allowed_requesters = [] # anyone who can reach and mention you
 # operator_session = "your-private-kelpie-session"
+# model = "llama.cpp/local-qwen"
 ```
+
+`model` is optional and names the model this bot's occupant runs on, spelled
+the way its agent CLI spells it. Omit it and the CLI stays on its own
+configured default, which is how every bot behaved before this field existed.
+The host passes the value straight through to the backend and does not check it
+against a list of known models: only the CLI knows what it accepts. It must be
+one whitespace-free token, because it is forwarded as a single argument.
+
+Use it to give one bot a different model from the rest of your agents —
+including a local OpenAI-compatible server — without moving the agent CLI's
+global default, which would move every other agent on the machine with it.
 
 An absent or empty requester list admits anyone who can reach the channel and
 p-tag the operator. A non-empty list is exact in addition to the operator; list

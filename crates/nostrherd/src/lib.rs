@@ -54,6 +54,9 @@ pub struct OccupantLaunch {
     /// this differently, so the host stores and replays it exactly as Herdr
     /// reported it and never parses it.
     pub backend_session: Option<String>,
+    /// Model the backend should run this occupant on, in the backend's own
+    /// spelling. Absent leaves the agent CLI on its configured default.
+    pub model: Option<String>,
 }
 
 /// Short trusted body used only to finish `kelpie start --tell`.
@@ -476,6 +479,20 @@ impl KelpieClient {
         }
         if let Some(backend_session) = &launch.backend_session {
             arguments.extend(["--session".to_owned(), backend_session.clone()]);
+        }
+        // Kelpie forwards each `--arg` to the agent CLI verbatim, so the model
+        // reaches the backend as `--model <name>` in its own argv rather than
+        // through a shell. Passing `--requested-model` as well records the
+        // intent in Kelpie's own records; it does not select anything.
+        if let Some(model) = &launch.model {
+            arguments.extend([
+                "--requested-model".to_owned(),
+                model.clone(),
+                "--arg".to_owned(),
+                "--model".to_owned(),
+                "--arg".to_owned(),
+                model.clone(),
+            ]);
         }
         let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
         let output = self.invoke(&arguments, bootstrap.as_bytes())?;
@@ -1018,6 +1035,22 @@ mod tests {
         }
     }
 
+    fn started_occupant_receipt() -> Value {
+        serde_json::json!({
+            "logical_agent_id": "occupant-agent",
+            "incarnation_id": "occupant-incarnation",
+            "runtime_start": {
+                "operation_id": "start-operation",
+                "outcome": "succeeded"
+            },
+            "initial_message": {
+                "message_id": "tell-id",
+                "operation_id": "tell-operation",
+                "outcome": "accepted"
+            }
+        })
+    }
+
     fn success(result: &Value) -> CommandOutput {
         CommandOutput {
             success: true,
@@ -1173,6 +1206,7 @@ mod tests {
                     timeout_ms: 90_000,
                     logical_agent_id: None,
                     backend_session: None,
+                    model: None,
                 },
                 OCCUPANT_BOOTSTRAP,
                 None,
@@ -1206,6 +1240,75 @@ mod tests {
             ]
         );
         assert_eq!(calls[0].1, OCCUPANT_BOOTSTRAP.as_bytes());
+    }
+
+    #[test]
+    fn a_configured_model_reaches_the_backend_as_its_own_argv_entry() {
+        let runner = Arc::new(FakeRunner::new([success(&started_occupant_receipt())]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        client
+            .start_occupant(
+                &OccupantLaunch {
+                    name: "bot-foobar".to_owned(),
+                    pane_id: "w1:p4".to_owned(),
+                    terminal_id: "term-4".to_owned(),
+                    backend: "opencode".to_owned(),
+                    cwd: PathBuf::from("/corpus"),
+                    timeout_ms: 90_000,
+                    logical_agent_id: None,
+                    backend_session: None,
+                    model: Some("llama.cpp/local-qwen".to_owned()),
+                },
+                OCCUPANT_BOOTSTRAP,
+                None,
+            )
+            .expect("start occupant");
+
+        let calls = runner.calls.lock().expect("calls lock");
+        let argv = &calls[0].0;
+        // `--arg --model --arg <name>` is how Kelpie forwards a flag to the
+        // agent CLI. The two `--arg` entries must stay adjacent and in order,
+        // or the backend receives a flag with no value.
+        let model_flag = argv
+            .windows(4)
+            .position(|window| window == ["--arg", "--model", "--arg", "llama.cpp/local-qwen"]);
+        assert!(model_flag.is_some(), "{argv:?}");
+        assert!(
+            argv.windows(2)
+                .any(|window| window == ["--requested-model", "llama.cpp/local-qwen"]),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn an_unset_model_leaves_the_backend_on_its_own_default() {
+        let runner = Arc::new(FakeRunner::new([success(&started_occupant_receipt())]));
+        let client = KelpieClient::with_runner(Arc::clone(&runner));
+        client
+            .start_occupant(
+                &OccupantLaunch {
+                    name: "bot-foobar".to_owned(),
+                    pane_id: "w1:p4".to_owned(),
+                    terminal_id: "term-4".to_owned(),
+                    backend: "opencode".to_owned(),
+                    cwd: PathBuf::from("/corpus"),
+                    timeout_ms: 90_000,
+                    logical_agent_id: None,
+                    backend_session: None,
+                    model: None,
+                },
+                OCCUPANT_BOOTSTRAP,
+                None,
+            )
+            .expect("start occupant");
+
+        let calls = runner.calls.lock().expect("calls lock");
+        let argv = &calls[0].0;
+        assert!(!argv.iter().any(|entry| *entry == "--model"), "{argv:?}");
+        assert!(
+            !argv.iter().any(|entry| *entry == "--requested-model"),
+            "{argv:?}"
+        );
     }
 
     #[test]
