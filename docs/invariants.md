@@ -46,11 +46,12 @@ output refusals do not publish or echo the body, and that each refusal feeds bac
 to the occupant. Finals fail terminally; progress and tells are acknowledged.
 
 The host contract and snapshot blocks MUST be idempotent and MUST preserve
-author-owned text and `AGENTS.md` (D55). D70 requires the contract to name the
-watch grammar; the same tests cover that text:
+author-owned text and `AGENTS.md` (D55):
 `startup_contract_preserves_author_text_and_refreshes_both_blocks_idempotently`,
 `startup_creates_missing_blocks_and_fills_the_shipped_template`, and
 `malformed_startup_markers_leave_the_file_untouched`.
+D70's watch-grammar text is asserted by
+`startup_contract_preserves_author_text_and_refreshes_both_blocks_idempotently`.
 The advice path MUST follow the running installation:
 `conduct_path_follows_the_running_installation_not_the_build_directory`.
 

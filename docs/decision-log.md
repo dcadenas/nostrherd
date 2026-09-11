@@ -1553,10 +1553,12 @@ trigger can arm one, or how. That knowledge only survived inside the
 The host-managed contract block names the v1 grammar, rewritten from
 the binary on every start (D63): create `watch <64-hex-pubkey[,64-hex-pubkey...]>
 [here] [kind 9|40002] [cooldown <minutes>] [expires <minutes>] [max <fires>]`,
-cancel `cancel watch <64-hex-pubkey>`. Authors are hex pubkeys known in
-advance; v1 has no name lookup and no wildcard. Defaults remain one fire
-and a 30-minute cooldown. The host still evaluates the watch; the occupant
-runs only on a match.
+cancel `cancel watch <64-hex-pubkey>`. Cancel of one author on a multi-author
+watch cancels the whole watch. Authors are hex pubkeys known in advance;
+v1 has no name lookup and no wildcard. A declaration with no explicit
+expiry or fire limit defaults to one fire; cooldown defaults to 30 minutes.
+The arming request is an ordinary trigger ask. After that the host
+evaluates the watch; a match arrives as a typed watch wake.
 
 This documents an existing capability. It does not add presence, a
 member-set selector, or a new refresh trigger.
