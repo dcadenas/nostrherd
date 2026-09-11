@@ -92,7 +92,7 @@ you are willing to speak as.
 ## Install
 
 ```bash
-cargo install --git https://github.com/dcadenas/nostrherd --tag v0.1.0-alpha.15
+cargo install --git https://github.com/dcadenas/nostrherd --tag v0.1.0-alpha.16
 ```
 
 That puts `nostrherd` on your `PATH` and is the whole installation. The
