@@ -6,6 +6,26 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.21
+
+- Conversation memory is removed. Alpha.20 stored the backend's own session
+  token and replayed it on a restart, but the replay never reached the agent
+  CLI: Kelpie's `--session` names the Herdr session, not the backend
+  conversation, so a replacement started a fresh conversation anyway. A
+  replacement occupant now recovers the outstanding question through the
+  open ask, and rebuilds context from the channel snapshot, `nostrherd
+  search`, and its corpus files.
+
+- A question that cannot be started is now told to the person who asked.
+  After ten minutes of failed dispatch the turn becomes `failed`, the
+  hourglass reaction comes off, the operator gets the reason, and the
+  channel gets one fixed reply: "I couldn't start my session to answer
+  this. The operator has been notified and will follow up." Previously that
+  failure was invisible to the requester until the operator noticed.
+
+  **Action**: none. The unused `backend_session` column is dropped on
+  upgrade; existing sessions, turns, and history are kept.
+
 ## 0.1.0-alpha.20
 
 - If an occupant process dies with a turn still open, its replacement now
