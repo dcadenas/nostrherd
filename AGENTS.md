@@ -43,6 +43,30 @@ Any issue that touches relay, occupants, or SPEC flows MUST
 use `skills/local-relay/SKILL.md` and `tools/local-relay`. Throwaway
 keys only. Never `nostr-personal` or `buzz-acp`.
 
+Before claiming new host, relay, or occupant behavior works, run it
+against the local Docker relay (`groups_relay`) with a real host and a
+real occupant. Unit tests and fakes cannot show what another live system
+does at the moment you read it.
+
+- `tools/local-relay up` starts the relay and the throwaway envchain
+  namespaces.
+- If the live host already owns the Kelpie waiter `nostrherd`, start an
+  isolated daemon first: `kelpied --database PATH --socket PATH`. Run the
+  scratch host with `KELPIE_SOCKET=PATH`. Never fight the live host for
+  its waiter.
+- Add the peer to the channel before triggering:
+  `env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz channels add-member
+  --channel CHANNEL --pubkey PEER --role member`.
+- Trigger as the peer: `./tools/local-relay trigger --content TEXT`.
+- Read the relay back:
+  `env -u BUZZ_AUTH_TAG envchain nostrherd-proof buzz messages get
+  --channel CHANNEL --limit 50`.
+- Close every Herdr workspace the scratch host allocated, then run
+  `tools/local-relay down`.
+- For the repeatable whole-system proof, read the "Dispatch identity
+  (issue 82)" section of `docs/testing.md` before running the
+  `dispatch_proof` fixture.
+
 ## Quality gates
 
 ```bash
