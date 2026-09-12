@@ -137,6 +137,26 @@ impl OccupantPaneAllocator for HerdrPaneAllocator {
             .and_then(claimed_pane))
     }
 
+    fn recorded_session(&self, pane: &OccupantPane) -> Result<Option<String>, Self::Error> {
+        let output = self
+            .runner
+            .run(
+                &["pane".to_owned(), "get".to_owned(), pane.pane_id.clone()],
+                &[],
+            )
+            .map_err(HerdrError::Io)?;
+        if !output.success {
+            return Err(HerdrError::Rejected {
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        let receipt: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            HerdrError::InvalidReceipt(format!("herdr pane get was not JSON: {error}"))
+        })?;
+        Ok(pane_backend_session(&receipt))
+    }
+
     fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error> {
         // Closing the root pane closes the workspace it was created with.
         let output = self
@@ -208,12 +228,23 @@ fn claimed_pane(agent: &Value) -> Option<ClaimedPane> {
             pane_id: pane_id.to_owned(),
             terminal_id: terminal_id.to_owned(),
         },
-        backend_session: agent
-            .pointer("/agent_session/value")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned),
+        backend_session: backend_session_value(agent),
     })
+}
+
+fn pane_backend_session(receipt: &Value) -> Option<String> {
+    receipt
+        .pointer("/result/pane")
+        .or_else(|| receipt.pointer("/pane"))
+        .and_then(backend_session_value)
+}
+
+fn backend_session_value(value: &Value) -> Option<String> {
+    value
+        .pointer("/agent_session/value")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
 }
 
 fn occupant_pane(receipt: &Value) -> Result<OccupantPane, HerdrError> {
@@ -433,5 +464,139 @@ mod tests {
             .allocate("bot-foobar", Path::new("/corpus"))
             .expect_err("invalid");
         assert!(error.to_string().contains("herdr workspace create"));
+    }
+
+    fn agent_list(agents: &serde_json::Value) -> CommandOutput {
+        CommandOutput {
+            success: true,
+            status: "exit status: 0".to_owned(),
+            stdout: serde_json::to_vec(&serde_json::json!({
+                "id": "cli:agent:list",
+                "result": { "agents": agents }
+            }))
+            .expect("json"),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn live_opencode_agent(name: &str, cwd: &str, session: Option<&str>) -> serde_json::Value {
+        let mut agent = serde_json::json!({
+            "name": name,
+            "pane_id": "w1VS:p1",
+            "terminal_id": "term_65b4bb0fe052885",
+            "cwd": cwd,
+        });
+        if let Some(session) = session {
+            agent["agent_session"] = serde_json::json!({
+                "agent": "opencode",
+                "kind": "id",
+                "source": "herdr:opencode",
+                "value": session
+            });
+        }
+        agent
+    }
+
+    #[test]
+    fn claimed_reads_the_live_agent_session_value() {
+        let runner = FakeRunner::new([agent_list(&serde_json::json!([live_opencode_agent(
+            "bot-eng-prs",
+            "/home/daniel/code/botserver-bot",
+            Some("ses_f698cf453ffeEM47keYhtXmYWJ"),
+        )]))]);
+        let claimed = HerdrPaneAllocator::with_runner(runner)
+            .claimed("bot-eng-prs", Path::new("/home/daniel/code/botserver-bot"))
+            .expect("claimed")
+            .expect("found");
+        assert_eq!(
+            claimed.backend_session.as_deref(),
+            Some("ses_f698cf453ffeEM47keYhtXmYWJ")
+        );
+    }
+
+    #[test]
+    fn claimed_ignores_a_name_held_in_another_corpus() {
+        let runner = FakeRunner::new([agent_list(&serde_json::json!([live_opencode_agent(
+            "bot-eng-prs",
+            "/other/corpus",
+            Some("ses_other"),
+        )]))]);
+        let claimed = HerdrPaneAllocator::with_runner(runner)
+            .claimed("bot-eng-prs", Path::new("/home/daniel/code/botserver-bot"))
+            .expect("claimed");
+        assert_eq!(claimed, None);
+    }
+
+    #[test]
+    fn claimed_treats_a_missing_agent_session_as_none() {
+        let runner = FakeRunner::new([agent_list(&serde_json::json!([live_opencode_agent(
+            "bot-eng-prs",
+            "/corpus",
+            None,
+        )]))]);
+        let claimed = HerdrPaneAllocator::with_runner(runner)
+            .claimed("bot-eng-prs", Path::new("/corpus"))
+            .expect("claimed")
+            .expect("found");
+        assert_eq!(claimed.backend_session, None);
+    }
+
+    #[test]
+    fn recorded_session_reads_pane_get_agent_session_value() {
+        let runner = FakeRunner::new([CommandOutput {
+            success: true,
+            status: "exit status: 0".to_owned(),
+            stdout: serde_json::to_vec(&serde_json::json!({
+                "id": "cli:pane:get",
+                "result": {
+                    "pane": {
+                        "pane_id": "w1VS:p1",
+                        "terminal_id": "term_65b4bb0fe052885",
+                        "agent_session": {
+                            "agent": "opencode",
+                            "kind": "id",
+                            "source": "herdr:opencode",
+                            "value": "ses_f698cf453ffeEM47keYhtXmYWJ"
+                        }
+                    }
+                }
+            }))
+            .expect("json"),
+            stderr: Vec::new(),
+        }]);
+        let session = HerdrPaneAllocator::with_runner(runner)
+            .recorded_session(&OccupantPane {
+                pane_id: "w1VS:p1".to_owned(),
+                terminal_id: "term_65b4bb0fe052885".to_owned(),
+            })
+            .expect("session");
+        assert_eq!(session.as_deref(), Some("ses_f698cf453ffeEM47keYhtXmYWJ"));
+    }
+
+    #[test]
+    fn recorded_session_treats_a_crashed_pane_without_agent_session_as_none() {
+        let runner = FakeRunner::new([CommandOutput {
+            success: true,
+            status: "exit status: 0".to_owned(),
+            stdout: serde_json::to_vec(&serde_json::json!({
+                "id": "cli:pane:get",
+                "result": {
+                    "pane": {
+                        "pane_id": "w1VR:p1",
+                        "terminal_id": "term_dead",
+                        "agent_status": "unknown"
+                    }
+                }
+            }))
+            .expect("json"),
+            stderr: Vec::new(),
+        }]);
+        let session = HerdrPaneAllocator::with_runner(runner)
+            .recorded_session(&OccupantPane {
+                pane_id: "w1VR:p1".to_owned(),
+                terminal_id: "term_dead".to_owned(),
+            })
+            .expect("session");
+        assert_eq!(session, None);
     }
 }

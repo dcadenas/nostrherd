@@ -1706,3 +1706,26 @@ An empty or multi-word value is a configuration error, the same way
 
 Requested model is intent, not attribution. Kelpie records it; it is not
 evidence of what actually ran, and this decision does not add any.
+
+## D74. A replacement occupant is pointed at the still-open ask
+
+Status: accepted
+
+Amends D25 and D62. A session with an open turn still owes that Kelpie ask.
+The host already continues the same logical agent and does not send a second
+ask. The bootstrap tell nevertheless said "wait for Kelpie asks", so a
+replacement occupant sat idle until the 45-minute reminder or an operator
+tell.
+
+When the host starts a replacement for a session that has an open turn, the
+bootstrap tell names that ask and tells the occupant to recover it with
+`kelpie ask-info <id>` and answer with `kelpie reply --final`. It MUST NOT
+create a second ask: the obligation is still open and still owed by the
+same logical agent. First starts and queued-turn recovery keep the original
+bootstrap; those paths send the ask themselves.
+
+The host persists the backend session from the pane it just started, via
+`herdr pane get`, not from `herdr agent list` by name. A crashed pane drops
+out of the agent list and loses `agent_session`, so the token has to be
+stored while the runtime is up. A missing token MUST NOT overwrite one
+already stored. Kelpie's start receipt does not carry the token.

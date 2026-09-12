@@ -19,8 +19,9 @@ use crate::relay::ChannelAudience;
 use crate::snapshot::{place_snapshot_relpath, refresh_place_snapshot, render_place_snapshot};
 use crate::watch::{parse_watch_command, WatchCommand, WatchFire, WatchRecord};
 use crate::{
-    occupant_bootstrap, AskDelivery, HostRepository, HostWaiter, IndexedRelayEvent, KelpieClient,
-    KelpieError, NewTurn, OccupantLaunch, SessionRecord, TurnState,
+    occupant_bootstrap, occupant_bootstrap_open_ask, AskDelivery, HostRepository, HostWaiter,
+    IndexedRelayEvent, KelpieClient, KelpieError, NewTurn, OccupantLaunch, SessionRecord,
+    TurnState,
 };
 
 /// Kelpie readiness wait for a newly started occupant.
@@ -66,6 +67,17 @@ pub trait OccupantPaneAllocator {
     ///
     /// Returns an error when Herdr cannot be asked.
     fn claimed(&self, session_name: &str, cwd: &Path) -> Result<Option<ClaimedPane>, Self::Error>;
+
+    /// Backend session Herdr recorded for a pane we already hold.
+    ///
+    /// After a start the pane is known. `claimed` looks up live agents by name,
+    /// and a crashed pane drops out of that list without an `agent_session`, so
+    /// the token has to be read from this pane while the runtime is up (D74).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Herdr cannot describe the pane.
+    fn recorded_session(&self, pane: &OccupantPane) -> Result<Option<String>, Self::Error>;
 }
 
 /// A Herdr pane already holding a session's name.
@@ -1132,9 +1144,9 @@ where
             .repository
             .turns_for_session(&session.bot_id, &session.channel_id)
             .map_err(ActorError::Repository)?;
-        if !turns.iter().any(|turn| turn.state == TurnState::Open) {
+        let Some(open) = turns.iter().find(|turn| turn.state == TurnState::Open) else {
             return Ok(false);
-        }
+        };
         // An open turn means an occupant owes an answer. If the name still
         // answers, nothing was lost and the occupant is already working on it.
         match kelpie.occupant_whoami(&session.session_name) {
@@ -1144,7 +1156,13 @@ where
         }
         let snapshot_relpath = self.refresh_snapshot(session)?;
         let mut session = session.clone();
-        self.restart_occupant(kelpie, waiter, &mut session, &snapshot_relpath)?;
+        self.restart_occupant(
+            kelpie,
+            waiter,
+            &mut session,
+            &snapshot_relpath,
+            open.ask_id.as_deref(),
+        )?;
         Ok(true)
     }
 
@@ -1314,7 +1332,7 @@ where
         }
         // Nothing answers to the name: it has never been started, or its
         // runtime ended. Either way, converge and ask again.
-        self.restart_occupant(kelpie, waiter, session, snapshot_relpath)?;
+        self.restart_occupant(kelpie, waiter, session, snapshot_relpath, None)?;
         waiter
             .ask_named(&session.session_name, None, body, idempotency_key)
             .map_err(ActorError::Kelpie)
@@ -1337,6 +1355,7 @@ where
         waiter: &HostWaiter<'_>,
         session: &mut SessionRecord,
         snapshot_relpath: &str,
+        open_ask: Option<&str>,
     ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
         // Nothing answers to the name, so a pane still holding it in this
         // bot's corpus is one whose occupant has gone: a live one would have
@@ -1363,6 +1382,7 @@ where
             session,
             snapshot_relpath,
             continue_as.as_deref(),
+            open_ask,
         )?;
         // A new runtime never inherits the old one's renew schedule.
         session.renew_id = None;
@@ -1395,6 +1415,7 @@ where
         session: &mut SessionRecord,
         snapshot_relpath: &str,
         continue_as: Option<&str>,
+        open_ask: Option<&str>,
     ) -> Result<crate::StartedOccupant, ActorError<R::Error>> {
         let pane = self
             .panes
@@ -1415,22 +1436,25 @@ where
             "nostrherd:{}:{}:{}",
             session.session_name, pane.pane_id, pane.terminal_id
         );
+        let bootstrap = match open_ask {
+            Some(ask_id) => occupant_bootstrap_open_ask(snapshot_relpath, ask_id),
+            None => occupant_bootstrap(snapshot_relpath),
+        };
         let started = kelpie
             .start_occupant_with_receipt(
                 &launch,
-                &occupant_bootstrap(snapshot_relpath),
+                &bootstrap,
                 Some(waiter.identity().logical_agent_id()),
                 Some(&key),
                 &mut None,
             )
             .map_err(ActorError::Kelpie)?;
-        // Herdr records the backend's session only once the runtime is up, so
-        // read it back now rather than from the start receipt.
-        if let Ok(Some(claimed)) = self
-            .panes
-            .claimed(&session.session_name, self.bot.corpus_path())
-        {
-            session.backend_session = claimed.backend_session;
+        // Kelpie's start receipt does not carry the backend session. Read it
+        // from the pane we just started. A missing token must not wipe one
+        // already stored: crashed husks report none, and a race on the new
+        // pane would otherwise forget a token the next restart still needs.
+        if let Ok(Some(token)) = self.panes.recorded_session(&pane) {
+            session.backend_session = Some(token);
         }
         self.repository
             .save_session(session)
@@ -1653,6 +1677,10 @@ mod tests {
         released: Mutex<Vec<String>>,
         /// Panes Herdr already reports as holding a session's name.
         claims: Mutex<std::collections::HashMap<String, ClaimedPane>>,
+        /// Backend session Herdr would report for the next allocated pane.
+        next_pane_session: Mutex<Option<String>>,
+        /// Backend session per allocated pane id, as `herdr pane get` would.
+        pane_sessions: Mutex<std::collections::HashMap<String, String>>,
     }
 
     impl OccupantPaneAllocator for Arc<FakePanes> {
@@ -1661,10 +1689,17 @@ mod tests {
         fn allocate(&self, session_name: &str, cwd: &Path) -> Result<OccupantPane, Self::Error> {
             let mut calls = self.calls.lock().expect("calls");
             calls.push((session_name.to_owned(), cwd.to_path_buf()));
-            Ok(OccupantPane {
+            let pane = OccupantPane {
                 pane_id: format!("w2:p{}", calls.len()),
                 terminal_id: format!("term-{}", calls.len() + 8),
-            })
+            };
+            if let Some(session) = self.next_pane_session.lock().expect("next session").clone() {
+                self.pane_sessions
+                    .lock()
+                    .expect("pane sessions")
+                    .insert(pane.pane_id.clone(), session);
+            }
+            Ok(pane)
         }
 
         fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error> {
@@ -1685,6 +1720,15 @@ mod tests {
                 .lock()
                 .expect("claims")
                 .get(session_name)
+                .cloned())
+        }
+
+        fn recorded_session(&self, pane: &OccupantPane) -> Result<Option<String>, Self::Error> {
+            Ok(self
+                .pane_sessions
+                .lock()
+                .expect("pane sessions")
+                .get(&pane.pane_id)
                 .cloned())
         }
     }
@@ -2034,6 +2078,8 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             released: Mutex::new(Vec::new()),
             claims: Mutex::new(std::collections::HashMap::new()),
+            next_pane_session: Mutex::new(None),
+            pane_sessions: Mutex::new(std::collections::HashMap::new()),
         });
         let kelpie = KelpieClient::with_runner(Arc::clone(&runner));
         let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
@@ -2371,6 +2417,70 @@ mod tests {
         assert!(ask_has_context(&ask.1));
         assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
         assert_eq!(WAITER_NAME, "nostrherd");
+        assert_eq!(session.backend_session, None);
+    }
+
+    #[test]
+    fn first_start_does_not_record_a_backend_session_when_herdr_has_not_reported_one() {
+        let (mut actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        actor
+            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
+            .expect("asked");
+        let session = actor
+            .repository
+            .session(actor.bot.id(), "ab12cd34-5678-90ab-cdef-0123456789ab")
+            .expect("session")
+            .expect("bound");
+        assert_eq!(session.backend_session, None);
+    }
+
+    #[test]
+    fn first_start_records_the_backend_session_herdr_reports_on_the_new_pane() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+        ]);
+        panes
+            .next_pane_session
+            .lock()
+            .expect("next session")
+            .replace("ses_f7e8c964affeaMRRyT4cVoGkDc".to_owned());
+        let waiter = kelpie.register_waiter().expect("waiter");
+        actor
+            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
+            .expect("asked");
+        let session = actor
+            .repository
+            .session(actor.bot.id(), "ab12cd34-5678-90ab-cdef-0123456789ab")
+            .expect("session")
+            .expect("bound");
+        assert_eq!(
+            session.backend_session.as_deref(),
+            Some("ses_f7e8c964affeaMRRyT4cVoGkDc")
+        );
+        let start = call(&runner.calls.lock().expect("calls"), "start")
+            .0
+            .clone();
+        assert!(
+            !start
+                .windows(2)
+                .any(|pair| pair == ["--session", "ses_f7e8c964affeaMRRyT4cVoGkDc"]),
+            "the first start has no prior token to replay: {start:?}"
+        );
     }
 
     #[test]
@@ -2647,6 +2757,70 @@ mod tests {
         assert!(continued[0]
             .windows(2)
             .any(|pair| pair == ["--name", "bot-foobar"]));
+        let recovered = last_call(&runner.calls.lock().expect("calls"), "start")
+            .1
+            .clone();
+        assert_eq!(
+            recovered,
+            crate::occupant_bootstrap_open_ask(".nostrherd/places/bot-foobar.md", "ask-1")
+                .into_bytes()
+        );
+    }
+
+    #[test]
+    fn a_gone_open_occupant_replays_the_stored_backend_session() {
+        let (mut actor, kelpie, runner, panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            start(),
+            renewed(),
+            whoami(),
+            asked("ask-1"),
+            failure("conflict", "no ready agent for alias bot-foobar"),
+            dead_claimants(),
+            start(),
+            renewed(),
+        ]);
+        panes
+            .next_pane_session
+            .lock()
+            .expect("next session")
+            .replace("ses_f7e8c964affeaMRRyT4cVoGkDc".to_owned());
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+        actor
+            .handle_trigger(&kelpie, &waiter, &trigger)
+            .expect("asked");
+        panes.next_pane_session.lock().expect("next session").take();
+
+        assert_eq!(
+            actor
+                .recover_open_occupants(&kelpie, &waiter)
+                .expect("recover"),
+            1
+        );
+
+        let session = actor
+            .repository
+            .session(actor.bot.id(), &trigger.channel_id)
+            .expect("session")
+            .expect("bound");
+        assert_eq!(
+            session.backend_session.as_deref(),
+            Some("ses_f7e8c964affeaMRRyT4cVoGkDc"),
+            "a missing token on the replacement pane must not wipe the stored one"
+        );
+        let recovered = last_call(&runner.calls.lock().expect("calls"), "start")
+            .0
+            .clone();
+        assert!(
+            recovered
+                .windows(2)
+                .any(|pair| pair == ["--session", "ses_f7e8c964affeaMRRyT4cVoGkDc"]),
+            "the replacement must resume the backend conversation: {recovered:?}"
+        );
+        assert_eq!(ask_count(&runner), 1);
     }
 
     /// A name Kelpie has never seen starts fresh, carrying no identity.

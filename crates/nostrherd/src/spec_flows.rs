@@ -66,6 +66,10 @@ impl OccupantPaneAllocator for Arc<FakePanes> {
             .get(session_name)
             .cloned())
     }
+
+    fn recorded_session(&self, _pane: &OccupantPane) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug)]

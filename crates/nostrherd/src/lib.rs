@@ -91,6 +91,17 @@ pub fn occupant_bootstrap(snapshot_relpath: &str) -> String {
     format!("{OCCUPANT_BOOTSTRAP}\nChannel snapshot: {snapshot_relpath}")
 }
 
+/// Bootstrap tell that points a replacement occupant at a still-open ask.
+///
+/// The ask is already owed by this logical agent. A second ask would duplicate
+/// the obligation, so the occupant recovers the existing one (D74).
+#[must_use]
+pub fn occupant_bootstrap_open_ask(snapshot_relpath: &str, ask_id: &str) -> String {
+    format!(
+        "Read startup.md before answering. You still owe Kelpie ask {ask_id}. Recover it with `kelpie ask-info {ask_id}` and answer with `kelpie reply --final`. Do not wait for a new ask.\nChannel snapshot: {snapshot_relpath}"
+    )
+}
+
 /// Resume prompt stored on the occupant renew policy.
 #[must_use]
 pub fn occupant_renew_resume(snapshot_relpath: &str, progress_relpath: &str) -> String {
