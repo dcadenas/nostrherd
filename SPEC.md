@@ -223,6 +223,15 @@ Kelpie reconnect, reusing the prepared event id (D48). After a bounded
 number of retries the attempt is abandoned, the operator is noticed,
 and an open turn MUST become `failed` so queued work can resume.
 
+A queued Turn whose occupant cannot be started or asked MUST become
+`failed` once a bounded dispatch time has passed (D75). The host MUST
+remove the trigger's `⏳` marker, notice the operator with the reason,
+and publish exactly one host-posted notice replying to the trigger with
+fixed text that carries no failure class, path, or transport detail. A
+host-initiated wake has no requester and publishes no notice. A Turn
+cancelled or replaced before the bound MUST NOT publish one. The bound
+MUST survive a host restart.
+
 The host MUST add a NIP-25 kind-7 `⏳` on the triggering EventId when
 a turn becomes queued or open, and MUST remove it (NIP-09 kind 5 of
 that kind-7) when work on that EventId ends: posted, failed, or a

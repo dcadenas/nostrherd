@@ -1285,27 +1285,27 @@ cases:
 Any state not listed resolves to one of those three. A bot is never left without
 a session, so an unanticipated state costs a restart, never a silent stop.
 
-The host also persists the backend session token and replays it on a restart.
-Today it starts a fresh backend every time and rebuilds continuity from
-`.nostrherd/sessions/<session>/` (D56), so a restart loses whatever the occupant
-had not written down. Kelpie's `start` and `adopt` both accept `--session`, and
-Herdr already records the token per pane, so the identity can carry its
-conversation forward instead of reconstructing it.
+Amendment (alpha.21): the host stores no conversation memory, and the name is
+the address rather than the identity. Alpha.20 added `sessions.backend_session`
+and replayed it on a restart, but the replay never reached the backend:
+Kelpie's `--session NAME` is the Herdr session field and is not part of
+`agent.start`, so only `--arg` reaches the agent CLI. The reference is also not
+knowable when the host looked: Herdr publishes `agent_session` only after the
+backend consumes its first prompt. Kelpie's model confirms that a backend
+conversation would have to be keyed by the logical agent id and delivered as
+backend argv; a name reused for a create-new agent inherits nothing. That memory
+is removed. A replacement starts a fresh conversation and recovers the turn
+through the open ask, the place snapshot, `nostrherd search`, and the corpus
+files (D56), which is what the user sees anyway.
 
-That token is opaque. `kind` is free-form configuration naming any installed
-agent CLI, not an enum, and each backend spells its session differently:
-opencode reports `ses_f7e8c964affeaMRRyT4cVoGkDc`, Claude a UUID, both under the
-same `agent_session.value` field. The host stores and replays the token exactly
-as given and never parses, formats, or validates it. Backend-specific knowledge
-stays in Kelpie and Herdr, which is where the backend is actually launched.
-
-Two upstream gaps block the middle of this, and neither is worked around here.
-Kelpie cannot resolve a name to the identity to continue: `who` returns a
-conflict rather than an answer once several dead claimants hold a name, and
-`adopt` requires an exact pane and terminal, so `handoff --replace` cannot be
-reached from a name alone. Herdr cannot release a name from a pane whose agent
-has died: `agent rename <pane> --clear` answers `agent_not_found`, leaving
-`herdr pane close` as the only release and a husk holding the name until then.
+Two upstream gaps remain for a caller that wants continuation, and neither is
+worked around here. Kelpie cannot resolve a name to the identity to continue:
+`who` returns a conflict rather than an answer once several dead claimants hold
+a name, and `adopt` requires an exact pane and terminal, so `handoff --replace`
+cannot be reached from a name alone. Herdr cannot release a name from a pane
+whose agent has died: `agent rename <pane> --clear` answers `agent_not_found`,
+leaving `herdr pane close` as the only release and a husk holding the name until
+then.
 
 Pane hygiene is a consequence of this entry, not a premise of it. Nothing in the
 host has ever called `OccupantPaneAllocator::release`; every occupant ever
@@ -1724,8 +1724,42 @@ create a second ask: the obligation is still open and still owed by the
 same logical agent. First starts and queued-turn recovery keep the original
 bootstrap; those paths send the ask themselves.
 
-The host persists the backend session from the pane it just started, via
-`herdr pane get`, not from `herdr agent list` by name. A crashed pane drops
-out of the agent list and loses `agent_session`, so the token has to be
-stored while the runtime is up. A missing token MUST NOT overwrite one
-already stored. Kelpie's start receipt does not carry the token.
+The name-and-corpus lookup MUST refuse to choose when more than one live
+pane holds that name in the same corpus. Closing the wrong pane would end a
+working occupant.
+
+Amendment (alpha.21): alpha.20's backend-session persistence is removed; see
+D62's amendment. The host keeps no conversation memory, so the open-ask
+recovery above is the whole replacement story: the occupant starts a fresh
+conversation and recovers the outstanding question from the ask itself, the
+channel context, and its corpus files.
+
+## D75. A queued turn that cannot be dispatched fails and tells its requester
+
+Status: accepted
+
+Dispatch failures had no terminal state. When the host could not start or
+ask the occupant, the queued turn retried on the 30-second tick forever,
+the requester saw only the `⏳` marker, and the operator found out hours
+later. Only publish failures were bounded.
+
+A queued turn now records the time of its first dispatch failure
+(`turns.dispatch_failed_at`, added by migration). Ten minutes later, on a
+tick where dispatch fails again, the host fails the turn (`queued` to
+`failed`, a new legal transition), removes the `⏳` marker, notices the
+operator with the reason (journal, plus the private operator session when
+configured), and records one hardcoded notice replying to the trigger
+through the normal durable outbound path under a synthetic key
+(`failure:<event_id>`). The notice retries with the same prepared event id
+and is abandoned by the existing retry cap, so a relay outage cannot loop
+it. A host wake has no requester and publishes no notice. A turn cancelled
+or replaced before the bound never publishes one. The stamp is persisted,
+so a host restart does not reset the bound.
+
+The channel text is fixed and carries no failure class, path, or transport
+detail: `I couldn't start my session to answer this. The operator has been
+notified and will follow up.` The detailed reason stays in the operator
+notice.
+
+Replacement-occupant failures for an already-open turn are out of scope:
+the ask is open, and Kelpie's reminder plus the open-ask recovery cover it.

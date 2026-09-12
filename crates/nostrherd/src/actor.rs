@@ -11,8 +11,8 @@ use nostrherd_domain::{Bot, BotId, EventId, SessionName};
 use crate::ask_body::{render_ask_body, AskContextCursor, TriggerRequest};
 use crate::inbox::InboxDelivery;
 use crate::outbox::{
-    self, InFlightReaction, InboxAction, NoopInFlightReaction, OutboundPublisher, OutboxError,
-    OutputGuard,
+    self, InFlightReaction, InboxAction, NoopInFlightReaction, OutboundAttempt, OutboundPublisher,
+    OutboxError, OutputGuard,
 };
 use crate::progress::{self, NoopProgressRelay, ProgressRelay};
 use crate::relay::ChannelAudience;
@@ -26,6 +26,17 @@ use crate::{
 
 /// Kelpie readiness wait for a newly started occupant.
 const OCCUPANT_START_TIMEOUT_MS: u64 = 90_000;
+
+/// How long a queued turn may fail to dispatch before it is failed and its
+/// requester is told (D75).
+const DISPATCH_FAILURE_BOUND_SECS: i64 = 600;
+
+/// Hardcoded requester notice when a queued turn cannot be started (D75).
+///
+/// Fixed text: no paths, failure classes, or transport internals may reach a
+/// shared channel.
+const DISPATCH_FAILURE_NOTICE: &str =
+    "I couldn't start my session to answer this. The operator has been notified and will follow up.";
 
 /// Herdr pane created for one session occupant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,29 +74,15 @@ pub trait OccupantPaneAllocator {
     /// the ownership proof: a pane holding the name somewhere else belongs to
     /// something that is not this bot, and is never touched (D62).
     ///
-    /// # Errors
-    ///
-    /// Returns an error when Herdr cannot be asked.
-    fn claimed(&self, session_name: &str, cwd: &Path) -> Result<Option<ClaimedPane>, Self::Error>;
-
-    /// Backend session Herdr recorded for a pane we already hold.
-    ///
-    /// After a start the pane is known. `claimed` looks up live agents by name,
-    /// and a crashed pane drops out of that list without an `agent_session`, so
-    /// the token has to be read from this pane while the runtime is up (D74).
+    /// More than one live pane in the same corpus with that name cannot be
+    /// resolved by name alone. The caller must refuse to choose rather than
+    /// risk closing a working occupant's pane (D74).
     ///
     /// # Errors
     ///
-    /// Returns an error when Herdr cannot describe the pane.
-    fn recorded_session(&self, pane: &OccupantPane) -> Result<Option<String>, Self::Error>;
-}
-
-/// A Herdr pane already holding a session's name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimedPane {
-    pub pane: OccupantPane,
-    /// The backend's own session token, when Herdr recorded one for this pane.
-    pub backend_session: Option<String>,
+    /// Returns an error when Herdr cannot be asked, or when the name is
+    /// ambiguous within the corpus.
+    fn claimed(&self, session_name: &str, cwd: &Path) -> Result<Option<OccupantPane>, Self::Error>;
 }
 
 /// One triggering event ready for the bot actor.
@@ -895,6 +892,16 @@ where
             match self.ask_oldest_queued(kelpie, waiter, &session.channel_id) {
                 Ok(()) => return Ok(Some(TriggerOutcome::Asked)),
                 Err(error) => {
+                    let now = crate::unix_now().map_err(ActorError::Snapshot)?;
+                    let since = self
+                        .repository
+                        .record_dispatch_failure(&queued.event_id, now)
+                        .map_err(ActorError::Repository)?;
+                    if since.is_some_and(|since| {
+                        now.saturating_sub(since) >= DISPATCH_FAILURE_BOUND_SECS
+                    }) {
+                        self.fail_undispatched_turn(waiter, &session, queued)?;
+                    }
                     if first_error.is_none() {
                         first_error = Some(error);
                     }
@@ -905,6 +912,52 @@ where
             Some(error) => Err(error),
             None => Ok(None),
         }
+    }
+
+    /// Fail a queued turn whose dispatch bound was exceeded and tell its
+    /// requester once with fixed text (D75).
+    ///
+    /// The operator notice carries no more than the rest of the log already
+    /// has; the channel never sees a failure class or path.
+    fn fail_undispatched_turn(
+        &mut self,
+        waiter: &HostWaiter<'_>,
+        session: &SessionRecord,
+        turn: &crate::TurnRecord,
+    ) -> Result<(), ActorError<R::Error>> {
+        if !self
+            .repository
+            .fail_queued_turn(&turn.event_id)
+            .map_err(ActorError::Repository)?
+        {
+            return Ok(());
+        }
+        let reason = format!(
+            "queued turn {} for {} could not be dispatched within {}s; failing it",
+            turn.event_id.as_str(),
+            session.session_name,
+            DISPATCH_FAILURE_BOUND_SECS
+        );
+        eprintln!("operator notice: {reason}");
+        if let Some(operator) = self.bot.operator_session() {
+            if let Err(error) = waiter.tell_occupant(operator, &reason) {
+                eprintln!("operator notice: private failure notice to {operator} failed: {error}");
+            }
+        }
+        if let Some(event_id) = turn.publish_reply_to_event_id.as_ref() {
+            self.reactions.remove(event_id);
+            let mut attempt = OutboundAttempt::new(
+                format!("failure:{}", turn.event_id.as_str()),
+                DISPATCH_FAILURE_NOTICE,
+                turn.channel_id.clone(),
+            );
+            attempt.reply_to_event_id = Some(event_id.clone());
+            attempt.bot_id = Some(turn.bot_id.clone());
+            self.repository
+                .save_outbound_attempt(&attempt)
+                .map_err(ActorError::Repository)?;
+        }
+        Ok(())
     }
 
     fn handle_edit(
@@ -1360,17 +1413,14 @@ where
         // Nothing answers to the name, so a pane still holding it in this
         // bot's corpus is one whose occupant has gone: a live one would have
         // answered. Reclaim that seat, or Herdr refuses the start with
-        // `agent_name_taken`, and carry its backend session forward.
-        if let Some(claimed) = self
+        // `agent_name_taken`.
+        if let Some(husk) = self
             .panes
             .claimed(&session.session_name, self.bot.corpus_path())
             .map_err(|error| ActorError::Pane(error.to_string()))?
         {
-            if session.backend_session.is_none() {
-                session.backend_session.clone_from(&claimed.backend_session);
-            }
             self.panes
-                .release(&claimed.pane)
+                .release(&husk)
                 .map_err(|error| ActorError::Pane(error.to_string()))?;
         }
         let continue_as = kelpie
@@ -1429,7 +1479,6 @@ where
             cwd: self.bot.corpus_path().to_path_buf(),
             timeout_ms: OCCUPANT_START_TIMEOUT_MS,
             logical_agent_id: continue_as.map(str::to_owned),
-            backend_session: session.backend_session.clone(),
             model: self.bot.occupant_model().map(str::to_owned),
         };
         let key = format!(
@@ -1449,13 +1498,6 @@ where
                 &mut None,
             )
             .map_err(ActorError::Kelpie)?;
-        // Kelpie's start receipt does not carry the backend session. Read it
-        // from the pane we just started. A missing token must not wipe one
-        // already stored: crashed husks report none, and a race on the new
-        // pane would otherwise forget a token the next restart still needs.
-        if let Ok(Some(token)) = self.panes.recorded_session(&pane) {
-            session.backend_session = Some(token);
-        }
         self.repository
             .save_session(session)
             .map_err(ActorError::Repository)?;
@@ -1643,7 +1685,6 @@ fn ensure_bot_session<R: HostRepository>(
         bot_id: bot.id().clone(),
         channel_id: channel_id.to_owned(),
         session_name: name.as_str().to_owned(),
-        backend_session: None,
         renew_id: None,
         ask_context_event_id: None,
         ask_context_created_at: None,
@@ -1676,11 +1717,7 @@ mod tests {
         calls: Mutex<Vec<(String, PathBuf)>>,
         released: Mutex<Vec<String>>,
         /// Panes Herdr already reports as holding a session's name.
-        claims: Mutex<std::collections::HashMap<String, ClaimedPane>>,
-        /// Backend session Herdr would report for the next allocated pane.
-        next_pane_session: Mutex<Option<String>>,
-        /// Backend session per allocated pane id, as `herdr pane get` would.
-        pane_sessions: Mutex<std::collections::HashMap<String, String>>,
+        claims: Mutex<std::collections::HashMap<String, OccupantPane>>,
     }
 
     impl OccupantPaneAllocator for Arc<FakePanes> {
@@ -1689,17 +1726,10 @@ mod tests {
         fn allocate(&self, session_name: &str, cwd: &Path) -> Result<OccupantPane, Self::Error> {
             let mut calls = self.calls.lock().expect("calls");
             calls.push((session_name.to_owned(), cwd.to_path_buf()));
-            let pane = OccupantPane {
+            Ok(OccupantPane {
                 pane_id: format!("w2:p{}", calls.len()),
                 terminal_id: format!("term-{}", calls.len() + 8),
-            };
-            if let Some(session) = self.next_pane_session.lock().expect("next session").clone() {
-                self.pane_sessions
-                    .lock()
-                    .expect("pane sessions")
-                    .insert(pane.pane_id.clone(), session);
-            }
-            Ok(pane)
+            })
         }
 
         fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error> {
@@ -1714,21 +1744,12 @@ mod tests {
             &self,
             session_name: &str,
             _cwd: &Path,
-        ) -> Result<Option<ClaimedPane>, Self::Error> {
+        ) -> Result<Option<OccupantPane>, Self::Error> {
             Ok(self
                 .claims
                 .lock()
                 .expect("claims")
                 .get(session_name)
-                .cloned())
-        }
-
-        fn recorded_session(&self, pane: &OccupantPane) -> Result<Option<String>, Self::Error> {
-            Ok(self
-                .pane_sessions
-                .lock()
-                .expect("pane sessions")
-                .get(&pane.pane_id)
                 .cloned())
         }
     }
@@ -2078,8 +2099,6 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             released: Mutex::new(Vec::new()),
             claims: Mutex::new(std::collections::HashMap::new()),
-            next_pane_session: Mutex::new(None),
-            pane_sessions: Mutex::new(std::collections::HashMap::new()),
         });
         let kelpie = KelpieClient::with_runner(Arc::clone(&runner));
         let repository = SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
@@ -2104,7 +2123,6 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: channel_id.to_owned(),
                 session_name: "bot-foobar".to_owned(),
-                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -2152,7 +2170,6 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: channel_id.to_owned(),
                 session_name: "bot-foobar".to_owned(),
-                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -2417,70 +2434,6 @@ mod tests {
         assert!(ask_has_context(&ask.1));
         assert_eq!(waiter.identity().logical_agent_id(), "waiter-agent");
         assert_eq!(WAITER_NAME, "nostrherd");
-        assert_eq!(session.backend_session, None);
-    }
-
-    #[test]
-    fn first_start_does_not_record_a_backend_session_when_herdr_has_not_reported_one() {
-        let (mut actor, kelpie, _runner, _panes) = actor([
-            adopt(),
-            unbound(),
-            no_claimants(),
-            start(),
-            renewed(),
-            whoami(),
-            asked("ask-1"),
-        ]);
-        let waiter = kelpie.register_waiter().expect("waiter");
-        actor
-            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
-            .expect("asked");
-        let session = actor
-            .repository
-            .session(actor.bot.id(), "ab12cd34-5678-90ab-cdef-0123456789ab")
-            .expect("session")
-            .expect("bound");
-        assert_eq!(session.backend_session, None);
-    }
-
-    #[test]
-    fn first_start_records_the_backend_session_herdr_reports_on_the_new_pane() {
-        let (mut actor, kelpie, runner, panes) = actor([
-            adopt(),
-            unbound(),
-            no_claimants(),
-            start(),
-            renewed(),
-            whoami(),
-            asked("ask-1"),
-        ]);
-        panes
-            .next_pane_session
-            .lock()
-            .expect("next session")
-            .replace("ses_f7e8c964affeaMRRyT4cVoGkDc".to_owned());
-        let waiter = kelpie.register_waiter().expect("waiter");
-        actor
-            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
-            .expect("asked");
-        let session = actor
-            .repository
-            .session(actor.bot.id(), "ab12cd34-5678-90ab-cdef-0123456789ab")
-            .expect("session")
-            .expect("bound");
-        assert_eq!(
-            session.backend_session.as_deref(),
-            Some("ses_f7e8c964affeaMRRyT4cVoGkDc")
-        );
-        let start = call(&runner.calls.lock().expect("calls"), "start")
-            .0
-            .clone();
-        assert!(
-            !start
-                .windows(2)
-                .any(|pair| pair == ["--session", "ses_f7e8c964affeaMRRyT4cVoGkDc"]),
-            "the first start has no prior token to replay: {start:?}"
-        );
     }
 
     #[test]
@@ -2767,9 +2720,11 @@ mod tests {
         );
     }
 
+    /// The host keeps no conversation memory, so a replacement never carries
+    /// a backend session argument of any spelling (D74 amendment).
     #[test]
-    fn a_gone_open_occupant_replays_the_stored_backend_session() {
-        let (mut actor, kelpie, runner, panes) = actor([
+    fn a_replacement_start_carries_no_conversation_memory() {
+        let (mut actor, kelpie, runner, _panes) = actor([
             adopt(),
             unbound(),
             no_claimants(),
@@ -2782,17 +2737,10 @@ mod tests {
             start(),
             renewed(),
         ]);
-        panes
-            .next_pane_session
-            .lock()
-            .expect("next session")
-            .replace("ses_f7e8c964affeaMRRyT4cVoGkDc".to_owned());
         let waiter = kelpie.register_waiter().expect("waiter");
-        let trigger = work('a', "bot: hello", None);
         actor
-            .handle_trigger(&kelpie, &waiter, &trigger)
+            .handle_trigger(&kelpie, &waiter, &work('a', "bot: hello", None))
             .expect("asked");
-        panes.next_pane_session.lock().expect("next session").take();
 
         assert_eq!(
             actor
@@ -2801,24 +2749,18 @@ mod tests {
             1
         );
 
-        let session = actor
-            .repository
-            .session(actor.bot.id(), &trigger.channel_id)
-            .expect("session")
-            .expect("bound");
-        assert_eq!(
-            session.backend_session.as_deref(),
-            Some("ses_f7e8c964affeaMRRyT4cVoGkDc"),
-            "a missing token on the replacement pane must not wipe the stored one"
-        );
         let recovered = last_call(&runner.calls.lock().expect("calls"), "start")
             .0
             .clone();
         assert!(
-            recovered
+            !recovered
                 .windows(2)
                 .any(|pair| pair == ["--session", "ses_f7e8c964affeaMRRyT4cVoGkDc"]),
-            "the replacement must resume the backend conversation: {recovered:?}"
+            "no conversation token may be replayed: {recovered:?}"
+        );
+        assert!(
+            !recovered.iter().any(|argument| argument == "--arg"),
+            "no backend resume argument is forwarded: {recovered:?}"
         );
         assert_eq!(ask_count(&runner), 1);
     }
@@ -2899,7 +2841,7 @@ mod tests {
     /// is one whose occupant has gone. Leaving it there makes Herdr refuse the
     /// start with `agent_name_taken`, which stopped a channel for four hours.
     #[test]
-    fn a_pane_still_holding_the_name_is_reclaimed_and_its_session_carried_over() {
+    fn a_pane_still_holding_the_name_is_reclaimed_before_the_start() {
         let (mut actor, kelpie, runner, panes) = actor([
             adopt(),
             unbound(),
@@ -2911,12 +2853,9 @@ mod tests {
         ]);
         panes.claims.lock().expect("claims").insert(
             "bot-foobar".to_owned(),
-            ClaimedPane {
-                pane: OccupantPane {
-                    pane_id: "w1EW:p1".to_owned(),
-                    terminal_id: "term_65b128dba71fc2e".to_owned(),
-                },
-                backend_session: Some("ses_f7e8c964affeaMRRyT4cVoGkDc".to_owned()),
+            OccupantPane {
+                pane_id: "w1EW:p1".to_owned(),
+                terminal_id: "term_65b128dba71fc2e".to_owned(),
             },
         );
         let waiter = kelpie.register_waiter().expect("waiter");
@@ -2934,10 +2873,8 @@ mod tests {
             .0
             .clone();
         assert!(
-            start
-                .windows(2)
-                .any(|pair| pair == ["--session", "ses_f7e8c964affeaMRRyT4cVoGkDc"]),
-            "the reclaimed pane's backend session is replayed verbatim: {start:?}"
+            !start.iter().any(|argument| argument == "--session"),
+            "the host replays no conversation: {start:?}"
         );
     }
 
@@ -3024,6 +2961,121 @@ mod tests {
         assert_eq!(continued_starts(&runner).len(), 1);
     }
 
+    /// A dispatch failure inside the bound stays queued and tells no one; the
+    /// next tick retries (D75).
+    #[test]
+    fn dispatch_failure_inside_the_bound_keeps_the_turn_queued() {
+        let (mut actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            failure("rejected", "occupant start refused"),
+            unbound(),
+            no_claimants(),
+            failure("rejected", "occupant start refused"),
+        ]);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+        assert!(actor.handle_trigger(&kelpie, &waiter, &trigger).is_err());
+
+        assert!(actor.resume_queued(&kelpie, &waiter).is_err());
+
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &trigger.channel_id)
+            .expect("turns");
+        assert_eq!(turns[0].state, TurnState::Queued);
+        assert!(actor
+            .repository
+            .pending_outbound_attempts(actor.bot.id())
+            .expect("attempts")
+            .is_empty());
+    }
+
+    /// Past the bound the turn fails once, the marker clears, and exactly one
+    /// hardcoded notice is recorded as a reply to the trigger (D75).
+    #[test]
+    fn dispatch_failure_past_the_bound_fails_the_turn_and_posts_one_notice() {
+        let recorded = Arc::new(crate::outbox::RecordingInFlightReaction::default());
+        let (actor, kelpie, _runner, _panes) = actor([
+            adopt(),
+            unbound(),
+            no_claimants(),
+            failure("rejected", "occupant start refused"),
+            unbound(),
+            no_claimants(),
+            failure("rejected", "occupant start refused"),
+        ]);
+        let mut actor = actor.with_reactions(Arc::clone(&recorded) as Arc<dyn InFlightReaction>);
+        let waiter = kelpie.register_waiter().expect("waiter");
+        let trigger = work('a', "bot: hello", None);
+        assert!(actor.handle_trigger(&kelpie, &waiter, &trigger).is_err());
+        actor.repository.execute_batch_for_test(&format!(
+            "UPDATE turns SET dispatch_failed_at = 1 WHERE event_id = '{}'",
+            trigger.event_id.as_str()
+        ));
+
+        assert!(actor.resume_queued(&kelpie, &waiter).is_err());
+
+        let turns = actor
+            .repository
+            .turns_for_session(actor.bot.id(), &trigger.channel_id)
+            .expect("turns");
+        assert_eq!(turns[0].state, TurnState::Failed);
+        assert_eq!(turns[0].ask_id, None);
+        assert_eq!(
+            recorded.removes.lock().expect("removes").as_slice(),
+            [trigger.event_id.as_str()]
+        );
+        let attempts = actor
+            .repository
+            .pending_outbound_attempts(actor.bot.id())
+            .expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].ask_id,
+            format!("failure:{}", trigger.event_id.as_str())
+        );
+        assert_eq!(attempts[0].body, DISPATCH_FAILURE_NOTICE);
+        assert_eq!(
+            attempts[0].reply_to_event_id.as_ref(),
+            Some(&trigger.event_id)
+        );
+
+        actor
+            .retry_outbound(
+                &kelpie,
+                &waiter,
+                &FakeOutbound {
+                    event_id: "e".repeat(64),
+                },
+            )
+            .expect("publish notice");
+        assert!(
+            actor
+                .repository
+                .pending_outbound_attempts(actor.bot.id())
+                .expect("attempts")
+                .is_empty(),
+            "an accepted notice leaves no pending attempt"
+        );
+        assert_eq!(
+            actor
+                .resume_queued(&kelpie, &waiter)
+                .expect("no queued work"),
+            None,
+            "a failed turn is never dispatched again"
+        );
+        assert_eq!(
+            actor
+                .repository
+                .turns_for_session(actor.bot.id(), &trigger.channel_id)
+                .expect("turns")[0]
+                .state,
+            TurnState::Failed
+        );
+    }
+
     #[test]
     fn whoami_invalid_receipt_does_not_start_a_replacement() {
         let (mut actor, kelpie, runner, panes) = actor([
@@ -3087,7 +3139,6 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: first_channel.to_owned(),
                 session_name: "bot-aaa".to_owned(),
-                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -3114,7 +3165,6 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: second_channel.to_owned(),
                 session_name: "bot-foobar".to_owned(),
-                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -3339,7 +3389,6 @@ mod tests {
                 bot_id: actor.bot.id().clone(),
                 channel_id: trigger.channel_id.clone(),
                 session_name: "bot-foobar".to_owned(),
-                backend_session: None,
                 renew_id: None,
                 ask_context_event_id: None,
                 ask_context_created_at: None,
@@ -3409,7 +3458,6 @@ mod tests {
                     bot_id: actor.bot.id().clone(),
                     channel_id: channel.to_owned(),
                     session_name: format!("bot-{display}"),
-                    backend_session: None,
                     renew_id: None,
                     ask_context_event_id: None,
                     ask_context_created_at: None,

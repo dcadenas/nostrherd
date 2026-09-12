@@ -145,10 +145,12 @@ fn migrate_to_name_identity(connection: &Connection) -> rusqlite::Result<()> {
              DROP TABLE IF EXISTS occupant_starts;",
         )?;
     }
-    add_column_if_missing(
-        connection,
-        "ALTER TABLE sessions ADD COLUMN backend_session TEXT",
-    )
+    // Alpha.20 added this column; the persistence it held never resumed a
+    // conversation, so the host does not store one (D74 amendment).
+    if column_exists(connection, "sessions", "backend_session")? {
+        connection.execute("ALTER TABLE sessions DROP COLUMN backend_session", [])?;
+    }
+    Ok(())
 }
 
 fn migrate_turn_wake_columns(connection: &Connection) -> rusqlite::Result<()> {
@@ -200,6 +202,10 @@ fn run_column_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE outbound_attempts ADD COLUMN prepared_created_at INTEGER",
     )?;
     add_column_if_missing(connection, "ALTER TABLE turns ADD COLUMN opened_at INTEGER")?;
+    add_column_if_missing(
+        connection,
+        "ALTER TABLE turns ADD COLUMN dispatch_failed_at INTEGER",
+    )?;
     migrate_turn_wake_columns(connection)?;
     add_column_if_missing(
         connection,
@@ -411,7 +417,6 @@ impl SqliteRepository {
                    channel_id TEXT NOT NULL,
                    session_name TEXT NOT NULL UNIQUE,
                    renew_id TEXT,
-                   backend_session TEXT,
                    ask_context_event_id TEXT CHECK(
                        ask_context_event_id IS NULL OR length(ask_context_event_id) = 64
                    ),
@@ -581,18 +586,17 @@ impl SqliteRepository {
 
     fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         let stored_bot_id: String = row.get(0)?;
-        let event_id: Option<String> = row.get(5)?;
+        let event_id: Option<String> = row.get(4)?;
         Ok(SessionRecord {
             bot_id: parse_bot_id(&stored_bot_id, 0)?,
             channel_id: row.get(1)?,
             session_name: row.get(2)?,
             renew_id: row.get(3)?,
-            backend_session: row.get(4)?,
             ask_context_event_id: event_id
                 .as_deref()
-                .map(|value| parse_event_id(value, 5))
+                .map(|value| parse_event_id(value, 4))
                 .transpose()?,
-            ask_context_created_at: row.get(6)?,
+            ask_context_created_at: row.get(5)?,
         })
     }
 
@@ -774,12 +778,11 @@ impl HostRepository for SqliteRepository {
     fn save_session(&mut self, session: &SessionRecord) -> Result<(), Self::Error> {
         self.connection.execute(
             "INSERT INTO sessions(
-                 bot_id, channel_id, session_name, renew_id, backend_session,
+                 bot_id, channel_id, session_name, renew_id,
                  ask_context_event_id, ask_context_created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(bot_id, channel_id) DO UPDATE SET
                  session_name = excluded.session_name,
-                 backend_session = excluded.backend_session,
                  renew_id = excluded.renew_id,
                  ask_context_event_id = excluded.ask_context_event_id,
                  ask_context_created_at = excluded.ask_context_created_at",
@@ -788,7 +791,6 @@ impl HostRepository for SqliteRepository {
                 session.channel_id,
                 session.session_name,
                 session.renew_id,
-                session.backend_session,
                 session.ask_context_event_id.as_ref().map(EventId::as_str),
                 session.ask_context_created_at,
             ],
@@ -803,7 +805,7 @@ impl HostRepository for SqliteRepository {
     ) -> Result<Option<SessionRecord>, Self::Error> {
         self.connection
             .query_row(
-                "SELECT bot_id, channel_id, session_name, renew_id, backend_session,
+                "SELECT bot_id, channel_id, session_name, renew_id,
                         ask_context_event_id, ask_context_created_at
                  FROM sessions WHERE bot_id = ?1 AND channel_id = ?2",
                 params![bot_id.as_str(), channel_id],
@@ -815,7 +817,7 @@ impl HostRepository for SqliteRepository {
     fn session_by_name(&self, session_name: &str) -> Result<Option<SessionRecord>, Self::Error> {
         self.connection
             .query_row(
-                "SELECT bot_id, channel_id, session_name, renew_id, backend_session,
+                "SELECT bot_id, channel_id, session_name, renew_id,
                         ask_context_event_id, ask_context_created_at
                  FROM sessions WHERE session_name = ?1",
                 [session_name],
@@ -926,6 +928,43 @@ impl HostRepository for SqliteRepository {
     fn cancel_queued_turn(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
         let Some(transition) = TurnTransition::parse(TurnState::Queued, TurnState::Cancelled)
         else {
+            return Ok(false);
+        };
+        let changed = self.connection.execute(
+            "UPDATE turns SET state = ?1
+             WHERE event_id = ?2 AND state = ?3",
+            params![
+                transition.to_state().as_str(),
+                event_id.as_str(),
+                transition.from_state().as_str()
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    fn record_dispatch_failure(
+        &mut self,
+        event_id: &EventId,
+        now: i64,
+    ) -> Result<Option<i64>, Self::Error> {
+        self.connection.execute(
+            "UPDATE turns SET dispatch_failed_at = ?2
+             WHERE event_id = ?1 AND state = 'queued' AND dispatch_failed_at IS NULL",
+            params![event_id.as_str(), now],
+        )?;
+        self.connection
+            .query_row(
+                "SELECT dispatch_failed_at FROM turns
+                 WHERE event_id = ?1 AND state = 'queued'",
+                [event_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    fn fail_queued_turn(&mut self, event_id: &EventId) -> Result<bool, Self::Error> {
+        let Some(transition) = TurnTransition::parse(TurnState::Queued, TurnState::Failed) else {
             return Ok(false);
         };
         let changed = self.connection.execute(
@@ -1086,7 +1125,7 @@ impl HostRepository for SqliteRepository {
     fn sessions_with_pending_turns(&self) -> Result<Vec<SessionRecord>, Self::Error> {
         let mut statement = self.connection.prepare(
             "SELECT DISTINCT s.bot_id, s.channel_id, s.session_name,
-                    s.renew_id, s.backend_session,
+                    s.renew_id,
                     s.ask_context_event_id, s.ask_context_created_at
              FROM sessions AS s
              JOIN turns AS t ON t.session_id = s.id
@@ -1656,7 +1695,6 @@ mod tests {
             channel_id: channel_id.to_owned(),
             session_name: format!("{bot_id}-channel"),
             renew_id: Some("renew-id".to_owned()),
-            backend_session: None,
             ask_context_event_id: None,
             ask_context_created_at: None,
         }
@@ -1798,7 +1836,7 @@ mod tests {
         migrate_to_name_identity(&connection).expect("migration");
 
         assert!(!column_exists(&connection, "sessions", "occupant_logical_id").unwrap());
-        assert!(column_exists(&connection, "sessions", "backend_session").unwrap());
+        assert!(!column_exists(&connection, "sessions", "backend_session").unwrap());
         let starts: i64 = connection
             .query_row(
                 "SELECT count(*) FROM sqlite_master
@@ -1810,28 +1848,34 @@ mod tests {
         assert_eq!(starts, 0, "recorded start attempts must not survive");
     }
 
+    /// Alpha.20 stored a backend session here; it never resumed a
+    /// conversation, so the host drops the column and keeps the session.
     #[test]
-    fn the_backend_session_survives_a_round_trip_verbatim() {
-        let mut repository =
-            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
-                .expect("repository");
-        let bot = BotId::new("bot").unwrap();
-        let mut record = session(&bot, "channel");
-        // Opaque to the host: an opencode token here, a UUID for another
-        // backend. Stored and replayed exactly as Herdr reported it.
-        record.backend_session = Some("ses_f7e8c964affeaMRRyT4cVoGkDc".to_owned());
-        repository.save_session(&record).expect("save");
+    fn opening_an_alpha20_database_drops_the_backend_session_column() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                     id INTEGER PRIMARY KEY,
+                     bot_id TEXT NOT NULL,
+                     channel_id TEXT NOT NULL,
+                     session_name TEXT NOT NULL UNIQUE,
+                     renew_id TEXT,
+                     backend_session TEXT,
+                     UNIQUE(bot_id, channel_id)
+                 ) STRICT;
+                 INSERT INTO sessions(bot_id, channel_id, session_name, backend_session)
+                 VALUES ('bot', 'a-channel', 'bot-a-channel', 'ses_f7e8c964');",
+            )
+            .expect("alpha.20 schema");
 
-        let reloaded = repository
-            .session_by_name(&record.session_name)
-            .expect("query")
-            .expect("session");
+        migrate_to_name_identity(&connection).expect("migration");
 
-        assert_eq!(
-            reloaded.backend_session.as_deref(),
-            Some("ses_f7e8c964affeaMRRyT4cVoGkDc")
-        );
-        assert_eq!(reloaded.renew_id, record.renew_id);
+        assert!(!column_exists(&connection, "sessions", "backend_session").unwrap());
+        let name: String = connection
+            .query_row("SELECT session_name FROM sessions", [], |row| row.get(0))
+            .expect("session survives");
+        assert_eq!(name, "bot-a-channel");
     }
 
     #[test]
@@ -2107,6 +2151,49 @@ mod tests {
         assert_eq!(turns[0].sequence, first.sequence);
         assert_eq!(turns[0].state, TurnState::Posted);
         assert_eq!(turns[1].state, TurnState::Open);
+    }
+
+    /// The dispatch failure stamp is written once, survives re-reads, and the
+    /// turn can be failed from `queued` only (D75).
+    #[test]
+    fn dispatch_failure_stamps_once_and_fails_only_queued_turns() {
+        let mut repository =
+            SqliteRepository::from_connection(Connection::open_in_memory().unwrap())
+                .expect("repository");
+        let bot_id = BotId::new("bot").expect("bot id");
+        let channel_id = "ab12cd34-5678-90ab-cdef-0123456789ab";
+        repository
+            .save_session(&session(&bot_id, channel_id))
+            .unwrap();
+        let turn = turn(&bot_id, channel_id, 'a');
+        repository.enqueue_turn(&turn).unwrap();
+
+        assert_eq!(
+            repository
+                .record_dispatch_failure(&turn.event_id, 100)
+                .unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            repository
+                .record_dispatch_failure(&turn.event_id, 200)
+                .unwrap(),
+            Some(100),
+            "the first failure starts the bound"
+        );
+        assert!(repository.fail_queued_turn(&turn.event_id).unwrap());
+        assert_eq!(
+            repository.active_turn_for_event(&turn.event_id).unwrap(),
+            None
+        );
+        assert_eq!(
+            repository
+                .record_dispatch_failure(&turn.event_id, 300)
+                .unwrap(),
+            None,
+            "a failed turn records no dispatch failure"
+        );
+        assert!(!repository.fail_queued_turn(&turn.event_id).unwrap());
     }
 
     #[test]

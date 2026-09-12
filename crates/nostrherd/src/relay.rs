@@ -1440,6 +1440,18 @@ mod tests {
             unreachable!()
         }
 
+        fn record_dispatch_failure(
+            &mut self,
+            _event_id: &EventId,
+            _now: i64,
+        ) -> Result<Option<i64>, Self::Error> {
+            unreachable!()
+        }
+
+        fn fail_queued_turn(&mut self, _event_id: &EventId) -> Result<bool, Self::Error> {
+            unreachable!()
+        }
+
         fn claim_turn_for_publish(&mut self, _ask_id: &str) -> Result<bool, Self::Error> {
             unreachable!()
         }

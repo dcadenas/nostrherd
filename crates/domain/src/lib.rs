@@ -503,18 +503,20 @@ pub struct TurnTransition {
 impl TurnTransition {
     /// Parse a legal turn-state change.
     ///
-    /// Queued work may open or cancel. Open work may post, fail, or cancel.
-    /// Terminal states have no outgoing transition. There is no `publishing`
-    /// state.
+    /// Queued work may open, fail (dispatch bound exceeded), or cancel. Open
+    /// work may post, fail, or cancel. Terminal states have no outgoing
+    /// transition. There is no `publishing` state.
     #[must_use]
     pub fn parse(from: TurnState, to: TurnState) -> Option<Self> {
         let allowed = matches!(
             (from, to),
-            (TurnState::Queued, TurnState::Open | TurnState::Cancelled)
-                | (
-                    TurnState::Open,
-                    TurnState::Posted | TurnState::Failed | TurnState::Cancelled
-                )
+            (
+                TurnState::Queued,
+                TurnState::Open | TurnState::Failed | TurnState::Cancelled
+            ) | (
+                TurnState::Open,
+                TurnState::Posted | TurnState::Failed | TurnState::Cancelled
+            )
         );
         allowed.then_some(Self { from, to })
     }
@@ -1018,6 +1020,7 @@ mod tests {
     fn turn_transition_parses_legal_changes_only() {
         let allowed = [
             (TurnState::Queued, TurnState::Open),
+            (TurnState::Queued, TurnState::Failed),
             (TurnState::Queued, TurnState::Cancelled),
             (TurnState::Open, TurnState::Posted),
             (TurnState::Open, TurnState::Failed),

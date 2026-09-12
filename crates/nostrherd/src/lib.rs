@@ -47,13 +47,6 @@ pub struct OccupantLaunch {
     pub cwd: PathBuf,
     pub timeout_ms: u64,
     pub logical_agent_id: Option<String>,
-    /// The backend's own session token, replayed so a restart continues the
-    /// conversation instead of rebuilding it from the corpus (D62).
-    ///
-    /// Opaque. `kind` names any installed agent CLI, and each backend spells
-    /// this differently, so the host stores and replays it exactly as Herdr
-    /// reported it and never parses it.
-    pub backend_session: Option<String>,
     /// Model the backend should run this occupant on, in the backend's own
     /// spelling. Absent leaves the agent CLI on its configured default.
     pub model: Option<String>,
@@ -488,9 +481,7 @@ impl KelpieClient {
         if let Some(logical_agent_id) = &launch.logical_agent_id {
             arguments.extend(["--logical-id".to_owned(), logical_agent_id.clone()]);
         }
-        if let Some(backend_session) = &launch.backend_session {
-            arguments.extend(["--session".to_owned(), backend_session.clone()]);
-        }
+
         // Kelpie forwards each `--arg` to the agent CLI verbatim, so the model
         // reaches the backend as `--model <name>` in its own argv rather than
         // through a shell. Passing `--requested-model` as well records the
@@ -1216,7 +1207,6 @@ mod tests {
                     cwd: PathBuf::from("/corpus"),
                     timeout_ms: 90_000,
                     logical_agent_id: None,
-                    backend_session: None,
                     model: None,
                 },
                 OCCUPANT_BOOTSTRAP,
@@ -1267,7 +1257,6 @@ mod tests {
                     cwd: PathBuf::from("/corpus"),
                     timeout_ms: 90_000,
                     logical_agent_id: None,
-                    backend_session: None,
                     model: Some("llama.cpp/local-qwen".to_owned()),
                 },
                 OCCUPANT_BOOTSTRAP,
@@ -1305,7 +1294,6 @@ mod tests {
                     cwd: PathBuf::from("/corpus"),
                     timeout_ms: 90_000,
                     logical_agent_id: None,
-                    backend_session: None,
                     model: None,
                 },
                 OCCUPANT_BOOTSTRAP,
@@ -1592,8 +1580,6 @@ pub struct SessionRecord {
     pub channel_id: String,
     pub session_name: String,
     pub renew_id: Option<String>,
-    /// The backend's own session token, replayed on a restart (D62). Opaque.
-    pub backend_session: Option<String>,
     pub ask_context_event_id: Option<EventId>,
     pub ask_context_created_at: Option<i64>,
 }
@@ -1791,6 +1777,27 @@ pub trait HostRepository {
     ///
     /// Returns an adapter error when the state cannot be persisted.
     fn cancel_queued_turn(&mut self, event_id: &EventId) -> Result<bool, Self::Error>;
+
+    /// Record the first dispatch failure for a queued turn.
+    ///
+    /// Returns the persisted first-failure time so the caller's bound survives
+    /// a host restart. Returns `None` when the event has no queued turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the stamp cannot be written or read.
+    fn record_dispatch_failure(
+        &mut self,
+        event_id: &EventId,
+        now: i64,
+    ) -> Result<Option<i64>, Self::Error>;
+
+    /// Fail a queued turn whose dispatch bound was exceeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error when the state cannot be persisted.
+    fn fail_queued_turn(&mut self, event_id: &EventId) -> Result<bool, Self::Error>;
 
     /// Cancel queued or unclaimed-open work for an edited or deleted trigger.
     ///

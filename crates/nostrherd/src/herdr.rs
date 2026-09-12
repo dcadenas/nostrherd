@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use crate::actor::{ClaimedPane, OccupantPane, OccupantPaneAllocator};
+use crate::actor::{OccupantPane, OccupantPaneAllocator};
 use crate::{CommandRunner, ProcessRunner};
 
 /// Process-backed allocator that creates one Herdr workspace per occupant.
@@ -48,6 +48,8 @@ pub enum HerdrError {
     Rejected { status: String, stderr: String },
     /// Herdr returned JSON without pane and terminal ids.
     InvalidReceipt(String),
+    /// More than one live pane holds the name in this corpus.
+    Ambiguous { session_name: String },
 }
 
 impl fmt::Display for HerdrError {
@@ -61,6 +63,10 @@ impl fmt::Display for HerdrError {
                 write!(formatter, "Herdr exited with {status}: {stderr}; check that Herdr is running and reachable by this host")
             }
             Self::InvalidReceipt(reason) => write!(formatter, "invalid Herdr receipt: {reason}"),
+            Self::Ambiguous { session_name } => write!(
+                formatter,
+                "Herdr reports more than one pane holding {session_name} in this corpus; refusing to choose"
+            ),
         }
     }
 }
@@ -69,7 +75,7 @@ impl std::error::Error for HerdrError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::Rejected { .. } | Self::InvalidReceipt(_) => None,
+            Self::Rejected { .. } | Self::InvalidReceipt(_) | Self::Ambiguous { .. } => None,
         }
     }
 }
@@ -108,7 +114,7 @@ impl OccupantPaneAllocator for HerdrPaneAllocator {
         occupant_pane(&receipt)
     }
 
-    fn claimed(&self, session_name: &str, cwd: &Path) -> Result<Option<ClaimedPane>, Self::Error> {
+    fn claimed(&self, session_name: &str, cwd: &Path) -> Result<Option<OccupantPane>, Self::Error> {
         let cwd = cwd.to_str().ok_or_else(|| {
             HerdrError::InvalidReceipt("occupant corpus path is not valid UTF-8".to_owned())
         })?;
@@ -125,36 +131,28 @@ impl OccupantPaneAllocator for HerdrPaneAllocator {
         let receipt: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
             HerdrError::InvalidReceipt(format!("herdr agent list was not JSON: {error}"))
         })?;
-        Ok(receipt
+        // One pane per name in this corpus. More than one is a state the
+        // caller cannot resolve by name alone, and choosing is worse than
+        // refusing: the loser may be the pane actually in use (D74).
+        let mut matches = receipt
             .pointer("/result/agents")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .find(|agent| {
+            .filter(|agent| {
                 agent.get("name").and_then(Value::as_str) == Some(session_name)
                     && agent.get("cwd").and_then(Value::as_str) == Some(cwd)
             })
-            .and_then(claimed_pane))
-    }
-
-    fn recorded_session(&self, pane: &OccupantPane) -> Result<Option<String>, Self::Error> {
-        let output = self
-            .runner
-            .run(
-                &["pane".to_owned(), "get".to_owned(), pane.pane_id.clone()],
-                &[],
-            )
-            .map_err(HerdrError::Io)?;
-        if !output.success {
-            return Err(HerdrError::Rejected {
-                status: output.status,
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            .filter_map(claimed_pane);
+        let Some(first) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            return Err(HerdrError::Ambiguous {
+                session_name: session_name.to_owned(),
             });
         }
-        let receipt: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
-            HerdrError::InvalidReceipt(format!("herdr pane get was not JSON: {error}"))
-        })?;
-        Ok(pane_backend_session(&receipt))
+        Ok(Some(first))
     }
 
     fn release(&self, pane: &OccupantPane) -> Result<(), Self::Error> {
@@ -217,34 +215,13 @@ pub fn current_pane_with(program: impl AsRef<Path>) -> Result<OccupantPane, Herd
 }
 
 /// Read one `herdr agent list` entry as a pane already holding a name.
-///
-/// The backend session is whatever Herdr recorded for the pane. It is opaque:
-/// backends spell it differently, and the host only carries it back to Kelpie.
-fn claimed_pane(agent: &Value) -> Option<ClaimedPane> {
+fn claimed_pane(agent: &Value) -> Option<OccupantPane> {
     let pane_id = agent.get("pane_id").and_then(Value::as_str)?;
     let terminal_id = agent.get("terminal_id").and_then(Value::as_str)?;
-    Some(ClaimedPane {
-        pane: OccupantPane {
-            pane_id: pane_id.to_owned(),
-            terminal_id: terminal_id.to_owned(),
-        },
-        backend_session: backend_session_value(agent),
+    Some(OccupantPane {
+        pane_id: pane_id.to_owned(),
+        terminal_id: terminal_id.to_owned(),
     })
-}
-
-fn pane_backend_session(receipt: &Value) -> Option<String> {
-    receipt
-        .pointer("/result/pane")
-        .or_else(|| receipt.pointer("/pane"))
-        .and_then(backend_session_value)
-}
-
-fn backend_session_value(value: &Value) -> Option<String> {
-    value
-        .pointer("/agent_session/value")
-        .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
 }
 
 fn occupant_pane(receipt: &Value) -> Result<OccupantPane, HerdrError> {
@@ -479,39 +456,27 @@ mod tests {
         }
     }
 
-    fn live_opencode_agent(name: &str, cwd: &str, session: Option<&str>) -> serde_json::Value {
-        let mut agent = serde_json::json!({
+    fn live_opencode_agent(name: &str, cwd: &str) -> serde_json::Value {
+        serde_json::json!({
             "name": name,
             "pane_id": "w1VS:p1",
             "terminal_id": "term_65b4bb0fe052885",
             "cwd": cwd,
-        });
-        if let Some(session) = session {
-            agent["agent_session"] = serde_json::json!({
-                "agent": "opencode",
-                "kind": "id",
-                "source": "herdr:opencode",
-                "value": session
-            });
-        }
-        agent
+        })
     }
 
     #[test]
-    fn claimed_reads_the_live_agent_session_value() {
+    fn claimed_finds_the_pane_holding_the_name_in_the_corpus() {
         let runner = FakeRunner::new([agent_list(&serde_json::json!([live_opencode_agent(
             "bot-eng-prs",
             "/home/daniel/code/botserver-bot",
-            Some("ses_f698cf453ffeEM47keYhtXmYWJ"),
         )]))]);
         let claimed = HerdrPaneAllocator::with_runner(runner)
             .claimed("bot-eng-prs", Path::new("/home/daniel/code/botserver-bot"))
             .expect("claimed")
             .expect("found");
-        assert_eq!(
-            claimed.backend_session.as_deref(),
-            Some("ses_f698cf453ffeEM47keYhtXmYWJ")
-        );
+        assert_eq!(claimed.pane_id, "w1VS:p1");
+        assert_eq!(claimed.terminal_id, "term_65b4bb0fe052885");
     }
 
     #[test]
@@ -519,7 +484,6 @@ mod tests {
         let runner = FakeRunner::new([agent_list(&serde_json::json!([live_opencode_agent(
             "bot-eng-prs",
             "/other/corpus",
-            Some("ses_other"),
         )]))]);
         let claimed = HerdrPaneAllocator::with_runner(runner)
             .claimed("bot-eng-prs", Path::new("/home/daniel/code/botserver-bot"))
@@ -527,76 +491,22 @@ mod tests {
         assert_eq!(claimed, None);
     }
 
+    /// Two live panes in one corpus holding one name cannot be told apart.
+    ///
+    /// The caller closes a pane before starting, so choosing the wrong one
+    /// would end a working occupant (D74).
     #[test]
-    fn claimed_treats_a_missing_agent_session_as_none() {
-        let runner = FakeRunner::new([agent_list(&serde_json::json!([live_opencode_agent(
-            "bot-eng-prs",
-            "/corpus",
-            None,
-        )]))]);
-        let claimed = HerdrPaneAllocator::with_runner(runner)
+    fn claimed_refuses_two_panes_holding_the_same_name_in_the_same_corpus() {
+        let mut second = live_opencode_agent("bot-eng-prs", "/corpus");
+        second["pane_id"] = serde_json::json!("w1XX:p1");
+        second["terminal_id"] = serde_json::json!("term_husk");
+        let runner = FakeRunner::new([agent_list(&serde_json::json!([
+            live_opencode_agent("bot-eng-prs", "/corpus"),
+            second,
+        ]))]);
+        let error = HerdrPaneAllocator::with_runner(runner)
             .claimed("bot-eng-prs", Path::new("/corpus"))
-            .expect("claimed")
-            .expect("found");
-        assert_eq!(claimed.backend_session, None);
-    }
-
-    #[test]
-    fn recorded_session_reads_pane_get_agent_session_value() {
-        let runner = FakeRunner::new([CommandOutput {
-            success: true,
-            status: "exit status: 0".to_owned(),
-            stdout: serde_json::to_vec(&serde_json::json!({
-                "id": "cli:pane:get",
-                "result": {
-                    "pane": {
-                        "pane_id": "w1VS:p1",
-                        "terminal_id": "term_65b4bb0fe052885",
-                        "agent_session": {
-                            "agent": "opencode",
-                            "kind": "id",
-                            "source": "herdr:opencode",
-                            "value": "ses_f698cf453ffeEM47keYhtXmYWJ"
-                        }
-                    }
-                }
-            }))
-            .expect("json"),
-            stderr: Vec::new(),
-        }]);
-        let session = HerdrPaneAllocator::with_runner(runner)
-            .recorded_session(&OccupantPane {
-                pane_id: "w1VS:p1".to_owned(),
-                terminal_id: "term_65b4bb0fe052885".to_owned(),
-            })
-            .expect("session");
-        assert_eq!(session.as_deref(), Some("ses_f698cf453ffeEM47keYhtXmYWJ"));
-    }
-
-    #[test]
-    fn recorded_session_treats_a_crashed_pane_without_agent_session_as_none() {
-        let runner = FakeRunner::new([CommandOutput {
-            success: true,
-            status: "exit status: 0".to_owned(),
-            stdout: serde_json::to_vec(&serde_json::json!({
-                "id": "cli:pane:get",
-                "result": {
-                    "pane": {
-                        "pane_id": "w1VR:p1",
-                        "terminal_id": "term_dead",
-                        "agent_status": "unknown"
-                    }
-                }
-            }))
-            .expect("json"),
-            stderr: Vec::new(),
-        }]);
-        let session = HerdrPaneAllocator::with_runner(runner)
-            .recorded_session(&OccupantPane {
-                pane_id: "w1VR:p1".to_owned(),
-                terminal_id: "term_dead".to_owned(),
-            })
-            .expect("session");
-        assert_eq!(session, None);
+            .expect_err("ambiguous");
+        assert!(error.to_string().contains("more than one pane"), "{error}");
     }
 }

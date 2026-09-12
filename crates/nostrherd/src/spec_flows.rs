@@ -29,7 +29,7 @@ struct FakePanes {
     calls: Mutex<Vec<(String, PathBuf)>>,
     released: Mutex<Vec<String>>,
     /// Panes Herdr already reports as holding a session's name.
-    claims: Mutex<std::collections::HashMap<String, crate::actor::ClaimedPane>>,
+    claims: Mutex<std::collections::HashMap<String, OccupantPane>>,
 }
 
 impl OccupantPaneAllocator for Arc<FakePanes> {
@@ -58,17 +58,13 @@ impl OccupantPaneAllocator for Arc<FakePanes> {
         &self,
         session_name: &str,
         _cwd: &Path,
-    ) -> Result<Option<crate::actor::ClaimedPane>, Self::Error> {
+    ) -> Result<Option<OccupantPane>, Self::Error> {
         Ok(self
             .claims
             .lock()
             .expect("claims")
             .get(session_name)
             .cloned())
-    }
-
-    fn recorded_session(&self, _pane: &OccupantPane) -> Result<Option<String>, Self::Error> {
-        Ok(None)
     }
 }
 
