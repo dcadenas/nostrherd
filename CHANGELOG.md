@@ -6,6 +6,24 @@ Notable changes per released version, newest first. Versions are the ones
 Entries say what an operator has to do, not what a commit touched. `just
 release` refuses a version with no section here.
 
+## 0.1.0-alpha.20
+
+- If an occupant process dies with a turn still open, its replacement now
+  recovers the unanswered question instead of waiting for a new one. The
+  host points the replacement at the still-open ask with
+  `kelpie ask-info <id>`, and the replacement answers it. The question is
+  never asked twice, so one call still produces exactly one answer. This
+  was the lost turn: the replacement was told to wait for asks, and a
+  still-open ask produces no wake on its own.
+
+- The backend session token is now actually persisted. The host reads it
+  from the pane it just started, so a restarted occupant resumes the
+  agent CLI's own conversation instead of rebuilding it from the corpus,
+  and a read that finds no token no longer erases one already stored.
+
+  **Action**: none. Sessions that already exist pick up a token on their
+  next occupant start.
+
 ## 0.1.0-alpha.19
 
 - A bot may name the model its occupant runs on (D73). Add `model` to its
